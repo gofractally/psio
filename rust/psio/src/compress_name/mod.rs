@@ -4,15 +4,19 @@
 //! * **Method names** ([`method_to_number`], [`number_to_method`],
 //!   [`is_hash_name`]; C++ `psio::detail::method_to_number`, JS
 //!   `nameToNumber`): letters `a`-`z` (case is ignored; a digit or `_`
-//!   reads as a letter's symbol) of any length. A name the coder cannot fit
-//!   in 64 bits becomes a hash of its bytes with bit 56 set, written back
-//!   as `#` and sixteen letters.
+//!   reads as a letter's symbol) of any length. A name the coder cannot
+//!   represent exactly — its number would not decode back to the name —
+//!   becomes a hash of its bytes with bit 56 set, written back as `#` and
+//!   sixteen letters.
 //! * **Identifier names** ([`name_to_number`], [`number_to_name`],
 //!   [`NameId`]; C++ `psio::name_to_number`, `psio::name_id`): `a`-`z`,
 //!   `0`-`9` and `-`, at most 18 characters, not starting with a digit or
-//!   `-`. A name that does not fit is 0; there is no hash form. (As in
-//!   C++, a name with a doubled hyphen is given a number that decodes to
-//!   another text.)
+//!   `-`. A text with no exact code (it does not fit, or it has a doubled
+//!   hyphen) is 0; there is no hash form.
+//!
+//! A number is a name's only if it decodes to the name: both encoders
+//! decode what they encoded. `conformance/name-vectors.json` pins both
+//! coders for every language.
 //!
 //! The two encodings are different tables and are not interchangeable.
 //! Both encoders are `const fn`, so a number can be a constant:
@@ -248,6 +252,125 @@ fn decode<const W: usize, const W1: usize>(
     out
 }
 
+/// The decoder's bit source: the bytes of the number from its low byte,
+/// each from its high bit, and zeros past the 64 (they improve accuracy).
+#[derive(Clone, Copy)]
+struct BitSource {
+    input: u64,
+    current_byte: u64,
+    last_mask: u8,
+    not_eof: i32,
+}
+impl BitSource {
+    const fn new(input: u64) -> Self {
+        Self { input, current_byte: 0, last_mask: 1, not_eof: 64 + 16 }
+    }
+    const fn next(mut self) -> (Self, CodeValue) {
+        if self.last_mask == 1 {
+            self.current_byte = self.input & 0xff;
+            self.input >>= 8;
+            self.last_mask = 0x80;
+        } else {
+            self.last_mask >>= 1;
+        }
+        self.not_eof -= 1;
+        let bit = (self.current_byte & self.last_mask as u64 != 0) as CodeValue;
+        (self, bit)
+    }
+}
+
+/// Whether `number` decodes to exactly `text` ([`decode`], comparing
+/// instead of collecting, so that the encoders stay `const`). With
+/// `canonical`, each character of `text` is compared as the letter of its
+/// symbol: the method coder ignores case and reads a digit or `_` as a
+/// letter's symbol. (C++ `detail_name::decodes_to`, `method_decodes_to`.)
+const fn decodes_to<const W: usize, const W1: usize>(
+    number: u64,
+    symbol_to_char: &[u8; W],
+    model_cf: &[[u16; W1]; W],
+    text: &[u8],
+    canonical: Option<&[u8; 256]>,
+) -> bool {
+    let mut bits = BitSource::new(number);
+    let mut at = 0usize;
+    let mut last = 0usize;
+    let mut high: CodeValue = MAX_CODE;
+    let mut low: CodeValue = 0;
+    let mut value: CodeValue = 0;
+    let mut i = 0;
+    while i < CODE_VALUE_BITS && bits.not_eof != 0 {
+        let (next, bit) = bits.next();
+        bits = next;
+        value = (value << 1).wrapping_add(bit);
+        i += 1;
+    }
+    while bits.not_eof != 0 {
+        let range = high.wrapping_sub(low).wrapping_add(1);
+        if range == 0 {
+            return false;
+        }
+        let row = &model_cf[last];
+        let count = row[W] as CodeValue;
+        let scaled = value.wrapping_sub(low).wrapping_add(1).wrapping_mul(count).wrapping_sub(1) / range;
+        let mut c = 0usize;
+        let (mut p_low, mut p_high, mut p_count) = (0, 1, 1);
+        let mut symbol = 0;
+        while symbol < W {
+            if scaled < row[symbol + 1] as CodeValue {
+                if count == 0 {
+                    last = 0;
+                } else {
+                    c = symbol;
+                    p_low = row[symbol] as CodeValue;
+                    p_high = row[symbol + 1] as CodeValue;
+                    p_count = count;
+                    last = c;
+                }
+                break;
+            }
+            symbol += 1;
+        }
+        if c == 0 {
+            break;
+        }
+        if at >= text.len() {
+            return false;
+        }
+        let expected = match canonical {
+            Some(char_to_symbol) => symbol_to_char[char_to_symbol[text[at] as usize] as usize],
+            None => text[at],
+        };
+        if symbol_to_char[c] != expected {
+            return false;
+        }
+        at += 1;
+        high = low.wrapping_add(range.wrapping_mul(p_high) / p_count).wrapping_sub(1);
+        low = low.wrapping_add(range.wrapping_mul(p_low) / p_count);
+        while bits.not_eof != 0 {
+            if high < ONE_HALF {
+                // The bit is a zero.
+            } else if low >= ONE_HALF {
+                value = value.wrapping_sub(ONE_HALF);
+                low -= ONE_HALF;
+                high -= ONE_HALF;
+            } else if low >= ONE_FOURTH && high < THREE_FOURTHS {
+                value = value.wrapping_sub(ONE_FOURTH);
+                low -= ONE_FOURTH;
+                high -= ONE_FOURTH;
+            } else {
+                break;
+            }
+            low <<= 1;
+            high <<= 1;
+            high += 1;
+            let (next, bit) = bits.next();
+            bits = next;
+            value = (value << 1).wrapping_add(bit);
+        }
+    }
+    at == text.len()
+}
+
 /// C++ `psio::detail::seahash`: the hash behind a method name that does not
 /// compress.
 const fn seahash(input: &[u8]) -> u64 {
@@ -277,14 +400,21 @@ const fn seahash(input: &[u8]) -> u64 {
 
 /// The number of a method name (C++ `psio::detail::method_to_number`).
 ///
-/// * `""` is 0.
-/// * A name of the coder's characters that fits is its arithmetic code.
-/// * A name that holds another character is 0.
-/// * A name of the coder's characters that does not fit is its hash with
-///   bit 56 set ([`is_hash_name`]).
-/// * `#` and sixteen letters is the hash those letters spell (what
-///   [`number_to_method`] writes for a hash); `#` with any other length is
-///   `u64::MAX`.
+/// * A name the coder can represent exactly is its compressed number, and
+///   [`number_to_method`] of it is the name in canonical form (lower case;
+///   a digit or `_` as the letter of its symbol).
+/// * Any other name made of the coder's characters is a hash of its bytes
+///   with bit 56 set ([`is_hash_name`]), written `#` and sixteen letters:
+///   one whose code does not decode back to the name (its last bits ran
+///   past 64: `getSymbolType` read back as `getsymboltyp`), or lands on a
+///   hash number.
+/// * `#` and sixteen of the letters `eaiotnrslcuhdpmy` that spell a hash
+///   number is that number.
+/// * The empty name, a name with a character outside the alphabet and any
+///   other text that starts with `#` are 0.
+///
+/// So for every `n = method_to_number(s) != 0`:
+/// `method_to_number(&number_to_method(n)) == n`.
 pub const fn method_to_number(name: &str) -> u64 {
     use tables::method::{CHAR_TO_SYMBOL, MODEL_CF};
     let input = name.as_bytes();
@@ -292,18 +422,22 @@ pub const fn method_to_number(name: &str) -> u64 {
         return 0;
     }
     if input[0] == b'#' {
+        // The text of a hash number; anything else that starts with '#'
+        // is not a method name.
         if input.len() != 17 {
-            return u64::MAX;
+            return 0;
         }
         let mut output: u64 = 0;
         let mut i = 1;
         while i < 17 {
-            // As C++: the symbol minus one, as a byte, at its nibble.
-            let symbol = CHAR_TO_SYMBOL[input[i] as usize].wrapping_sub(1) as u64;
-            output |= symbol << (4 * (i - 1));
+            let symbol = CHAR_TO_SYMBOL[input[i] as usize];
+            if symbol < 1 || symbol > 16 {
+                return 0;
+            }
+            output |= ((symbol - 1) as u64) << (4 * (i - 1));
             i += 1;
         }
-        return output;
+        return if is_hash_name(output) { output } else { 0 };
     }
     let mut i = 0;
     while i < input.len() {
@@ -320,6 +454,14 @@ pub const fn method_to_number(name: &str) -> u64 {
         output |= (bits.next_byte as u64) << bits.bit;
     }
     if !consumed {
+        output = 0;
+    }
+    // A compressed number is the name's only if it decodes back to the
+    // name, in its canonical form.
+    if output != 0
+        && (is_hash_name(output)
+            || !decodes_to(output, &tables::method::SYMBOL_TO_CHAR, &MODEL_CF, input, Some(&CHAR_TO_SYMBOL)))
+    {
         output = 0;
     }
     if output == 0 {
@@ -356,8 +498,12 @@ pub fn number_to_method(number: u64) -> String {
 
 /// The number of an identifier name (C++ `psio::name_to_number`): 0 when
 /// the name is empty, longer than 18 characters, starts with a digit or
-/// `-`, holds a character outside `a`-`z`, `0`-`9`, `-`, or does not fit
-/// in 64 bits.
+/// `-`, holds a character outside `a`-`z`, `0`-`9`, `-`, or has no exact
+/// code — one that does not decode back to the name: a doubled hyphen (the
+/// model has no frequency for `-` after `-`), or a code that needs more
+/// than 64 bits.
+///
+/// So `name_to_number(s) == n != 0` implies `number_to_name(n) == s`.
 pub const fn name_to_number(name: &str) -> u64 {
     use tables::name::{CHAR_TO_SYMBOL, MODEL_CF};
     let input = name.as_bytes();
@@ -390,12 +536,16 @@ pub const fn name_to_number(name: &str) -> u64 {
     if !consumed {
         return 0;
     }
+    if output != 0 && !decodes_to(output, &tables::name::SYMBOL_TO_CHAR, &MODEL_CF, input, None) {
+        return 0;
+    }
     output
 }
 
 /// The name of an identifier number (C++ `psio::number_to_name`); `""` for
 /// 0. A number no name compresses to still decodes to some text: compare
-/// `name_to_number(&text)` with the number to know.
+/// `name_to_number(&number_to_name(n)) == n` to know whether a number is a
+/// name's.
 pub fn number_to_name(number: u64) -> String {
     use tables::name::{MODEL_CF, SYMBOL_TO_CHAR};
     if number == 0 {

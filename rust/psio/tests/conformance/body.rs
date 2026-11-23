@@ -125,14 +125,14 @@ fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
         });
     for (class, count) in [
         ("nested", 252), ("nested-unknown", 20), ("nested-deferred", 24), ("map-set", 266),
-        ("map-set-order", 352), ("transparent", 160), ("custom", 116), ("invariant", 128),
+        ("map-set-order", 352), ("transparent", 160), ("transparent-bounds", 62), ("custom", 116), ("invariant", 128),
         ("annotated-bounds", 148), ("method-args", 62), ("string-raw-non-utf8", 48),
         ("list-width", 89), ("cap-implicit", 40), ("width", 335), ("bytes", 103),
     ] {
         assert_eq!(classes.get(class), Some(&count), "{class}");
     }
-    assert_eq!(fixture.vectors.len(), 6973);
-    assert_eq!(fixture.types.len(), 357);
+    assert_eq!(fixture.vectors.len(), 7035);
+    assert_eq!(fixture.types.len(), 360);
     // Every invariant rejection carries the invariant's own message, and
     // every order rejection the order rule's: compared word for word above.
     let shared: Vec<_> = fixture.vectors.iter().filter(|v| v.reason_is_shared() && v.expect == "reject").collect();
@@ -173,7 +173,7 @@ fn the_fixture_covers_every_required_class_in_every_profile() {
         "optional-presence", "width", "tuple", "variant", "enum", "enum-unknown-value",
         "string", "length-bound-overflow", "bytes", "zero-fixed", "depth",
         "nested", "nested-unknown", "nested-deferred", "map-set", "map-set-order", "transparent",
-        "custom", "invariant", "list-width", "cap-implicit",
+        "transparent-bounds", "custom", "invariant", "list-width", "cap-implicit",
     ] {
         let of_class: Vec<_> = fixture.vectors.iter().filter(|v| v.class == class).collect();
         assert!(!of_class.is_empty(), "no vectors of class {class}");

@@ -60,7 +60,7 @@
 //! Everything is checked: errors, never panics; nesting and schema recursion
 //! are limited by `MAX_DEPTH`.
 use super::{
-    assoc_shape, metadata, nested_member, parse_length_bound, Options, Value, MAP_DUPLICATE,
+    assoc_shape, metadata, nested_member, parse_length_bound, tuple_text, Options, TupleText, Value, MAP_DUPLICATE,
     NO_HANDLER, SET_DUPLICATE,
 };
 use crate::json::{
@@ -677,6 +677,40 @@ impl<C: JsonCursor> Reader<'_, C> {
         Ok(Value::Sequence(order.into_iter().filter_map(|index| slots[index].take()).collect()))
     }
 
+    /// The members of an argument list, given positionally: exactly one
+    /// element per member.
+    fn record_from_array(&mut self, members: &[Member]) -> Text<Value> {
+        let mut values = Vec::with_capacity(members.len());
+        self.array_items(Some(members.len() as u64), true, |this| {
+            // array_items admits at most `members.len()` elements.
+            let Some(member) = members.get(values.len()) else {
+                return this.fail("json: array has too many elements");
+            };
+            let value = this.read(&member.r#type, member_form(&member.attributes, this.ijson), 0)?;
+            let bound = match parse_length_bound(&member.attributes) {
+                Ok(bound) => bound,
+                Err(_) => return this.fail("pssz dynamic: malformed lengthBound attribute"),
+            };
+            let nested = bound.is_some() && nested_member(this.schema, &member.r#type).unwrap_or(false);
+            if !nested && bound.is_some_and(|bound| !bound.admits_value(&value)) {
+                return this.fail("json: member length_bound violated");
+            }
+            values.push((member.name.clone(), value));
+            Ok(())
+        })?;
+        Ok(Value::Record(values))
+    }
+
+    /// A record node: an object, or for an argument list (the `tuple`
+    /// attribute) the forms of docs/json.md "Method arguments".
+    fn record_node(&mut self, members: &[Member], attributes: &[Attribute]) -> Text<Value> {
+        match tuple_text(attributes) {
+            TupleText::Positional => self.record_from_array(members),
+            TupleText::Named if self.c.kind()? == JsonKind::Array => self.record_from_array(members),
+            _ => self.record(members),
+        }
+    }
+
     fn record(&mut self, members: &[Member]) -> Text<Value> {
         self.c.begin_object()?;
         // One slot per member, filled as keys arrive; a repeated key
@@ -814,8 +848,8 @@ impl<C: JsonCursor> Reader<'_, C> {
                 })?;
                 Ok(Value::Sequence(items))
             }
-            AnyValue::Object(o) => self.record(&o.members),
-            AnyValue::Struct(s) => self.record(&s.members),
+            AnyValue::Object(o) => self.record_node(&o.members, &o.attributes),
+            AnyValue::Struct(s) => self.record_node(&s.members, &s.attributes),
             AnyValue::Variant(v) => self.variant(v),
             // The inner value's own text.
             AnyValue::Nested(nested) => self.read(&nested.r#type, form, n + 1),
@@ -1109,13 +1143,14 @@ impl ValueWriter<'_> {
         Ok(())
     }
 
-    fn record(&mut self, members: &[Member], value: &Value, n: usize) -> Text<()> {
+    /// `positional`: an argument list without parameter names is the array.
+    fn record(&mut self, members: &[Member], positional: bool, value: &Value, n: usize) -> Text<()> {
         let Value::Record(fields) = value else {
             return self.fail("pssz dynamic: ordered record value required");
         };
         let schema = self.schema;
         let absent = Value::Optional(None);
-        self.w.raw("{");
+        self.w.raw(if positional { "[" } else { "{" });
         for (i, member) in members.iter().enumerate() {
             let field = fields.iter().rev().find(|(name, _)| *name == member.name);
             let member_type = self.resolve(schema, &member.r#type)?;
@@ -1133,7 +1168,11 @@ impl ValueWriter<'_> {
             if !nested && bound.is_some_and(|bound| !bound.admits_value(field)) {
                 return self.fail("json: member length_bound violated");
             }
-            self.w.key(&member.name, i == 0)?;
+            if !positional {
+                self.w.key(&member.name, i == 0)?;
+            } else if i > 0 {
+                self.w.raw(",");
+            }
             let saved = self.w.member_form(
                 member_form(&member.attributes, false),
                 member_form(&member.attributes, true),
@@ -1141,7 +1180,7 @@ impl ValueWriter<'_> {
             self.write(member_type, field, n + 1)?;
             self.w.restore_form(saved);
         }
-        self.w.raw("}");
+        self.w.raw(if positional { "]" } else { "}" });
         Ok(())
     }
 
@@ -1203,8 +1242,12 @@ impl ValueWriter<'_> {
                 self.w.restore_form(saved);
                 Ok(())
             }
-            AnyValue::Object(o) => self.record(&o.members, value, n),
-            AnyValue::Struct(s) => self.record(&s.members, value, n),
+            AnyValue::Object(o) => {
+                self.record(&o.members, tuple_text(&o.attributes) == TupleText::Positional, value, n)
+            }
+            AnyValue::Struct(s) => {
+                self.record(&s.members, tuple_text(&s.attributes) == TupleText::Positional, value, n)
+            }
             AnyValue::Variant(v) => {
                 let (member, selector, payload) = match value {
                     Value::Variant { selector, value } => match v.members.get(*selector) {

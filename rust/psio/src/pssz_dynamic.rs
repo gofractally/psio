@@ -58,7 +58,13 @@
 //! looked up. `maxFields` under an explicit width is refused.
 //!
 //! Attributes read by the codec:
-//!   Object  definitionWillNotChange    fixed layout (no header)
+//!   Object  tuple = "named" | "positional"   an argument list: a record on
+//!                                      the wire; in text an object keyed by
+//!                                      the member names (a reader also takes
+//!                                      the positional array) / the array
+//!                                      (`json` submodule)
+//!           maxFields = "N"            at most N members, N <= 255
+//!           definitionWillNotChange    fixed layout (no header)
 //!           maxDynamicData = "N"       explicit cap (automatic profile)
 //!   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //!           jsonInt / ijsonInt = "number" | "string"   (`json` submodule)
@@ -366,6 +372,38 @@ fn parse_cap(values: &[Attribute]) -> PsszResult<Option<u64>> {
         .map(Some)
         .ok_or(failure("pssz dynamic: malformed maxDynamicData attribute"))
 }
+/// `maxFields = "N"`: the most fields the record (or parameters the
+/// function) will ever have; N is at most 255 (docs/pssz-spec.md 8.4, 16).
+fn parse_max_fields(values: &[Attribute]) -> PsszResult<Option<u64>> {
+    let Some(attribute) = find_attribute(values, "maxFields") else {
+        return Ok(None);
+    };
+    attribute
+        .value
+        .as_deref()
+        .and_then(parse_u64)
+        .filter(|n| *n <= MAX_RECORD_FIELDS as u64)
+        .map(Some)
+        .ok_or(failure("pssz dynamic: malformed maxFields attribute"))
+}
+/// The text form of a record node (docs/json.md "Method arguments"): the
+/// `tuple` attribute of the Object of an argument list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TupleText {
+    /// A record: an object.
+    None,
+    /// An object keyed by the member names; a reader also takes the array.
+    Named,
+    /// The array.
+    Positional,
+}
+pub(crate) fn tuple_text(values: &[Attribute]) -> TupleText {
+    match find_attribute(values, "tuple").and_then(|a| a.value.as_deref()) {
+        None => TupleText::None,
+        Some("positional") => TupleText::Positional,
+        Some(_) => TupleText::Named,
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Site {
     /// Object / Struct
@@ -390,6 +428,13 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
             // top-level type's (`Codec::check_top_cap`).
             "maxDynamicData" if site == Site::Record => (),
             "maxFields" if site == Site::Record && caps => (),
+            // An argument list: the same bytes as any record; its text form
+            // is the JSON codec's business.
+            "tuple" if site == Site::Record => {
+                if !matches!(value.value.as_deref(), Some("named" | "positional")) {
+                    return Err(failure("pssz dynamic: malformed tuple attribute"));
+                }
+            }
             "lengthBound" if site == Site::RecordMember => (),
             "jsonInt" | "ijsonInt" if site == Site::RecordMember => {
                 if !matches!(value.value.as_deref(), Some("number" | "string")) {
@@ -411,6 +456,64 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
 /// The most elements a tuple (a pair, a method's argument list) can have
 /// (docs/pssz-spec.md 8.4; C++ `psio::max_tuple_elements`).
 pub const MAX_TUPLE_ELEMENTS: usize = 255;
+/// The most fields a record can have: a record, a tuple and an argument
+/// list are one positional shape and share one limit (docs/pssz-spec.md
+/// 8.4; C++ `psio::max_record_fields`). `maxFields` lowers it for one type.
+pub const MAX_RECORD_FIELDS: usize = 255;
+
+/// The field count of a record node against the limit and its `maxFields`.
+fn record_fields(members: usize, attributes: &[Attribute]) -> PsszResult<()> {
+    if members > MAX_RECORD_FIELDS {
+        return Err(failure("pssz dynamic: a record has more than 255 fields"));
+    }
+    if parse_max_fields(attributes)?.is_some_and(|max| members as u64 > max) {
+        return Err(failure("pssz dynamic: a record has more fields than its maxFields"));
+    }
+    Ok(())
+}
+
+/// Checks a whole schema, not only what one root reaches (C++
+/// `psio::pssz_ir::validate_schema`): every named type, and every function
+/// of every interface and resource — its parameter list is a tuple (at most
+/// 255 parameters, docs/pssz-spec.md 8.4; no more than its `maxFields`), its
+/// parameter and result types are well-formed, and its `maxDynamicData` /
+/// `maxFields` attributes parse. A consumer that takes a schema from outside
+/// calls this once before it dispatches through it.
+pub fn validate_schema(schema: &Schema) -> PsszResult<()> {
+    schema.check_ir_version()?;
+    let function = |f: &crate::pssz_schema_ir::Func| -> PsszResult<()> {
+        if f.params.len() > MAX_TUPLE_ELEMENTS {
+            return Err(failure("pssz dynamic: a function has more than 255 parameters"));
+        }
+        if parse_max_fields(&f.attributes)?.is_some_and(|max| f.params.len() as u64 > max) {
+            return Err(failure("pssz dynamic: a function has more parameters than its maxFields"));
+        }
+        parse_cap(&f.attributes)?;
+        for param in &f.params {
+            attributes(&param.attributes, Site::RecordMember, true)?;
+            metadata(schema, &param.r#type, true)?;
+        }
+        if let Some(result) = &f.result {
+            metadata(schema, result, true)?;
+        }
+        Ok(())
+    };
+    for named in &schema.types {
+        if let AnyValue::Resource(resource) = &named.r#type.value {
+            for method in &resource.methods {
+                function(method)?;
+            }
+            continue;
+        }
+        metadata(schema, &named.r#type, true)?;
+    }
+    for interface in &schema.interfaces {
+        for f in &interface.funcs {
+            function(f)?;
+        }
+    }
+    Ok(())
+}
 
 /// Checks every type reachable from `root`. `caps` is the automatic profile.
 pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResult<()> {
@@ -425,10 +528,12 @@ pub(crate) fn metadata(schema: &Schema, root: &AnyType, caps: bool) -> PsszResul
         let fields = match &ty.value {
             AnyValue::Object(o) => {
                 attributes(&o.attributes, Site::Record, caps)?;
+                record_fields(o.members.len(), &o.attributes)?;
                 Some((o.members.as_slice(), Site::RecordMember))
             }
             AnyValue::Struct(s) => {
                 attributes(&s.attributes, Site::Record, caps)?;
+                record_fields(s.members.len(), &s.attributes)?;
                 Some((s.members.as_slice(), Site::RecordMember))
             }
             AnyValue::Variant(v) => {

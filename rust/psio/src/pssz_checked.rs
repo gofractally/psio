@@ -71,12 +71,6 @@ fn unknown_fields() -> PsszResult<()> {
     }
 }
 
-/// Exact (strict) readers require raw strings to be UTF-8, as C++
-/// `validate_strict` does. Every other reader passes raw bytes through.
-pub fn strict_strings() -> bool {
-    !ALLOW_UNKNOWN.with(|v| v.get())
-}
-
 pub struct DecodeDepth;
 impl DecodeDepth {
     #[inline]

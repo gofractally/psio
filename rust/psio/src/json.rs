@@ -639,6 +639,11 @@ impl<'a> Reader<'a> {
     pub fn restore_form(&mut self, saved: IntForm) {
         self.form = saved;
     }
+    /// Skips whitespace and says whether `c` is next, without consuming it.
+    pub fn next_is(&mut self, c: u8) -> bool {
+        self.ws();
+        self.peek() == Some(c)
+    }
 
     /// Opens an array or object and descends one level.
     pub fn begin(&mut self, open: u8, expected: &'static str) -> Result<()> {

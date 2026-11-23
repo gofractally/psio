@@ -66,15 +66,15 @@ fn metadata_is_the_declaration() {
     assert_eq!(names, ["transfer", "balance_of", "issue", "total", "pair", "version", "reset"]);
     assert_eq!(
         token::Tag::METHODS[0],
-        MethodInfo { name: "transfer", params: &["to", "amount", "memo"], receiver: Receiver::Mut, has_result: false }
+        MethodInfo { name: "transfer", params: &["to", "amount", "memo"], named: true, receiver: Receiver::Mut, has_result: false }
     );
     assert_eq!(
         token::Tag::METHODS[1],
-        MethodInfo { name: "balance_of", params: &["owner"], receiver: Receiver::Ref, has_result: true }
+        MethodInfo { name: "balance_of", params: &["owner"], named: true, receiver: Receiver::Ref, has_result: true }
     );
     assert_eq!(
         token::Tag::METHODS[5],
-        MethodInfo { name: "version", params: &[], receiver: Receiver::None, has_result: true }
+        MethodInfo { name: "version", params: &[], named: true, receiver: Receiver::None, has_result: true }
     );
     for (index, method) in token::Tag::METHODS.iter().enumerate() {
         assert_eq!(token::Tag::index_of_method(method.name), Some(index));

@@ -15,6 +15,8 @@
 //! | `psio` | `rename_all = "..."` | item | a case convention for the member names of a struct or the variant names of an enum |
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
+//! | `psio` | `max_fields = N` | item | the record has, and will ever have, at most N fields (N ≤ 255); C++ `maxFields(N)` |
+//! | `psio` | `arguments = "named" \| "positional"` | item | the record is a method's argument list (written by `#[psio::interface]`): its text is an object that also reads as the positional array, or the array |
 //! | `pssz` | `max_dynamic_data = N` | item | pSSZ cap on the record's variable part |
 //! | `json` | `json_number`, `json_string`, `ijson_number`, `ijson_string` | item, field | integer form in Json / IJson text |
 //!
@@ -34,6 +36,10 @@
 //! docs.
 
 use syn::{Attribute, DeriveInput, Lit, Meta, NestedMeta};
+
+/// The most fields a record has: a record, a tuple and an argument list
+/// share one limit (docs/pssz-spec.md 8.4; C++ `psio::max_record_fields`).
+pub(crate) const MAX_RECORD_FIELDS: usize = 255;
 
 /// The attributes parsed here, in table order.
 const NAMESPACES: [&str; 3] = ["psio", "pssz", "json"];
@@ -86,6 +92,10 @@ const KEYS: &[Key] = &[
           because: "bounds an element of the member for every format", usage: "at(I, ...)" },
     Key { name: "other", namespace: "psio", sites: &[Site::Variant],
           because: "describes the enum for every format", usage: "other" },
+    Key { name: "max_fields", namespace: "psio", sites: &[Site::Item],
+          because: "caps the number of fields for every format", usage: "max_fields = N" },
+    Key { name: "arguments", namespace: "psio", sites: &[Site::Item],
+          because: "describes the type for every format", usage: "arguments = \"named\" | \"positional\"" },
     Key { name: "max_dynamic_data", namespace: "pssz", sites: &[Site::Item],
           because: "is a pSSZ wire limit", usage: "max_dynamic_data = N" },
     Key { name: "json_number", namespace: "json", sites: &[Site::Item, Site::Field],
@@ -135,6 +145,10 @@ pub(crate) struct Attrs {
     pub(crate) other: bool,
     /// `#[pssz(max_dynamic_data = N)]`.
     pub(crate) max_dynamic_data: Option<u64>,
+    /// `#[psio(max_fields = N)]`.
+    pub(crate) max_fields: Option<u64>,
+    /// `#[psio(arguments = "named" | "positional")]`: `Some(true)` is named.
+    pub(crate) arguments: Option<bool>,
     /// `#[json(json_number)]` and the other three integer forms.
     pub(crate) forms: Forms,
     /// `#[psio(max = N, element(...), keys(...), values(...), at(I, ...))]`:
@@ -480,6 +494,25 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
                 return Err(syn::Error::new_spanned(nv, "max_dynamic_data is an integer"));
             };
             out.max_dynamic_data = Some(value.base10_parse()?);
+        }
+        "max_fields" => {
+            let nv = name_value(meta, key.usage)?;
+            let Lit::Int(value) = &nv.lit else {
+                return Err(syn::Error::new_spanned(nv, "max_fields is an integer"));
+            };
+            let n: u64 = value.base10_parse()?;
+            if n > MAX_RECORD_FIELDS as u64 {
+                return Err(syn::Error::new_spanned(nv, "max_fields is at most 255 (docs/pssz-spec.md 8.4)"));
+            }
+            out.max_fields = Some(n);
+        }
+        "arguments" => {
+            let text = string(name_value(meta, key.usage)?, "arguments is a string")?;
+            out.arguments = Some(match text.value().as_str() {
+                "named" => true,
+                "positional" => false,
+                _ => return Err(syn::Error::new_spanned(&text, "arguments is \"named\" or \"positional\"")),
+            });
         }
         "json_number" => set_form(&mut out.forms.json, false, meta)?,
         "json_string" => set_form(&mut out.forms.json, true, meta)?,
@@ -1063,10 +1096,38 @@ pub(crate) fn item(input: &DeriveInput, derive: Derive) -> syn::Result<Attrs> {
             Context { site: Site::Field, derive, optional: is_option(&f.ty), in_variant },
         )
     };
+    if (out.max_fields.is_some() || out.arguments.is_some())
+        && (out.transparent || !matches!(input.data, syn::Data::Struct(_)))
+    {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            "max_fields and arguments apply to records (structs that are not transparent)",
+        ));
+    }
     match &input.data {
         syn::Data::Struct(data) => {
+            let mut count = 0usize;
             for f in &data.fields {
-                check_field(f, false)?;
+                if !check_field(f, false)?.skip {
+                    count += 1;
+                }
+            }
+            // docs/pssz-spec.md 8.4, 16: the limits are the declaration's.
+            if !out.transparent {
+                if count > MAX_RECORD_FIELDS {
+                    return Err(syn::Error::new_spanned(
+                        &input.ident,
+                        format!("a record has at most 255 fields; this one has {count}"),
+                    ));
+                }
+                if let Some(max) = out.max_fields {
+                    if count as u64 > max {
+                        return Err(syn::Error::new_spanned(
+                            &input.ident,
+                            format!("max_fields = {max}, and the record has {count} fields"),
+                        ));
+                    }
+                }
             }
         }
         syn::Data::Enum(data) => {

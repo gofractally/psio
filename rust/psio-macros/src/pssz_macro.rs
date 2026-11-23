@@ -14,6 +14,11 @@ struct Options {
     name: Option<String>,
     /// Explicit maxDynamicData cap: `#[pssz(max_dynamic_data = N)]`.
     cap: Option<u64>,
+    /// `#[psio(max_fields = N)]`: the field-count cap.
+    max_fields: Option<u64>,
+    /// `#[psio(arguments = ...)]`: a method's argument list; `Some(true)`
+    /// when its parameters have names.
+    arguments: Option<bool>,
     /// `#[psio(variant)]`: encode a field-less enum as a variant of unit
     /// alternatives instead of as its underlying integer.
     variant: bool,
@@ -88,6 +93,8 @@ fn options(input: &DeriveInput, derive: Derive) -> syn::Result<Options> {
         transparent: item.transparent,
         name: item.name,
         cap: item.max_dynamic_data,
+        max_fields: item.max_fields,
+        arguments: item.arguments,
         variant: item.variant,
         custom: item.custom,
         invariant: item.invariant,
@@ -1113,13 +1120,29 @@ fn schema_int_forms(k: &syn::Path, field: &syn::Field, defaults: Forms) -> syn::
     Ok(out)
 }
 
-fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, forms: Forms, case: Option<Case>) -> syn::Result<Tokens> {
+/// What a record carries besides its members: the fixed layout, the cap, the
+/// field-count cap and, for a method's argument list, whether its
+/// parameters have names (`tuple`).
+#[derive(Clone, Copy, Default)]
+struct RecordInfo {
+    dwnc: bool,
+    cap: Option<u64>,
+    max_fields: Option<u64>,
+    arguments: Option<bool>,
+}
+
+fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms, case: Option<Case>) -> syn::Result<Tokens> {
+    let RecordInfo { dwnc, cap, max_fields, arguments } = info;
     let members = attrs::members(fields)?;
     // The member's name in text: its identifier, `#[psio(name)]` /
     // `#[serde(rename)]`, or the identifier under the `rename_all` convention.
+    // The members of an argument list without parameter names are named by
+    // position.
     let names: Vec<_> = members
         .iter()
-        .map(|m| match &m.member {
+        .enumerate()
+        .map(|(position, m)| match &m.member {
+            _ if arguments == Some(false) => position.to_string(),
             Member::Named(_) => attrs::member_name(m.field, &m.attrs, case),
             Member::Unnamed(index) => index.index.to_string(),
         })
@@ -1137,8 +1160,14 @@ fn schema_record(k: &syn::Path, fields: &Fields, dwnc: bool, cap: Option<u64>, f
         .collect::<syn::Result<Vec<_>>>()?;
     // The order C++ SchemaBuilder emits.
     let mut attributes = Vec::new();
+    if let Some(named) = arguments {
+        attributes.push(schema_attribute(k, "tuple", if named { "named" } else { "positional" }));
+    }
     if dwnc {
         attributes.push(schema_attribute(k, "definitionWillNotChange", ""));
+    }
+    if let Some(max_fields) = max_fields {
+        attributes.push(schema_attribute(k, "maxFields", &max_fields.to_string()));
     }
     if let Some(cap) = cap {
         attributes.push(schema_attribute(k, "maxDynamicData", &cap.to_string()));
@@ -1221,7 +1250,13 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
             }
         }
         Data::Struct(data) => {
-            schema_record(k, &data.fields, opts.dwnc, opts.cap, opts.forms, opts.rename_all)?
+            schema_record(
+                k,
+                &data.fields,
+                RecordInfo { dwnc: opts.dwnc, cap: opts.cap, max_fields: opts.max_fields, arguments: opts.arguments },
+                opts.forms,
+                opts.rename_all,
+            )?
         }
         Data::Enum(data) => {
             if opts.dwnc || opts.transparent {
@@ -1265,8 +1300,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
                     _ => schema_record(
                         k,
                         &variant.fields,
-                        false,
-                        None,
+                        RecordInfo::default(),
                         Forms::default(),
                         variant_attrs.rename_all.or(opts.rename_all_fields),
                     )?,

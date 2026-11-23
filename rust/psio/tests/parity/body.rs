@@ -732,10 +732,12 @@ fn string_types<F: PsszFormat>() {
         assert_eq!(validate::<F, RawString>(bad), Ok(()));
         assert_eq!(try_encode::<F, _>(&RawString(bad.to_vec())).unwrap(), bad);
         assert_eq!(decode::<F, BoundedRawString<8>>(bad).unwrap().0, bad);
-        // The exact (strict) readers check UTF-8 in raw strings too, as C++
-        // validate_strict does.
-        assert!(validate_strict::<F, RawString>(bad).is_err());
-        assert!(decode_strict::<F, RawString>(bad).is_err());
+        // A raw string is any bytes for the exact (strict) readers too:
+        // strict means exact-schema and canonical (docs/pssz-spec.md 8.3).
+        assert_eq!(validate_strict::<F, RawString>(bad), Ok(()));
+        assert_eq!(decode_strict::<F, RawString>(bad).unwrap(), RawString(bad.to_vec()));
+        assert_eq!(validate_strict::<F, BoundedRawString<8>>(bad), Ok(()));
+        assert_eq!(validate_strict::<F, Vec<RawString>>(&[&Frame::new(width::<F>()).o(width::<F>()).bytes[..], bad].concat()), Ok(()));
         // Views: a String view errors (never panics); a raw view is bytes.
         assert!(PsszView::<String, F>::trusted(bad).view().is_err());
         assert_eq!(PsszView::<RawString, F>::trusted(bad).bytes(), bad);

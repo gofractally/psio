@@ -37,13 +37,13 @@ impl Unit for Minutes {
 }
 
 macro_rules! record {
-    ($(#[$attr:meta])* struct $name:ident { $($field:ident: $ty:ty,)* }) => {
+    ($(#[$attr:meta])* struct $name:ident { $($(#[$member:meta])* $field:ident: $ty:ty,)* }) => {
         #[derive(
             Debug, Clone, PartialEq, PartialOrd, psio::JsonText, psio::PsszPack, psio::PsszUnpack,
             psio::ToPsszSchema, psio::Key,
         )]
         $(#[$attr])*
-        struct $name { $($field: $ty,)* }
+        struct $name { $($(#[$member])* $field: $ty,)* }
     };
 }
 
@@ -78,6 +78,18 @@ record! {
         shard: u32,
         owner: String,
         seq: Option<i64>,
+    }
+}
+
+// A key with bounds (docs/key-spec.md 5.1): C++ `attr(name, utf8 | max<4>),
+// attr(tags, max<2> | element(max<3>))`.
+record! {
+    struct KBound {
+        shard: u32,
+        #[psio(max = 4)]
+        name: String,
+        #[psio(max = 2, element(max = 3))]
+        tags: Vec<psio::pssz::RawString>,
     }
 }
 
@@ -512,6 +524,7 @@ fn dispatch(row: &Row) -> Result<(), String> {
         "Stamps" => composite!(row, Stamps; created updated ttl legacy),
         "Event" => composite!(row, Event; name at precise history elapsed timeout),
         "Account" => composite!(row, Account; shard owner seq),
+        "KBound" => composite!(row, KBound; shard name tags),
         "tuple<>" => composite!(row, ();),
         "tuple<u32,string>" => composite!(row, (u32, String); 0 1),
         "tuple<u32,string,optional<i64>>" => composite!(row, (u32, String, Option<i64>); 0 1 2),
@@ -576,7 +589,7 @@ fn every_vector_holds() {
         assert!(!has_prefix || ty.composite, "prefix rows for non-composite {}", ty.id);
     }
     assert_eq!(types.len(), fx.types.len() + 1); // + "bytes" of the bound rows    assert_eq!(kinds["key-invariant"], 10);
-    assert_eq!(checked, 1147, "every row of the fixture was checked");
+    assert_eq!(checked, 1164, "every row of the fixture was checked");
 
     // A prefix encodes elements: each is checked as the value it is; the
     // composite as a whole is not (a prefix is not a value of it).
@@ -838,16 +851,16 @@ fn the_schema_ir_drives_pssz_text_and_keys() {
     let want: BTreeMap<&str, usize> = [
         ("bound", 17),
         ("key-invariant", 10),
-        ("key-order", 53),
+        ("key-order", 54),
         ("key-order-bits", 5),
-        ("key-prefix", 387),
-        ("key-reject", 141),
+        ("key-prefix", 391),
+        ("key-reject", 148),
         ("text-accept", 56),
         ("text-reject", 124),
-        ("value", 354),
+        ("value", 359),
     ]
     .into();
     assert_eq!(done, want);
     assert_eq!(done.values().sum::<usize>(), fx.vectors.len());
-    assert_eq!(fx.vectors.len(), 1147);
+    assert_eq!(fx.vectors.len(), 1164);
 }

@@ -67,6 +67,8 @@ pub fn registry() -> Registry {
     reg!(Vec<u64>, Option<u64>, [u64; 2], Vec<Vec<u8>>, Option<Vec<u8>>, (u64, Vec<u8>), V2<u64, Raw>);
     reg!(Vec<Name>, Option<Name>, Vec<Level>, [Level; 2], Vec<DerKey>, Option<DerKey>);
     reg!(NameOrRange, Vec<Endpoint>);
+    // A transparent type that bounds its member.
+    reg!(Memo, WrapMemo, MemoRec);
     reg!(BTreeMap<Tag, u32>, BTreeMap<Name, Range>, BTreeSet<Level>, Nested<Range>);
     // Bounds below the member, and method argument tuples.
     reg!(WrapTags, AnnTags, AnnRawTags, AnnGrid, AnnOpt, AnnArr, AnnMap, AnnSet, AnnTup, AnnVar);

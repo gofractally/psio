@@ -585,6 +585,14 @@ impl<const N: usize> KeyPack for BoundedString<N> {
     fn key_pack(&self, out: &mut Vec<u8>) {
         self.0.key_pack(out)
     }
+    // What a reader rejects, a writer does not write (docs/key-spec.md
+    // 5.1): a value past its bound has no key.
+    fn key_check(&self) -> KeyResult<()> {
+        if self.0.len() > N {
+            return Err(KeyError::new("key: string exceeds its bound"));
+        }
+        Ok(())
+    }
 }
 impl<const N: usize> KeyUnpack for BoundedString<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
@@ -614,6 +622,12 @@ impl<const N: usize> KeyPack for BoundedRawString<N> {
     }
     fn key_pack(&self, out: &mut Vec<u8>) {
         pack_escaped(&self.0, out)
+    }
+    fn key_check(&self) -> KeyResult<()> {
+        if self.0.len() > N {
+            return Err(KeyError::new("key: string exceeds its bound"));
+        }
+        Ok(())
     }
 }
 impl<const N: usize> KeyUnpack for BoundedRawString<N> {
@@ -694,6 +708,9 @@ impl<T: KeyPack, const N: usize> KeyPack for BoundedList<T, N> {
         T::key_pack_list(&self.0, out)
     }
     fn key_check(&self) -> KeyResult<()> {
+        if self.0.len() > N {
+            return Err(KeyError::new("key: list exceeds its bound"));
+        }
         self.0.iter().try_for_each(T::key_check)
     }
 }
@@ -999,6 +1016,10 @@ macro_rules! key_set {
             }
             fn key_check(&self) -> KeyResult<()> {
                 let $s = self;
+                let limit: usize = $limit;
+                if $inner.len() > limit {
+                    return Err(KeyError::new("key: list exceeds its bound"));
+                }
                 $inner.iter().try_for_each(K::key_check)
             }
         }
@@ -1030,6 +1051,10 @@ macro_rules! key_map {
             }
             fn key_check(&self) -> KeyResult<()> {
                 let $s = self;
+                let limit: usize = $limit;
+                if $inner.len() > limit {
+                    return Err(KeyError::new("key: list exceeds its bound"));
+                }
                 $inner.iter().try_for_each(|(k, v)| {
                     k.key_check()?;
                     v.key_check()

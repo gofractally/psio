@@ -81,8 +81,14 @@ fn record_tokens(
     access: &dyn Fn(&syn::Ident) -> TokenStream2,
     forms: attrs::Forms,
     case: Option<attrs::Case>,
+    // A method's argument list (docs/json.md "Method arguments"):
+    // `Some(true)` writes the object and also reads the positional array,
+    // `Some(false)` writes and reads the array only.
+    arguments: Option<bool>,
 ) -> syn::Result<(TokenStream2, TokenStream2)> {
     let members = attrs::members(fields)?;
+        let positional = arguments == Some(false);
+        let mut element_reads = Vec::new();
         let mut writes = Vec::new();
         let mut slots = Vec::new();
         let mut arms = Vec::new();
@@ -109,8 +115,13 @@ fn record_tokens(
             // A member with bounds: the text is the plain type's, checked
             // against the annotation in both directions.
             let (check_write, check_read) = bound_checks(k, field, attrs)?;
+            let lead = if positional {
+                if first { quote!() } else { quote!(w.raw(",");) }
+            } else {
+                quote!(w.key(#key, #first)?;)
+            };
             writes.push(quote! {
-                w.key(#key, #first)?;
+                #lead
                 let __saved = w.member_form(#json, #ijson);
                 { let __member = #access; #check_write }
                 <#ty as #j::JsonText>::write_json(#access, w)?;
@@ -131,6 +142,7 @@ fn record_tokens(
             };
             arms.push(quote! { #key => #read });
             index_arms.push(quote! { #index => #read });
+            element_reads.push(quote! { r.element(#index)?; #read });
             builds.push(quote! {
                 match #slot {
                     ::core::option::Option::Some(v) => v,
@@ -191,19 +203,40 @@ fn record_tokens(
                 }
             }
         };
+        let (open, close) = if positional { ("[", "]") } else { ("{", "}") };
+        // The positional array: exactly one element per member.
+        let from_array = quote! {
+            r.begin(b'[', "json: expected '['")?;
+            #(#element_reads)*
+            r.close_array()?;
+        };
+        let from_object = quote! {
+            r.begin(b'{', "json: expected '{'")?;
+            if !r.take(b'}') {
+                #members
+            }
+            r.end_object();
+        };
+        let body = match arguments {
+            None => from_object,
+            Some(false) => from_array,
+            Some(true) => quote! {
+                if r.next_is(b'[') {
+                    #from_array
+                } else {
+                    #from_object
+                }
+            },
+        };
         Ok((
             quote! {
-                w.raw("{");
+                w.raw(#open);
                 #(#writes)*
-                w.raw("}");
+                w.raw(#close);
             },
             quote! {{
-                r.begin(b'{', "json: expected '{'")?;
                 #(#slots)*
-                if !r.take(b'}') {
-                    #members
-                }
-                r.end_object();
+                #body
                 #built
             }},
         ))
@@ -303,6 +336,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     &|ident| quote!(&self.#ident),
                     type_attrs.forms,
                     type_attrs.rename_all,
+                    type_attrs.arguments,
                 )?;
                 (
                     quote! {
@@ -493,6 +527,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                                 },
                                 attrs::Forms::default(),
                                 variant_attrs.rename_all.or(type_attrs.rename_all_fields),
+                                None,
                             )?;
                             let pattern = match &variant.fields {
                                 Fields::Unit => quote!(Self::#ident),

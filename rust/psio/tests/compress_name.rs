@@ -1,24 +1,24 @@
 //! `psio::compress_name` against C++ (RG2).
 //!
-//! `fixtures/compress-name-vectors.json` was written by the C++ functions
-//! themselves (`fixtures/compress-name-vectors.gen.cpp`, compiled against
-//! `cpp/include`): for each name, `method_to_number`, `number_to_method` of
-//! that, `name_to_number`, `number_to_name` of that; and for each number,
-//! both decoders.
+//! `conformance/name-vectors.json` is written by the C++ functions
+//! themselves (`cpp/tests/name_conformance_emit.cpp`) and shared by every
+//! language: for each name, `method_to_number`, `number_to_method` of that,
+//! `name_to_number`, `number_to_name` of that; and for each number, both
+//! decoders.
 
 use psio::compress_name::{
     is_hash_name, method_to_number, name_to_number, number_to_method, number_to_name, NameId,
 };
 
 fn fixture() -> serde_json::Value {
-    serde_json::from_str(include_str!("fixtures/compress-name-vectors.json")).unwrap()
+    serde_json::from_str(include_str!("../../../conformance/name-vectors.json")).unwrap()
 }
 
 #[test]
 fn every_name_has_the_number_cpp_gives_it() {
     let fixture = fixture();
     let rows = fixture["names"].as_array().unwrap();
-    assert!(rows.len() > 1500);
+    assert_eq!(rows.len(), 1538);
     let (mut compressed, mut hashed, mut names) = (0, 0, 0);
     for row in rows {
         let text = |i: usize| row[i].as_str().unwrap();
@@ -30,10 +30,15 @@ fn every_name_has_the_number_cpp_gives_it() {
         let id = name_to_number(name);
         assert_eq!(id, number(3), "name_to_number({name:?})");
         assert_eq!(number_to_name(id), text(4), "number_to_name({id}) of {name:?}");
+        // A number is a name's only if it decodes to the name.
+        if method != 0 {
+            assert_eq!(method_to_number(&number_to_method(method)), method, "{name:?}");
+        }
         if id != 0 {
+            assert_eq!(number_to_name(id), name);
             names += 1;
         }
-        if method != 0 && method != u64::MAX && !name.starts_with('#') {
+        if method != 0 && !name.starts_with('#') {
             if is_hash_name(method) {
                 hashed += 1;
             } else {
@@ -49,7 +54,7 @@ fn every_name_has_the_number_cpp_gives_it() {
 fn every_number_has_the_text_cpp_gives_it() {
     let fixture = fixture();
     let rows = fixture["numbers"].as_array().unwrap();
-    assert!(rows.len() > 600);
+    assert_eq!(rows.len(), 617);
     for row in rows {
         let number: u64 = row[0].as_str().unwrap().parse().unwrap();
         assert_eq!(number_to_method(number), row[1].as_str().unwrap(), "number_to_method({number})");
@@ -99,9 +104,17 @@ fn the_method_numbers_psibase_pins() {
     assert!(!is_hash_name(311625498215));
     // A hash round-trips through its text.
     assert_eq!(method_to_number("#psaoryoiluhlrpyn"), 6905860632893337981);
-    // '#' with any other length.
-    assert_eq!(method_to_number("#"), u64::MAX);
-    assert_eq!(method_to_number("#short"), u64::MAX);
+    // Any other text that starts with '#' is not a method name: a wrong
+    // length, a character that is not one of the sixteen letters, sixteen
+    // letters that spell a number without the hash bit.
+    assert_eq!(method_to_number("#"), 0);
+    assert_eq!(method_to_number("#short"), 0);
+    assert_eq!(method_to_number("#psaoryoiluhlrpyz"), 0);
+    assert_eq!(method_to_number("#eeeeeeeeeeeeeeee"), 0);
+    // A code that would be cut off at 64 bits takes the hash form
+    // (conformance/README.md "Name coders").
+    assert_eq!(method_to_number("getSymbolType"), 0xd55d_f307_0b87_58eb);
+    assert_eq!(number_to_method(0xd55d_f307_0b87_58eb), "#hmlnslheseoypnnp");
 }
 
 #[test]
@@ -136,17 +149,19 @@ fn the_encoders_are_const_and_never_panic() {
     }
 }
 
-/// As in C++, the identifier coder is not one-to-one on every text it
-/// accepts: a doubled hyphen has no frequency, so the number decodes to
-/// another text. (Pinned from the C++ functions; compare
-/// `name_to_number(&number_to_name(n)) == n` to know a number is a name's.)
+/// A number is a name's only if it decodes to the name: a doubled hyphen
+/// has no frequency in the model, so its code reads back as another text
+/// and the text is not a name. (A number still decodes to some text;
+/// compare `name_to_number(&number_to_name(n)) == n` to know a number is a
+/// name's.)
 #[test]
-fn a_doubled_hyphen_is_accepted_and_does_not_round_trip() {
+fn a_text_whose_code_does_not_read_back_is_not_a_name() {
     assert_eq!(name_to_number("alice"), 6697231);
-    assert_eq!(name_to_number("x--b"), 690109440766);
+    assert_eq!(name_to_number("x--b"), 0);
+    assert_eq!(name_to_number("a--b"), 0);
     assert_eq!(number_to_name(690109440766), "x-wqulitcebeu");
-    assert_eq!(name_to_number("a--b"), 690100016917);
-    assert_eq!(number_to_name(690100016917), "a-wqweevaner");
+    assert_ne!(name_to_number(&number_to_name(690109440766)), 690109440766);
+    assert!("x--b".parse::<NameId>().is_err());
 }
 
 #[test]

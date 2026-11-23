@@ -728,8 +728,8 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
 }
 
 /// Raw byte string: C++ `std::string`. Same wire shape as `String` with no
-/// UTF-8 requirement. The exact (strict) readers do check UTF-8, mirroring
-/// C++ `validate_strict`; every other entry point passes the bytes through.
+/// UTF-8 requirement: any bytes, for every reader, the exact (strict) ones
+/// included.
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RawString(pub Vec<u8>);
 impl RawString {
@@ -753,8 +753,9 @@ impl<'a> RawStr<'a> {
     pub fn to_owned(&self) -> RawString { RawString(self.0.to_vec()) }
 }
 
-fn raw_string(bytes: &[u8]) -> PsszResult<()> {
-    if checked::strict_strings() { utf8(bytes)?; }
+/// A raw string is any bytes, for every reader: strict means exact-schema
+/// and canonical, not "strings are text" (docs/pssz-spec.md 8.3).
+fn raw_string(_bytes: &[u8]) -> PsszResult<()> {
     Ok(())
 }
 
@@ -1548,8 +1549,7 @@ pub fn decode<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> Ps
     T::pssz_unpack(bytes)
 }
 
-/// Exact-schema decode: additionally rejects unknown fields and, like C++
-/// `validate_strict`, non-UTF-8 bytes in raw strings.
+/// Exact-schema decode: additionally rejects unknown fields.
 pub fn decode_strict<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(false);
@@ -1598,7 +1598,7 @@ pub fn validate_compatible<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Si
     T::pssz_validate(bytes).map(|_| session.has_unknown())
 }
 /// Exact-schema validation (C++ `psio::validate_strict`): rejects unknown
-/// fields and non-UTF-8 raw strings.
+/// fields. A raw string is any bytes here too.
 pub fn validate_strict<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let session = checked::DecodeSession::enter(false);

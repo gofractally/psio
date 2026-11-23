@@ -186,6 +186,9 @@ use crate::custom_types::*;
 conf_custom! {
     Id => "Id", "transparent{value:u64}";
     Tag => "Tag", "transparent{text:raw_string}";
+    Memo => "Memo", "transparent{text:string<=80}";
+    WrapMemo => "WrapMemo", "transparent{text:string<=80}";
+    MemoRec => "MemoRec", "record{id:u32,memo:Memo,note:optional<Memo>,memos:list<Memo>}";
     Blob => "Blob", "transparent{data:list<u8>}";
     Ref => "Ref", "transparent{target:variant<u64,raw_string>}";
     Name => "Name", "dwnc{value:u64}";
@@ -265,11 +268,10 @@ where
                 if exact.is_ok() || decode_exact.is_ok() || view_exact.is_ok() {
                     return fail("exact reader accepted unknown fields", String::new());
                 }
-            } else if v.strict_rejects() {
-                if exact.is_ok() || decode_exact.is_ok() || view_exact.is_ok() {
-                    return fail("exact reader accepted what C++ validate_strict rejects", String::new());
-                }
             } else {
+                // Also the frames of `string-raw-non-utf8`: a raw string is
+                // any bytes for the exact readers too (strict means
+                // exact-schema and canonical, not "strings are text").
                 if let Err(e) = &exact { return fail("validate_exact rejected", e.to_string()); }
                 if let Err(e) = &decode_exact { return fail("decode_exact rejected", e.to_string()); }
                 if let Err(e) = &view_exact { return fail("view_exact rejected", e.to_string()); }
@@ -315,11 +317,6 @@ where
 }
 
 impl Vector {
-    /// Valid frames that C++ `validate_strict` (and the Rust exact readers)
-    /// nevertheless reject: raw strings holding non-UTF-8 bytes.
-    pub fn strict_rejects(&self) -> bool {
-        self.class == "string-raw-non-utf8"
-    }
     /// Rejections whose `reason` every language reports word for word.
     pub fn reason_is_shared(&self) -> bool {
         self.class == "invariant" || self.class == "map-set-order"

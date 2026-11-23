@@ -44,6 +44,22 @@ derives! {
     pub struct Tag { pub text: RawString }
 }
 
+// A transparent type that bounds its member (docs/pssz-spec.md 5.10): the
+// wrapper is the bounded UTF-8 string. C++ `PSIO_REFLECT(Memo,
+// transparent(), attr(text, utf8 | max<80>))`; `WrapMemo` is the same type
+// spelled with the wrapper type (C++ `utf8_string<80>`).
+derives! {
+    #[psio(transparent)]
+    pub struct Memo { #[psio(max = 80)] pub text: String }
+}
+derives! {
+    #[psio(transparent)]
+    pub struct WrapMemo { pub text: psio::pssz::BoundedString<80> }
+}
+derives! {
+    pub struct MemoRec { pub id: u32, pub memo: Memo, pub note: Option<Memo>, pub memos: Vec<Memo> }
+}
+
 // Bytes as base64.
 derives_text! {
     #[psio(transparent, custom)]

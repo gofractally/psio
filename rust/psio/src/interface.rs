@@ -209,8 +209,13 @@ pub enum Receiver {
 pub struct MethodInfo {
     /// The function's identifier.
     pub name: &'static str,
-    /// The parameter names, in order.
+    /// The parameter names, in order; none for a method declared
+    /// `#[psio(positional)]`.
     pub params: &'static [&'static str],
+    /// The method has a name for every parameter: its arguments are an
+    /// object in text (and read as the positional array too). Otherwise
+    /// they are the array (docs/json.md "Method arguments").
+    pub named: bool,
     pub receiver: Receiver,
     /// Whether the function returns a value (anything but `()`).
     pub has_result: bool,
@@ -250,6 +255,8 @@ pub trait Method: PsszPack<Pssz> + PsszUnpack<Pssz> + Sized {
     const INDEX: usize;
     const NAME: &'static str;
     const PARAM_NAMES: &'static [&'static str];
+    /// See [`MethodInfo::named`].
+    const NAMED: bool;
     const HAS_RESULT: bool;
 
     /// The pSSZ of a result; no bytes for a method that returns nothing.

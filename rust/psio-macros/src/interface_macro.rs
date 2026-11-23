@@ -124,6 +124,12 @@ struct Method {
     result: Option<Type>,
     /// `#[pssz(max_dynamic_data = N)]`: the cap of the argument record.
     cap: Option<u64>,
+    /// `#[psio(max_fields = N)]`: the most parameters the method will ever
+    /// have.
+    max_fields: Option<u64>,
+    /// `#[psio(positional)]`: the parameter names are not part of the
+    /// interface (C++ `method(name)` without parameter names).
+    positional: bool,
     /// `#[psio(returns(...))]`: the bounds of the result, as the attribute
     /// a member of the result's type would carry.
     returns: Option<syn::Attribute>,
@@ -168,14 +174,26 @@ fn unraw(ident: &Ident) -> String {
     text.strip_prefix("r#").map(str::to_string).unwrap_or(text)
 }
 
-/// The annotations of a method: `#[pssz(max_dynamic_data = N)]` (the cap of
-/// its argument record) and `#[psio(returns(...))]` (the bounds of its
-/// result).
-fn method_annotations(attrs: &[syn::Attribute]) -> syn::Result<(Option<u64>, Option<syn::Attribute>)> {
-    const ACCEPTED: &str = "a function of a #[psio::interface] takes #[pssz(max_dynamic_data = N)] and \
-                            #[psio(returns(...))]";
+/// The annotations of a method.
+#[derive(Default)]
+struct MethodAnnotations {
+    /// `#[pssz(max_dynamic_data = N)]`: the cap of its argument record.
+    cap: Option<u64>,
+    /// `#[psio(returns(...))]`: the bounds of its result.
+    returns: Option<syn::Attribute>,
+    /// `#[psio(max_fields = N)]`.
+    max_fields: Option<u64>,
+    /// `#[psio(positional)]`.
+    positional: bool,
+}
+
+fn method_annotations(attrs: &[syn::Attribute]) -> syn::Result<MethodAnnotations> {
+    const ACCEPTED: &str = "a function of a #[psio::interface] takes #[pssz(max_dynamic_data = N)], \
+                            #[psio(max_fields = N)], #[psio(positional)] and #[psio(returns(...))]";
     let mut cap = None;
     let mut returns = None;
+    let mut max_fields: Option<u64> = None;
+    let mut positional = false;
     for attr in attrs {
         if attr.path.is_ident("json") || attr.path.is_ident("serde") {
             return Err(syn::Error::new_spanned(attr, ACCEPTED));
@@ -198,6 +216,25 @@ fn method_annotations(attrs: &[syn::Attribute]) -> syn::Result<(Option<u64>, Opt
                         return Err(syn::Error::new_spanned(nv, "`max_dynamic_data` is given twice"));
                     }
                 }
+                syn::NestedMeta::Meta(syn::Meta::NameValue(nv))
+                    if attr.path.is_ident("psio") && nv.path.is_ident("max_fields") =>
+                {
+                    let syn::Lit::Int(value) = &nv.lit else {
+                        return Err(syn::Error::new_spanned(nv, "max_fields is an integer"));
+                    };
+                    let n: u64 = value.base10_parse()?;
+                    if n > crate::attrs::MAX_RECORD_FIELDS as u64 {
+                        return Err(syn::Error::new_spanned(nv, "max_fields is at most 255 (docs/pssz-spec.md 8.4)"));
+                    }
+                    if max_fields.replace(n).is_some() {
+                        return Err(syn::Error::new_spanned(nv, "`max_fields` is given twice"));
+                    }
+                }
+                syn::NestedMeta::Meta(syn::Meta::Path(path))
+                    if attr.path.is_ident("psio") && path.is_ident("positional") =>
+                {
+                    positional = true;
+                }
                 syn::NestedMeta::Meta(syn::Meta::List(inner))
                     if attr.path.is_ident("psio") && inner.path.is_ident("returns") =>
                 {
@@ -210,7 +247,7 @@ fn method_annotations(attrs: &[syn::Attribute]) -> syn::Result<(Option<u64>, Opt
             }
         }
     }
-    Ok((cap, returns))
+    Ok(MethodAnnotations { cap, returns, max_fields, positional })
 }
 
 /// The annotations of a parameter: `#[psio(...)]` and `#[json(...)]`, as
@@ -251,7 +288,7 @@ fn contains_reference(ty: &Type) -> bool {
 
 fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
     let sig = &item.sig;
-    let (cap, returns) = method_annotations(&item.attrs)?;
+    let MethodAnnotations { cap, returns, max_fields, positional } = method_annotations(&item.attrs)?;
     if !sig.generics.params.is_empty() || sig.generics.where_clause.is_some() {
         return Err(syn::Error::new_spanned(&sig.generics, "a function of a #[psio::interface] is not generic"));
     }
@@ -320,7 +357,29 @@ fn method(item: &syn::TraitItemMethod) -> syn::Result<Method> {
     if returns.is_some() && result.is_none() {
         return Err(syn::Error::new_spanned(&sig.ident, "returns(...) bounds a result, and this function has none"));
     }
-    Ok(Method { ident: sig.ident.clone(), name: unraw(&sig.ident), receiver, params, result, cap, returns })
+    // docs/pssz-spec.md 8.4, 16: an argument list is a tuple.
+    if params.len() > crate::attrs::MAX_RECORD_FIELDS {
+        return Err(syn::Error::new_spanned(&sig.ident, "a function has at most 255 parameters"));
+    }
+    if let Some(max) = max_fields {
+        if params.len() as u64 > max {
+            return Err(syn::Error::new_spanned(
+                &sig.ident,
+                format!("max_fields = {max}, and the function has {} parameters", params.len()),
+            ));
+        }
+    }
+    Ok(Method {
+        ident: sig.ident.clone(),
+        name: unraw(&sig.ident),
+        receiver,
+        params,
+        result,
+        cap,
+        returns,
+        max_fields,
+        positional,
+    })
 }
 
 pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
@@ -432,7 +491,15 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         let schema_name = format!("{interface_name}.{name}");
         let param_idents: Vec<_> = m.params.iter().map(|p| &p.ident).collect();
         let param_types: Vec<_> = m.params.iter().map(|p| &p.ty).collect();
-        let param_names: Vec<_> = m.params.iter().map(|p| unraw(&p.ident)).collect();
+        // The names the interface has for the parameters: none when the
+        // method is positional.
+        let param_names: Vec<_> =
+            if m.positional { Vec::new() } else { m.params.iter().map(|p| unraw(&p.ident)).collect() };
+        let func_param_names: Vec<_> =
+            m.params.iter().map(|p| if m.positional { String::new() } else { unraw(&p.ident) }).collect();
+        let named = !m.positional;
+        let arguments = if named { "named" } else { "positional" };
+        let record_max_fields = m.max_fields.map(|n| quote!(#[psio(max_fields = #n)]));
         let param_attrs: Vec<_> = m.params.iter().map(|p| &p.attrs).collect();
         // What each parameter is on the wire and in the schema.
         let param_wire: Vec<Type> =
@@ -476,7 +543,8 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             #[doc = #doc]
             #[allow(non_camel_case_types)]
             #[derive(#k::PsszPack, #k::PsszUnpack, #k::ToPsszSchema, #k::JsonText #(, #derives)*)]
-            #[psio(crate = #k_text, name = #schema_name)]
+            #[psio(crate = #k_text, name = #schema_name, arguments = #arguments)]
+            #record_max_fields
             #record_cap
             #vis2 struct #ident { #(#(#param_attrs)* pub #param_idents: #param_types),* }
 
@@ -504,6 +572,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 const INDEX: usize = #index;
                 const NAME: &'static str = #name;
                 const PARAM_NAMES: &'static [&'static str] = &[#(#param_names),*];
+                const NAMED: bool = #named;
                 const HAS_RESULT: bool = #has_result;
                 #[allow(unused_variables)]
                 fn result_to_pssz(result: &Self::Result) -> #k::pssz::PsszResult<::std::vec::Vec<u8>> {
@@ -523,6 +592,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             #k::interface::MethodInfo {
                 name: #name,
                 params: &[#(#param_names),*],
+                named: #named,
                 receiver: #k::interface::Receiver::#receiver,
                 has_result: #has_result,
             }
@@ -541,7 +611,20 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             }
             None => (quote!(::core::option::Option::None), quote!(::std::vec::Vec::new())),
         };
-        // The cap of the argument record: its size limit and its width.
+        // The parameter-count cap, then the cap of the argument record
+        // (its size limit and its width): the order C++ writes.
+        let max_fields_attribute = match m.max_fields {
+            Some(max) => {
+                let max = max.to_string();
+                quote! {
+                    __attributes.push(#k::pssz::schema_ir::Attribute {
+                        name: "maxFields".into(),
+                        value: ::core::option::Option::Some(#max.into()),
+                    });
+                }
+            }
+            None => quote!(),
+        };
         let cap_attribute = match m.cap {
             Some(cap) => {
                 let cap = cap.to_string();
@@ -557,11 +640,12 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         funcs.push(quote! {
             #k::pssz::schema_ir::Func {
                 name: #name.into(),
-                params: ::std::vec![#(#k::interface::param::<#param_wire>(builder, #param_names)?),*],
+                params: ::std::vec![#(#k::interface::param::<#param_wire>(builder, #func_param_names)?),*],
                 result: #result_schema,
                 attributes: {
                     #[allow(unused_mut)]
                     let mut __attributes: ::std::vec::Vec<#k::pssz::schema_ir::Attribute> = #result_attributes;
+                    #max_fields_attribute
                     #cap_attribute
                     __attributes
                 },
