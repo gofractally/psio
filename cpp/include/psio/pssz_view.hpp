@@ -671,6 +671,12 @@ namespace psio {
 
       using key_type = detail::assoc_key_t<M>;
 
+      // An integer key whose `<` is the order of its `key` encoding (char is
+      // excluded: its key form is the unsigned byte whatever the platform's
+      // char signedness).
+      static constexpr bool key_is_ordered_integer =
+         std::is_integral_v<key_type> && !std::is_same_v<key_type, char>;
+
       // The key of entry i, as a view (or a value for an arithmetic key).
       [[nodiscard]] auto key_at(std::size_t i) const noexcept
       {
@@ -704,6 +710,38 @@ namespace psio {
       template <typename K>
       [[nodiscard]] std::size_t lower_bound(const K& key) const
       {
+         // Integers and strings order exactly as their `key` encodings do,
+         // so the probe compares the key in place: no encoding, no
+         // allocation.
+         if constexpr (key_is_ordered_integer)
+         {
+            const key_type want(key);
+            std::size_t    lo = 0, hi = this->size();
+            while (lo < hi)
+            {
+               const std::size_t mid = lo + (hi - lo) / 2;
+               if (static_cast<key_type>(key_at(mid)) < want)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
+         else if constexpr (std::is_same_v<key_type, std::string> &&
+                            std::is_convertible_v<const K&, std::string_view>)
+         {
+            const std::string_view want(key);
+            std::size_t            lo = 0, hi = this->size();
+            while (lo < hi)
+            {
+               const std::size_t mid = lo + (hi - lo) / 2;
+               if (key_at(mid).view_() < want)
+                  lo = mid + 1;
+               else
+                  hi = mid;
+            }
+            return lo;
+         }
          std::vector<char> want, have;
          ::psio::detail::append_key_bytes(key_type(key), want);
          std::size_t lo = 0, hi = this->size();
@@ -724,9 +762,15 @@ namespace psio {
       [[nodiscard]] std::size_t find(const K& key) const
       {
          const std::size_t i = lower_bound(key);
-         if (i < this->size() && key_type(::psio::value_of(key_at(i))) == key_type(key))
+         if (i == this->size())
             return i;
-         return this->size();
+         if constexpr (key_is_ordered_integer)
+            return static_cast<key_type>(key_at(i)) == key_type(key) ? i : this->size();
+         else if constexpr (std::is_same_v<key_type, std::string> &&
+                            std::is_convertible_v<const K&, std::string_view>)
+            return key_at(i).view_() == std::string_view(key) ? i : this->size();
+         else
+            return key_type(::psio::value_of(key_at(i))) == key_type(key) ? i : this->size();
       }
       template <typename K>
       [[nodiscard]] bool contains(const K& key) const
