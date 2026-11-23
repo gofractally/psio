@@ -623,6 +623,34 @@ namespace psio::graphql
          }
       }
 
+      // A parameter's arguments, from position `at` on: one, or for an
+      // argument group one per member. `at` ends after the last one read;
+      // on failure it is the position of the argument that has no valid
+      // value.
+      template <typename P>
+      bool decode_param(exec& e, const plan_field& f, std::size_t& at, P& out)
+      {
+         if constexpr (argument_group<P>)
+         {
+            using R = reflect<P>;
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ([&] {
+                  if constexpr (object_def<P>::template meta<Is>().hidden)
+                     return true;
+                  else
+                     return decode_param(e, f, at, out.*(R::template member_pointer<Is>));
+               }() && ...);
+            }(std::make_index_sequence<R::member_count>{});
+         }
+         else
+         {
+            if (!decode_input(e, e.arg(f, at), out))
+               return false;
+            ++at;
+            return true;
+         }
+      }
+
       struct context_slot
       {
       };
@@ -670,8 +698,8 @@ namespace psio::graphql
                          using A = std::tuple_element_t<Ks, Args>;
                          if constexpr (!is_context_param_v<A>)
                          {
-                            constexpr std::size_t at = slot_args<T, I>::template arg_index<Ks>;
-                            if (!decode_input(e, e.arg(f, at), std::get<Ks>(args)))
+                            std::size_t at = slot_args<T, I>::template arg_index<Ks>;
+                            if (!decode_param(e, f, at, std::get<Ks>(args)))
                             {
                                bad = at;
                                return false;
@@ -682,7 +710,18 @@ namespace psio::graphql
                       ...);
                if (bad != static_cast<std::size_t>(-1))
                   return e.fail_field(f, cat("Argument \"", f.desc->args[bad].name, "\" has an invalid value."));
-               if constexpr (std::is_void_v<typename S::result>)
+               if constexpr (slot_value<T, I>::deferred)
+               {
+                  // The result's own arguments, then the value it resolves to.
+                  deferred_args_t<typename S::result> extra{};
+                  std::size_t                         at = slot_args<T, I>::own_count;
+                  if (!decode_param(e, f, at, extra))
+                     return e.fail_field(f, cat("Argument \"", f.desc->args[at].name, "\" has an invalid value."));
+                  decltype(auto) value = resolve_deferred(
+                     static_cast<context&>(e), call<I>(e, obj, args, std::index_sequence<Ks...>{}), extra);
+                  return write(e, value, f, f.child);
+               }
+               else if constexpr (std::is_void_v<typename S::result>)
                {
                   call<I>(e, obj, args, std::index_sequence<Ks...>{});
                   e.w.append(std::string_view{"true"});

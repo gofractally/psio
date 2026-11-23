@@ -118,6 +118,9 @@ struct Query
 #elif defined(GQL_FAIL_FLATTEN_SCALAR)
    std::optional<Part> part;
    PSIO_REFLECT(Query, ok, attr(part, psio::graphql::flatten))
+#elif defined(GQL_FAIL_ARGUMENT_NAME)
+   int rows(int first, psio::graphql::page_args page) const { return first + page.first.value_or(0); }
+   PSIO_REFLECT(Query, ok, method(rows, first, page))
 #else
    PSIO_REFLECT(Query, ok)
 #endif

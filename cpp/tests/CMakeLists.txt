@@ -772,6 +772,7 @@ psio_graphql_compile_fail(template_name_conflict GQL_FAIL_TEMPLATE_NAME "have th
 psio_graphql_compile_fail(template_argument_unnamed GQL_FAIL_TEMPLATE_ARG "has no GraphQL name")
 psio_graphql_compile_fail(flatten_collision GQL_FAIL_FLATTEN_NAME "have the same GraphQL name")
 psio_graphql_compile_fail(flatten_scalar GQL_FAIL_FLATTEN_SCALAR "flatten annotates a member that is a reflected record")
+psio_graphql_compile_fail(argument_name_conflict GQL_FAIL_ARGUMENT_NAME "two arguments of a field have the same name")
 
 # Consumer warning hygiene: every public header, with the core codecs
 # instantiated, compiles under -Wall -Wextra -Werror with PSIO's include

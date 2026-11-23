@@ -136,6 +136,21 @@ namespace psio::graphql
       constexpr bool operator==(const flatten_spec&) const = default;
    };
    inline constexpr flatten_spec flatten{};
+   // Type-level: a reflected record that, as a method PARAMETER, is not an
+   // input object but a group of arguments — each member is one argument of
+   // the field, named by the member:
+   //    struct Paging { std::optional<std::int32_t> first; std::optional<std::string> after; };
+   //    PSIO_REFLECT(Paging, first, after)
+   //    PSIO_TYPE_ATTRS(Paging, psio::graphql::arguments)
+   //    ... rows(Paging page) const;      // rows(first: Int, after: String)
+   // A class template cannot be annotated: specialise `argument_group`.
+   struct arguments_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const arguments_spec&) const = default;
+   };
+   inline constexpr arguments_spec arguments{};
+
    // Name of a type that cannot be annotated. Specialise with
    //    static constexpr std::string_view value = "SearchResult";
    // `input_type_name<T>` names T used as an input object (default: the
@@ -146,6 +161,42 @@ namespace psio::graphql
    };
    template <typename T>
    struct input_type_name
+   {
+   };
+
+   // True for a parameter type whose members are the field's arguments (see
+   // `arguments`). Specialise for a class template:
+   //    template <typename K>
+   //    inline constexpr bool psio::graphql::argument_group<Range<K>> = true;
+   namespace detail
+   {
+      template <typename T>
+      constexpr bool annotated_argument_group() noexcept
+      {
+         if constexpr (Reflected<T> && !std::is_enum_v<T>)
+            return has_spec_v<arguments_spec, std::remove_cvref_t<decltype(annotate<type<T>{}>)>>;
+         else
+            return false;
+      }
+   }  // namespace detail
+   template <typename T>
+   inline constexpr bool argument_group = detail::annotated_argument_group<T>();
+
+   // A method result that is completed by arguments of its own: the field
+   // takes the method's arguments followed by those of `arguments` (an
+   // argument group), and its value is what `resolve` returns. Specialise
+   // for the type an index or a query builder has:
+   //    template <typename Row, typename Key>
+   //    struct psio::graphql::resolver<TableIndex<Row, Key>> {
+   //       struct arguments { key_range<Key> range; page_args page; ... };
+   //       static auto resolve(TableIndex<Row, Key>&& index, const arguments& a)
+   //       { return psio::graphql::paginate(source_of(index), a.range, a.page); }
+   //    };
+   // so that `auto rows() const { return table.index(); }` is the field
+   // `rows(gt, ge, lt, le, first, last, before, after): RowConnection`.
+   // `resolve` may take a third parameter `context&`.
+   template <typename R>
+   struct resolver
    {
    };
 
@@ -1119,6 +1170,39 @@ namespace psio::graphql
          static constexpr bool is_static = reflect<T>::template method_is_static<J>;
       };
 
+      // A method result completed by arguments of its own (resolver<R>).
+      template <typename R>
+      concept Deferred = requires { typename resolver<std::remove_cvref_t<R>>::arguments; };
+      template <typename R>
+      using deferred_args_t = typename resolver<std::remove_cvref_t<R>>::arguments;
+      template <typename R>
+      decltype(auto) resolve_deferred(context& c, R&& value, const deferred_args_t<R>& args)
+      {
+         using Res = resolver<std::remove_cvref_t<R>>;
+         if constexpr (requires { Res::resolve(std::forward<R>(value), args, c); })
+            return Res::resolve(std::forward<R>(value), args, c);
+         else
+            return Res::resolve(std::forward<R>(value), args);
+      }
+      // What the field of slot I yields: the member, the method's result,
+      // or what the result's resolver makes of it.
+      template <typename T, std::size_t I>
+      struct slot_value
+      {
+         using type = typename slot_types<T, I>::result;
+         static constexpr bool deferred = false;
+      };
+      template <typename T, std::size_t I>
+         requires(Reflected<T> && I >= reflect<T>::member_count &&
+                  Deferred<typename slot_types<T, I>::result>)
+      struct slot_value<T, I>
+      {
+         using raw  = typename slot_types<T, I>::result;
+         using type = decltype(resolve_deferred(std::declval<context&>(), std::declval<raw>(),
+                                                std::declval<const deferred_args_t<raw>&>()));
+         static constexpr bool deferred = true;
+      };
+
       // A flattened member's record type.
       template <typename T, std::size_t I>
       struct flat_member
@@ -1300,33 +1384,84 @@ namespace psio::graphql
          ::psio::graphql::detail::in_wrap<__VA_ARGS__>::info.nonnull                           \
    }
 
-      // An argument whose value is a page size: `first` / `last` of type Int.
+      // ── Arguments ────────────────────────────────────────────────────────
+      //
+      // A method parameter is one argument, named by the reflected parameter
+      // name — except the request context (no argument) and an argument
+      // group (graphql::arguments), whose members are arguments each, named
+      // by the member; a group inside a group is taken apart the same way.
       template <typename A>
-      inline constexpr bool is_page_size_v = std::is_integral_v<A> && !std::is_same_v<A, bool> &&
-                                             sizeof(A) <= 4;
-      template <typename A>
-      inline constexpr bool is_page_size_v<std::optional<A>> = is_page_size_v<A>;
+      constexpr std::size_t arg_width() noexcept
+      {
+         if constexpr (is_context_param_v<A>)
+            return 0;
+         else if constexpr (argument_group<A>)
+         {
+            static_assert(std::is_default_constructible_v<A>,
+                          "psio::graphql: an argument group must be default-constructible");
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ((object_def<A>::template meta<Is>().hidden
+                           ? std::size_t{0}
+                           : arg_width<typename reflect<A>::template member_type<Is>>()) +
+                       ... + std::size_t{0});
+            }(std::make_index_sequence<reflect<A>::member_count>{});
+         }
+         else
+            return 1;
+      }
+      template <typename A, std::size_t N>
+      constexpr void emit_args(std::array<arg_desc, N>& out, std::size_t& n, std::string_view name,
+                               std::string_view description = {})
+      {
+         if constexpr (is_context_param_v<A>)
+            return;
+         else if constexpr (argument_group<A>)
+         {
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               (([&] {
+                   constexpr slot_meta m = object_def<A>::template meta<Is>();
+                   if constexpr (!m.hidden)
+                      emit_args<typename reflect<A>::template member_type<Is>>(out, n, m.name,
+                                                                               m.description);
+                }()),
+                ...);
+            }(std::make_index_sequence<reflect<A>::member_count>{});
+         }
+         else
+         {
+            out[n] = arg_desc{name, PSIO_GRAPHQL_IN_REF(A), static_cast<std::uint16_t>(n), description};
+            ++n;
+         }
+      }
 
-      // The arguments of method slot I: its parameters that are not the
-      // request context, named by the reflected parameter names.
+      // The arguments of method slot I: those of its parameters, then those
+      // of its result's resolver (resolver<R>::arguments).
       template <typename T, std::size_t I>
       struct slot_args
       {
          using Args = typename slot_types<T, I>::args;
          static constexpr std::size_t arity = std::tuple_size_v<Args>;
 
-         static constexpr std::size_t count = []<std::size_t... Ks>(std::index_sequence<Ks...>) {
-            return (std::size_t{!is_context_param_v<std::tuple_element_t<Ks, Args>>} + ... + 0);
-         }(std::make_index_sequence<arity>{});
-
-         // Position of parameter K among the arguments.
+         // Position of parameter K's first argument.
          template <std::size_t K>
          static constexpr std::size_t arg_index = []<std::size_t... Ks>(std::index_sequence<Ks...>) {
-            return (std::size_t{!is_context_param_v<std::tuple_element_t<Ks, Args>>} + ... + 0);
+            return (arg_width<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>() + ... +
+                    std::size_t{0});
          }(std::make_index_sequence<K>{});
+
+         // Arguments of the parameters; position of the resolver's.
+         static constexpr std::size_t own_count = arg_index<arity>;
+         static constexpr std::size_t count     = [] {
+            if constexpr (slot_value<T, I>::deferred)
+               return own_count +
+                      arg_width<deferred_args_t<typename slot_types<T, I>::result>>();
+            else
+               return own_count;
+         }();
 
          static constexpr auto value = [] {
             std::array<arg_desc, count> out{};
+            std::size_t                 n = 0;
             if constexpr (arity != 0)
             {
                constexpr auto names =
@@ -1335,41 +1470,38 @@ namespace psio::graphql
                              "psio::graphql: a reflected method that is a GraphQL field must "
                              "name every parameter: method(name, param1, param2, ...)");
                [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
-                  (([&] {
-                      using A = std::tuple_element_t<Ks, Args>;
-                      if constexpr (!is_context_param_v<A>)
-                         out[arg_index<Ks>] =
-                            arg_desc{names[Ks], PSIO_GRAPHQL_IN_REF(std::remove_cvref_t<A>),
-                                     static_cast<std::uint16_t>(arg_index<Ks>)};
-                   }()),
+                  (emit_args<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>(out, n, names[Ks]),
                    ...);
                }(std::make_index_sequence<arity>{});
             }
+            if constexpr (slot_value<T, I>::deferred)
+            {
+               static_assert(argument_group<deferred_args_t<typename slot_types<T, I>::result>>,
+                             "psio::graphql: resolver<R>::arguments must be an argument group "
+                             "(psio::graphql::arguments)");
+               emit_args<deferred_args_t<typename slot_types<T, I>::result>>(out, n, {});
+            }
             return out;
          }();
-      };
 
-      // Index of the page-size argument named `name` of method slot I, or -1.
-      template <typename T, std::size_t I>
-      constexpr std::int8_t page_arg(std::string_view name) noexcept
-      {
-         using Args       = typename slot_types<T, I>::args;
-         std::int8_t found = -1;
-         if constexpr (std::tuple_size_v<Args> != 0)
+         static constexpr bool names_distinct = [] {
+            for (std::size_t i = 0; i < count; ++i)
+               for (std::size_t j = i + 1; j < count; ++j)
+                  if (value[i].name == value[j].name)
+                     return false;
+            return true;
+         }();
+
+         // Index of the page-size argument (of type Int) named `name`, or -1.
+         static constexpr std::int8_t page_arg(std::string_view name) noexcept
          {
-            constexpr auto names =
-               reflect<T>::template method_param_names<I - reflect<T>::member_count>;
-            [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
-               (([&] {
-                   if constexpr (is_page_size_v<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>)
-                      if (names[Ks] == name)
-                         found = static_cast<std::int8_t>(slot_args<T, I>::template arg_index<Ks>);
-                }()),
-                ...);
-            }(std::make_index_sequence<std::tuple_size_v<Args>>{});
+            for (std::size_t i = 0; i < count && i < 127; ++i)
+               if (value[i].name == name && value[i].type.depth == 0 &&
+                   value[i].type.named->name == "Int")
+                  return static_cast<std::int8_t>(i);
+            return -1;
          }
-         return found;
-      }
+      };
 
       // A slot is part of the object type when it is not hidden and, for a
       // method, when it can be called: const (or static), or any method of
@@ -1404,7 +1536,7 @@ namespace psio::graphql
          f.deprecated         = m.deprecated;
          f.description        = m.description;
          f.deprecation_reason = m.reason;
-         using V = typename S::result;
+         using V = typename slot_value<T, I>::type;
          if constexpr (std::is_void_v<V>)
             f.type = type_ref{&leaf_type<bool>::value, 0, 1};
          else
@@ -1418,10 +1550,14 @@ namespace psio::graphql
          }
          if constexpr (object_def<T>::template is_method<I>)
          {
+            static_assert(slot_args<T, I>::names_distinct,
+                          "psio::graphql: two arguments of a field have the same name (a "
+                          "parameter and a member of an argument group, or members of two "
+                          "groups)");
             f.args      = slot_args<T, I>::value.data();
             f.arg_count = static_cast<std::uint16_t>(slot_args<T, I>::count);
-            f.first_arg = page_arg<T, I>("first");
-            f.last_arg  = page_arg<T, I>("last");
+            f.first_arg = slot_args<T, I>::page_arg("first");
+            f.last_arg  = slot_args<T, I>::page_arg("last");
          }
          return f;
       }

@@ -157,6 +157,11 @@ namespace psio::graphql
       std::optional<std::string>  before{};
       std::optional<std::string>  after{};
    };
+   // As a method parameter it is the four arguments `first: Int, last: Int,
+   // before: String, after: String`.
+   PSIO_REFLECT(page_args, first, last, before, after)
+   template <>
+   inline constexpr bool argument_group<page_args> = true;
 
    // One page of `source` (spec: Relay Cursor Connections). `first` pages
    // forward from `after`, `last` backward from `before`; with neither, the

@@ -157,3 +157,102 @@ TEST_CASE("graphql: flattened members", "[graphql][service]")
    // The member's own type is unchanged.
    CHECK(gap_flatten::api::sdl().find("type Deep") == std::string::npos);
 }
+
+// ── Argument groups ─────────────────────────────────────────────────────────
+namespace gap_arguments
+{
+   struct Point
+   {
+      std::int32_t x = 0, y = 0;
+      PSIO_REFLECT(Point, x, y)
+   };
+   struct Paging
+   {
+      std::optional<std::int32_t> first;
+      std::optional<std::string>  after;
+      std::int32_t                internal = 9;
+      PSIO_REFLECT(Paging,
+                   first,
+                   attr(after, psio::graphql::name_as{"cursor"} | psio::graphql::doc{"Where to start."}),
+                   attr(internal, psio::graphql::hidden))
+   };
+   PSIO_TYPE_ATTRS(Paging, psio::graphql::arguments)
+   struct Filter
+   {
+      std::string               prefix;
+      std::vector<std::int32_t> ids;
+      std::optional<Point>      at;
+      Paging                    paging;  // a group in a group
+      PSIO_REFLECT(Filter, prefix, ids, at, paging)
+   };
+   PSIO_TYPE_ATTRS(Filter, psio::graphql::arguments)
+
+   // ── A result completed by its own arguments ────────────────────────────
+   struct Later
+   {
+      std::int32_t base = 0;
+   };
+   struct LaterArgs
+   {
+      std::int32_t add = 0;
+      PSIO_REFLECT(LaterArgs, add)
+   };
+   PSIO_TYPE_ATTRS(LaterArgs, psio::graphql::arguments)
+   struct Query
+   {
+      std::string  find(std::int32_t limit, Filter filter, const gql::context&, bool flag) const
+      {
+         std::string out = std::to_string(limit) + "|" + filter.prefix + "|";
+         for (const std::int32_t id : filter.ids)
+            out += std::to_string(id) + ",";
+         out += "|" + (filter.at ? std::to_string(filter.at->x) + ":" + std::to_string(filter.at->y) : "-");
+         out += "|" + (filter.paging.first ? std::to_string(*filter.paging.first) : "-");
+         out += "|" + filter.paging.after.value_or("-") + "|" + std::to_string(filter.paging.internal);
+         return out + (flag ? "|t" : "|f");
+      }
+      Later later(std::int32_t base) const { return {base}; }
+      PSIO_REFLECT(Query, method(find, limit, filter, ctx, flag), method(later, base))
+   };
+   using api = gql::schema<Query>;
+   inline std::string run(std::string_view text, std::string_view variables = {})
+   {
+      return run_on<api>(Query{}, text, variables);
+   }
+}  // namespace gap_arguments
+template <>
+struct psio::graphql::resolver<gap_arguments::Later>
+{
+   using arguments = gap_arguments::LaterArgs;
+   static std::int32_t resolve(gap_arguments::Later&& later, const arguments& args, psio::graphql::context&)
+   {
+      return later.base + args.add;
+   }
+};
+
+TEST_CASE("graphql: argument groups", "[graphql][service]")
+{
+   CHECK(gap_arguments::api::sdl().find("  find(limit: Int!, prefix: String!, ids: [Int!]!, at: PointInput, first: Int, cursor: String, flag: Boolean!): String!\n") !=
+         std::string::npos);
+   CHECK(gap_arguments::run(R"({ find(flag: true, cursor: "c", ids: [3, 4], prefix: "p", limit: 2, at: {x: 1, y: 2}) })") ==
+         R"({"data":{"find":"2|p|3,4,|1:2|-|c|9|t"}})");
+   CHECK(gap_arguments::run(R"(query ($p: String!, $ids: [Int!]!, $n: Int, $at: PointInput) { find(limit: 1, prefix: $p, ids: $ids, first: $n, at: $at, flag: false) })",
+             R"({"p": "v", "ids": [8], "n": 5, "at": {"x": 6, "y": 7}})") == R"({"data":{"find":"1|v|8,|6:7|5|-|9|f"}})");
+   // A member that is not optional is a required argument; a hidden one is
+   // not an argument; the group's own name is not one either.
+   CHECK(gap_arguments::run(R"({ find(limit: 1, ids: [], flag: true) })").find(R"(argument \"prefix\" of type \"String!\" is required)") !=
+         std::string::npos);
+   CHECK(gap_arguments::run(R"({ find(limit: 1, prefix: "", ids: [], flag: true, internal: 3) })").find(R"(Unknown argument \"internal\")") !=
+         std::string::npos);
+   CHECK(gap_arguments::run(R"({ find(limit: 1, prefix: "", ids: [], flag: true, filter: 3) })").find(R"(Unknown argument \"filter\")") !=
+         std::string::npos);
+   CHECK(gap_arguments::run(R"({ find(limit: 1, prefix: "", ids: [], flag: true, after: "x") })").find(R"(Unknown argument \"after\")") !=
+         std::string::npos);
+   // The description of a member is the argument's.
+   CHECK(gap_arguments::run(R"({ __type(name: "Query") { fields { name args { name description } } } })")
+            .find(R"({"name":"cursor","description":"Where to start."})") != std::string::npos);
+
+   // A result with arguments of its own: they follow the method's.
+   CHECK(gap_arguments::api::sdl().find("  later(base: Int!, add: Int!): Int!\n") != std::string::npos);
+   CHECK(gap_arguments::run("{ later(add: 2, base: 40) }") == R"({"data":{"later":42}})");
+   CHECK(gap_arguments::run("{ later(base: 40) }").find(R"(argument \"add\" of type \"Int!\" is required)") != std::string::npos);
+}

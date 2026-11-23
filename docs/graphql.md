@@ -95,7 +95,7 @@ shape.
 | reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field. A member annotated `psio::graphql::flatten` is replaced by its own fields ([Flattened members](#flattened-members)) |
 | reflected record without members or methods (`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`) | Object with the one field `_: Boolean`, always `true` ([Records without members](#records-without-members)) |
 | instantiation of a reflected class template, `Box<A>` | Object named `Box_A` ([Class templates](#class-templates)) |
-| the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible |
+| the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible. A record marked `psio::graphql::arguments` is not an input object but one argument per member ([Argument groups](#argument-groups)) |
 | `std::optional<T>`, `T*`, `unique_ptr`, `shared_ptr` | nullable `T`; every other type is non-null |
 | `psio::graphql::result<T>` (or any type with `has_value()`, `*`, `error()`) | nullable `T`; an error becomes a field error |
 | `std::vector`, `std::array`, `std::span`, any type with `begin()`/`end()` | List. The range is iterated once, lazily: a method can return a generator-like range and nothing is materialised |
@@ -123,6 +123,7 @@ shape.
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
 | `psio::nested<T>` (`psio/nested.hpp`), as a value or through a view | `T`: the inner value, read in place through the view over the nested bytes. Output only |
 | `psio::graphql::connection<Node>` | `<Node>Connection`, `<Node>Edge`, `PageInfo` (see [Connections](#connections)) |
+| a method result `R` with a `psio::graphql::resolver<R>` | what `resolver<R>::resolve` returns; the field gains `resolver<R>::arguments` ([Results with arguments of their own](#results-with-arguments-of-their-own)) |
 
 A type invariant (`docs/pssz-spec.md` §18) holds here as in `psio::ijson`: an
 argument or variable that violates it is a validation error, a result that
@@ -177,8 +178,9 @@ specialising `psio::graphql::type_name<T>` (`input_type_name<T>` for its
 input-object name) with a `static constexpr std::string_view value`.
 
 Descriptions (`doc`) and deprecation appear in introspection and SDL.
-Enum values, arguments and input fields of methods have no place for an
-annotation and so no description.
+Enum values and the parameters of a method have no place for an annotation
+and so no description; a member of an argument group has (its `doc` is the
+argument's description).
 
 ### Records without members
 
@@ -290,8 +292,9 @@ same GraphQL name (including `Foo`'s input object against a type named
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
 optional, `id` on a non-scalar, an object type whose members are all hidden,
-`flatten` on a member that is not a reflected record, a template argument
-without a GraphQL name.
+`flatten` on a member that is not a reflected record, two arguments of a
+field with one name (a parameter and a member of an argument group), a
+template argument without a GraphQL name.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -351,6 +354,7 @@ plan and the request's variables, in declaration order:
 
 - scalars, enums, `std::optional`, `std::vector` and reflected records
   (input objects) of those;
+- an *argument group*: one argument per member (below);
 - a parameter of type `psio::graphql::context&` (or `const context&`)
   receives the request context and is not an argument. `context::user<T>()`
   returns the object attached with `request::user(obj)` if it is a `T`, else
@@ -359,6 +363,67 @@ plan and the request's variables, in declaration order:
 It may return a value, a reference, a view or buffer of encoded data, an
 optional or pointer, a range of any of those, or `result<T>` /
 `psio::graphql::fail("message")` for a field error.
+
+### Argument groups
+
+A reflected record marked as a group of arguments is, as a parameter, not
+an input object: each of its members is an argument of the field, named by
+the member, in the member's place among the arguments.
+
+```cpp
+struct Paging { std::optional<std::int32_t> first; std::optional<std::string> after; };
+PSIO_REFLECT(Paging, first, attr(after, psio::graphql::doc{"Where to start."}))
+PSIO_TYPE_ATTRS(Paging, psio::graphql::arguments)
+
+std::vector<Row> rows(std::string prefix, Paging page) const;     // method(rows, prefix, page)
+// rows(prefix: String!, first: Int, after: String): [Row!]!
+```
+
+A class template cannot be annotated; specialise the trait instead:
+`template <typename K> inline constexpr bool
+psio::graphql::argument_group<Range<K>> = true;`.
+
+- Each member is typed as a parameter of that type would be (an optional
+  member is a nullable argument, any other a required one); `name_as`,
+  `hidden` (not an argument; keeps its default) and `doc` apply.
+- A member that is itself a group is taken apart the same way, so groups
+  compose.
+- The parameter's own name is not used. Two arguments of one field with the
+  same name are a compile error.
+- A group must be default-constructible. Only a parameter (or a group's
+  member) of exactly the group type is taken apart: `std::optional<Paging>`
+  and `std::vector<Paging>` are an input object `PagingInput`.
+- The plan is the same as for separate parameters — one value per argument
+  — so variables, validation, introspection and plan reuse see ordinary
+  arguments.
+
+`psio::graphql::page_args` (`first`, `last`, `before`, `after`) is a group
+([Connections](#connections)).
+
+### Results with arguments of their own
+
+`psio::graphql::resolver<R>` lets a *result type* bring the arguments that
+complete it. A method that returns an `R` is then a field with the method's
+arguments followed by those of `resolver<R>::arguments` (an argument
+group), and its value — and so its GraphQL type — is what `resolve`
+returns:
+
+```cpp
+template <typename Row>
+struct psio::graphql::resolver<TableIndex<Row>> {
+   using arguments = psio::graphql::page_args;
+   static auto resolve(TableIndex<Row>&& index, const arguments& page)     // optionally a third: context&
+   { return psio::graphql::paginate(Source{std::move(index)}, page); }
+};
+
+auto users() const { return table.getIndex<0>(); }   // method(users)
+// users(first: Int, last: Int, before: String, after: String): UserConnection
+```
+
+Written once by the embedder for its index type, this makes every method
+that returns an index a connection field, with nothing in the service code.
+It applies to method results only (a data member of such a type is mapped
+as its type is).
 
 **Mutations.** `schema<Query, Mutation>`: every reflected method of
 `Mutation` (const or not) is a field of the mutation type; a `void` method
@@ -503,7 +568,8 @@ WebAssembly (no WASI sysroot on the machine).
 - **Argument and input-field default values**; `ID` as an argument type.
 - **Custom directives**; only `@skip` and `@include` (and `@deprecated` in
   the schema). `@specifiedBy` is not listed and `specifiedByURL` is null.
-- **Descriptions of enum values, arguments and input fields of methods.**
+- **Descriptions of enum values and of method parameters** (a member of an
+  argument group has one).
 - **Unicode escapes of the form `\u{…}`** (they postdate October 2021).
 - Validation reports the errors it finds while planning: a fragment that is
   never used is reported as unused but its body is not validated further, and
@@ -526,7 +592,7 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
 | `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
-| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates, flattened members), each on a small schema |
+| `cpp/tests/graphql_service_tests.cpp` | the rules a service leans on (markers, class templates, flattened members, argument groups), each on a small schema |
 | `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |
