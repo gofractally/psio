@@ -71,6 +71,13 @@ namespace warnings_check
       }
       PSIO_REFLECT(span_of, lo, hi, invariant(check))
    };
+   // A schema id and nothing else.
+   struct named_call
+   {
+      std::uint32_t method = 0;
+      PSIO_REFLECT(named_call, schemaId("warnings.call"), method)
+   };
+   static_assert(psio::schema_custom_id<named_call>() == "warnings.call");
    struct der
    {
       std::vector<std::uint8_t> data{0x30};

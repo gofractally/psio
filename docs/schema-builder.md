@@ -153,16 +153,23 @@ builder records everything those depend on:
   reflected name as a named alias of its member's type:
   `{name: "SubjectPublicKeyInfo", type: <the member's type>}`. Nothing else
   marks it; a schema-only tool needs nothing more.
-- **Custom types.** A type with a `text_category` adapter, an invariant, or
-  both — of any shape: record, transparent wrapper, enum, `std::variant`,
+- **Custom types.** A type with a `text_category` adapter, an invariant, a
+  declared schema id (`schemaId("Id")` in `PSIO_REFLECT`), or several of
+  these — of any shape: record, transparent wrapper, enum, `std::variant`,
   `std::tuple`, list — is `Custom{<its wire type>, id}`
   (`psio::schema_custom_v<T>`, `psio::schema_custom_id<T>()`): for a
   transparent wrapper the Custom wraps the member's type. The id is the
   adapter's `schema_id`, else the id given to `PSIO_INVARIANT`, else the
-  reflected record or enum name; a type with none (a variant, a tuple) must
-  provide one or the builder does not compile. The handler for the id —
-  text form and invariant — is registered with the schema-driven codecs
-  (`docs/json.md`, "Custom types through a schema").
+  one given by `schemaId("Id")`, else the reflected record or enum name (two
+  of the first three on one type do not compile); a type with none (a
+  variant, a tuple) must provide one or the builder does not compile. The
+  handler for the id — text form and invariant — is registered with the
+  schema-driven codecs (`docs/json.md`, "Custom types through a schema").
+  `schemaId("Id")` alone gives a record the node and nothing else: no text
+  form, no check, the same bytes, width, key and text, and it stays
+  addressable by `psio::mutable_view` — the declaration for a record that
+  only a schema-driven tool treats specially
+  (`docs/annotations.md` 5.15).
 
 ### The `Nested` node
 

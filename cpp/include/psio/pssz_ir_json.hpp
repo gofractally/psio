@@ -121,7 +121,7 @@ template <typename T> struct typed_custom_handler
    {
       static_assert(::psio::schema_custom_v<T>,
                     "psio: CustomHandlers::add<T>() takes a custom type: one with a "
-                    "text_category adapter, an invariant, or both");
+                    "text_category adapter, an invariant, a schemaId, or several of these");
       CustomHandlers::Handler handler;
       if constexpr (::psio::detail::text_adapter_is_custom<T>())
       {

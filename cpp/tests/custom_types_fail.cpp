@@ -6,6 +6,7 @@
 #include <psio/graphql.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
+#include <psio/mutable_view.hpp>
 #include <psio/pssz.hpp>
 #include <psio/schema_builder.hpp>
 
@@ -148,6 +149,35 @@ PSIO_INVARIANT(app::Alias, app::ok)
 #endif
 static_assert(psio::has_invariant_v<app::Checked>);
 inline const auto use_checked = psio::check_invariant(app::Checked{}).ok();
+
+// ── schemaId("Id") ────────────────────────────────────────────────────────
+namespace app
+{
+   struct Named
+   {
+      std::uint32_t n = 0;
+#if defined(CT_FAIL_SCHEMA_ID_RESERVED)
+      PSIO_REFLECT(Named, schemaId("string"), n)
+#elif defined(CT_FAIL_SCHEMA_ID_RESERVED_PREFIX)
+      PSIO_REFLECT(Named, n, schemaId("duration-1/60"))
+#elif defined(CT_FAIL_SCHEMA_ID_EMPTY)
+      PSIO_REFLECT(Named, n, schemaId(""))
+#elif defined(CT_FAIL_SCHEMA_ID_TWICE)
+      PSIO_REFLECT(Named, schemaId("A"), n, schemaId("B"))
+#else
+      PSIO_REFLECT(Named, schemaId("app.Named"), n)
+#endif
+   };
+}  // namespace app
+#if defined(CT_FAIL_SCHEMA_ID_AND_INVARIANT_ID)
+// One id per type: the keyword's or PSIO_INVARIANT's, not both.
+PSIO_INVARIANT(app::Named, app::ok, "Other")
+#endif
+static_assert(psio::schema_custom_id<app::Named>() == "app.Named");
+// The record is addressable in place: the keyword is not an invariant.
+inline std::vector<char> named_bytes = psio::encode(psio::pssz{}, app::Named{});
+inline const bool        use_named   =
+   psio::mutable_view<app::Named, psio::pssz>{named_bytes}.get<0>().set(1);
 
 // ── a custom text form on a type with no name ─────────────────────────────
 namespace app
