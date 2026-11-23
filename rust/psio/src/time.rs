@@ -26,7 +26,14 @@
 //! Values compute: `point + duration`, `point - point`, `duration * n` and
 //! the rest of the operators are exact and panic on overflow of the tick
 //! type in every build profile (`checked_*` return `None`); `to_unit` /
-//! `floor` / `ceil` convert between units; `Display` and `FromStr` are the
+//! `floor` / `ceil` convert between units. Across [`Seconds`], [`Millis`],
+//! [`Micros`] and [`Nanos`] a coarser value converts to a finer one with
+//! `From` / `Into` (exact, as in C++ `std::chrono`; a finer to a coarser one
+//! stays explicit), which is how units mix under the operators
+//! (`micros_point + seconds.into()`); `add_mixed` / `sub_mixed` /
+//! `duration_since_mixed` take two units and give the finer one, `cmp_mixed`
+//! compares two units, and `checked_widen` / `checked_*_mixed` return `None`
+//! on overflow; `Display` and `FromStr` are the
 //! JSON text without the quotes; the values order, hash and default. The
 //! cargo feature `chrono` adds exact `TryFrom` conversions with
 //! `chrono::DateTime` / `TimeDelta`, and `async-graphql` makes the values
@@ -42,8 +49,14 @@
 //! assert_eq!("2026-11-22T10:15:30Z".parse::<TimePoint<Seconds>>().unwrap(), t);
 //! let later = t + Duration::from_ticks(90);
 //! assert_eq!((later - t).ticks(), 90);
-//! let micros: TimePoint<Micros> = later.to_unit().unwrap();
+//! // A coarser unit converts to a finer one, exactly.
+//! let micros: TimePoint<Micros> = later.into();
 //! assert_eq!(micros.floor::<Seconds>(), later);
+//! // Two units: converted with `into()`, or by name, in the finer one.
+//! let minute = Duration::<Seconds>::from_ticks(60);
+//! assert_eq!(micros + minute.into(), micros.add_mixed(minute));
+//! assert_eq!(later.add_mixed(Duration::<Micros>::from_ticks(250)).ticks(), micros.ticks() + 250);
+//! assert!(later.cmp_mixed(&micros).is_eq());
 //! // A fraction the unit cannot hold exactly is rejected, never rounded.
 //! assert!(TimePoint::<Seconds>::from_rfc3339("2026-11-22T10:15:30.5Z").is_err());
 //! assert!(TimePoint::<Micros>::from_rfc3339("2026-11-22T10:15:30.5Z").is_ok());
@@ -799,6 +812,7 @@ impl<U: Unit, R: Tick> TryFrom<Duration<U, R>> for std::time::Duration {
 macro_rules! tick_text {
     ($name:ident) => {
         impl<U: Unit, R: Tick + JsonText> JsonText for $name<U, R> {
+            const JSON_KINDS: u8 = crate::json::kinds::NUMBER | crate::json::kinds::STRING;
             fn write_json(&self, w: &mut Writer) -> Result<(), JsonTextError> {
                 self.ticks.write_json(w)
             }
@@ -814,6 +828,7 @@ tick_text!(MonotonicPoint);
 
 /// An RFC 3339 UTC string.
 impl<U: Unit, R: Tick> JsonText for TimePoint<U, R> {
+    const JSON_KINDS: u8 = crate::json::kinds::STRING;
     fn write_json(&self, w: &mut Writer) -> Result<(), JsonTextError> {
         match self.to_rfc3339() {
             Ok(text) => w.string(text.as_bytes()),
@@ -1038,6 +1053,208 @@ macro_rules! conversions {
 conversions!(TimePoint);
 conversions!(MonotonicPoint);
 conversions!(Duration);
+
+// ── Conversion, arithmetic and comparison across units ──────────────────────
+//
+// C++ `std::chrono` semantics (`std::common_type` of two durations): a value
+// of a coarser unit converts implicitly — and exactly — to a finer one, and
+// an operation on two units is carried out in the finer. Converting to a
+// coarser unit stays explicit (`to_unit` / `floor` / `ceil`).
+//
+// In Rust the conversion is `From` / `Into`, said for each pair of the units
+// defined here (`From<X<U>> for X<V>` for every U and V would also be
+// `From<X<U>> for X<U>`), and it is what mixes units under the operators:
+//
+//     micros_point + seconds.into()        // TimePoint<Micros>
+//     micros == seconds.into()
+//
+// The operators themselves stay one unit on both sides. A second
+// `Add<Duration<V>>` for `TimePoint<U>` (or `PartialEq`) would leave the unit
+// of `point + Duration::from_ticks(30)` and of `d == Duration::zero()`
+// undetermined, and every such expression would stop compiling. The named
+// `*_mixed` functions take two units and return the finer one.
+//
+// Nothing about the bytes, the key or the text of a value changes: these are
+// conversions between values.
+
+/// The finer of two units, for the pairs both of which convert to it
+/// exactly: every pair of [`Seconds`], [`Millis`], [`Micros`], [`Nanos`],
+/// and any unit with itself. It names the unit a mixed-unit operation is
+/// carried out in (C++ `std::common_type`). Implement it (both ways) for a
+/// pair of units of your own to give them the `*_mixed` functions.
+pub trait FinerUnit<V: Unit>: Unit {
+    type Finer: Unit;
+}
+impl<U: Unit> FinerUnit<U> for U {
+    type Finer = U;
+}
+
+/// `a` (of unit `U`) against `b` (of unit `V`), exactly: no tick type is
+/// overflowed by a comparison.
+fn compare_ticks<U: Unit, V: Unit, R: Tick>(a: R, b: R) -> std::cmp::Ordering {
+    // a * U::NUM / U::DEN  <=>  b * V::NUM / V::DEN
+    let scale = |ticks: R, num: u64, den: u64| -> i128 {
+        let factor = (num as i128).saturating_mul(den as i128);
+        ticks.to_i128().saturating_mul(factor)
+    };
+    scale(a, U::NUM, V::DEN).cmp(&scale(b, V::NUM, U::DEN))
+}
+
+macro_rules! mixed_value {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick> $name<U, R> {
+            /// The same value in the finer unit `V`, exactly; `None` when it
+            /// does not fit the tick type (or is not a whole number of `V`
+            /// ticks). The checked twin of the `From` / `Into` conversion
+            /// from a coarser unit to a finer one.
+            pub fn checked_widen<V: Unit>(self) -> Option<$name<V, R>> {
+                convert_ticks::<U, V, R, R>(self.ticks, Rounding::Exact).ok().map($name::from_ticks)
+            }
+            /// This value against one of another unit, exactly (no tick
+            /// type is overflowed by a comparison): C++ `a <=> b` on two
+            /// units.
+            pub fn cmp_mixed<V: Unit>(&self, other: &$name<V, R>) -> std::cmp::Ordering {
+                compare_ticks::<U, V, R>(self.ticks, other.ticks)
+            }
+        }
+    };
+}
+mixed_value!(TimePoint);
+mixed_value!(MonotonicPoint);
+mixed_value!(Duration);
+
+macro_rules! mixed_point {
+    ($name:ident) => {
+        impl<U: Unit, R: Tick> $name<U, R> {
+            /// `self + by` for a duration of another unit, in the finer of
+            /// the two; `None` on overflow of the tick type.
+            pub fn checked_add_mixed<V: Unit>(self, by: Duration<V, R>) -> Option<$name<U::Finer, R>>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_widen::<U::Finer>()?.checked_add(by.checked_widen()?)
+            }
+            /// `self - by` for a duration of another unit, in the finer of
+            /// the two; `None` on overflow of the tick type.
+            pub fn checked_sub_mixed<V: Unit>(self, by: Duration<V, R>) -> Option<$name<U::Finer, R>>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_widen::<U::Finer>()?.checked_sub(by.checked_widen()?)
+            }
+            /// `self - earlier` for a point of another unit, in the finer of
+            /// the two; `None` when it does not fit the tick type.
+            pub fn checked_duration_since_mixed<V: Unit>(
+                self,
+                earlier: $name<V, R>,
+            ) -> Option<Duration<U::Finer, R>>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_widen::<U::Finer>()?.checked_duration_since(earlier.checked_widen()?)
+            }
+            /// [`checked_add_mixed`](Self::checked_add_mixed); panics on
+            /// overflow of the tick type, as `+` does.
+            #[track_caller]
+            pub fn add_mixed<V: Unit>(self, by: Duration<V, R>) -> $name<U::Finer, R>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_add_mixed(by).expect(OVERFLOW)
+            }
+            /// [`checked_sub_mixed`](Self::checked_sub_mixed); panics on
+            /// overflow of the tick type, as `-` does.
+            #[track_caller]
+            pub fn sub_mixed<V: Unit>(self, by: Duration<V, R>) -> $name<U::Finer, R>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_sub_mixed(by).expect(OVERFLOW)
+            }
+            /// [`checked_duration_since_mixed`](Self::checked_duration_since_mixed);
+            /// panics on overflow of the tick type, as `-` does.
+            #[track_caller]
+            pub fn duration_since_mixed<V: Unit>(self, earlier: $name<V, R>) -> Duration<U::Finer, R>
+            where
+                U: FinerUnit<V>,
+            {
+                self.checked_duration_since_mixed(earlier).expect(OVERFLOW)
+            }
+        }
+    };
+}
+mixed_point!(TimePoint);
+mixed_point!(MonotonicPoint);
+
+impl<U: Unit, R: Tick> Duration<U, R> {
+    /// `self + other` for a duration of another unit, in the finer of the
+    /// two; `None` on overflow of the tick type.
+    pub fn checked_add_mixed<V: Unit>(self, other: Duration<V, R>) -> Option<Duration<U::Finer, R>>
+    where
+        U: FinerUnit<V>,
+    {
+        self.checked_widen::<U::Finer>()?.checked_add(other.checked_widen()?)
+    }
+    /// `self - other` for a duration of another unit, in the finer of the
+    /// two; `None` on overflow of the tick type.
+    pub fn checked_sub_mixed<V: Unit>(self, other: Duration<V, R>) -> Option<Duration<U::Finer, R>>
+    where
+        U: FinerUnit<V>,
+    {
+        self.checked_widen::<U::Finer>()?.checked_sub(other.checked_widen()?)
+    }
+    /// [`checked_add_mixed`](Self::checked_add_mixed); panics on overflow of
+    /// the tick type, as `+` does.
+    #[track_caller]
+    pub fn add_mixed<V: Unit>(self, other: Duration<V, R>) -> Duration<U::Finer, R>
+    where
+        U: FinerUnit<V>,
+    {
+        self.checked_add_mixed(other).expect(OVERFLOW)
+    }
+    /// [`checked_sub_mixed`](Self::checked_sub_mixed); panics on overflow of
+    /// the tick type, as `-` does.
+    #[track_caller]
+    pub fn sub_mixed<V: Unit>(self, other: Duration<V, R>) -> Duration<U::Finer, R>
+    where
+        U: FinerUnit<V>,
+    {
+        self.checked_sub_mixed(other).expect(OVERFLOW)
+    }
+}
+
+macro_rules! mixed_pairs {
+    ($($coarse:ident < $fine:ident;)*) => {$(
+        impl FinerUnit<$fine> for $coarse {
+            type Finer = $fine;
+        }
+        impl FinerUnit<$coarse> for $fine {
+            type Finer = $fine;
+        }
+        mixed_pairs!(@from TimePoint, $coarse, $fine);
+        mixed_pairs!(@from MonotonicPoint, $coarse, $fine);
+        mixed_pairs!(@from Duration, $coarse, $fine);
+    )*};
+    (@from $name:ident, $coarse:ident, $fine:ident) => {
+        /// Exact. Panics when the value does not fit the tick type in the
+        /// finer unit (`checked_widen` returns `None` instead, `to_unit` an
+        /// error).
+        impl<R: Tick> From<$name<$coarse, R>> for $name<$fine, R> {
+            #[track_caller]
+            fn from(value: $name<$coarse, R>) -> Self {
+                value.checked_widen().expect(OVERFLOW)
+            }
+        }
+    };
+}
+mixed_pairs! {
+    Seconds < Millis;
+    Seconds < Micros;
+    Seconds < Nanos;
+    Millis < Micros;
+    Millis < Nanos;
+    Micros < Nanos;
+}
 
 impl<U: Unit, R: Tick> TimePoint<U, R> {
     /// The time since the Unix epoch.

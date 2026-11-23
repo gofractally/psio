@@ -356,3 +356,145 @@ mod graphql {
         assert_eq!(<Memo as ScalarType>::parse(Value::from("x")).unwrap(), Memo("x".into()));
     }
 }
+
+// ── Across units (C++ std::chrono: the common type is the finer unit) ───────
+
+#[test]
+fn a_coarser_unit_converts_to_a_finer_one() {
+    use psio::time::{Millis, Nanos};
+    let s = Duration::<Seconds>::from_ticks(-3);
+    let ms: Duration<Millis> = s.into();
+    let us: Duration<Micros> = s.into();
+    let ns: Duration<Nanos> = s.into();
+    assert_eq!((ms.ticks(), us.ticks(), ns.ticks()), (-3_000, -3_000_000, -3_000_000_000));
+    assert_eq!(Duration::<Micros>::from(ms), us);
+    assert_eq!(Duration::<Nanos>::from(us), ns);
+    assert_eq!(Duration::<Nanos>::from(ms), ns);
+    let t = TimePoint::<Seconds>::from_ticks(1_795_342_530);
+    assert_eq!(TimePoint::<Micros>::from(t).ticks(), 1_795_342_530_000_000);
+    assert_eq!(TimePoint::<Micros>::from(t), t.to_unit::<Micros>().unwrap());
+    let m = MonotonicPoint::<Millis, u32>::from_ticks(7);
+    assert_eq!(MonotonicPoint::<Micros, u32>::from(m).ticks(), 7_000);
+    // The conversion is of the value: bytes, key and text are each type's own.
+    assert_eq!(psio::to_pssz(&TimePoint::<Micros>::from(t)), psio::to_pssz(&t.to_unit::<Micros>().unwrap()));
+    assert_eq!(psio::to_json(&us), "-3000000");
+
+    // The boundaries of the tick type.
+    let most = i64::MAX / 1_000_000;
+    assert_eq!(Duration::<Micros>::from(Duration::<Seconds>::from_ticks(most)).ticks(), most * 1_000_000);
+    assert_eq!(Duration::<Micros>::from(Duration::<Seconds>::from_ticks(-most)).ticks(), -most * 1_000_000);
+    assert_eq!(Duration::<Seconds>::from_ticks(most + 1).checked_widen::<Micros>(), None);
+    assert_eq!(Duration::<Seconds>::from_ticks(i64::MIN / 1_000_000 - 1).checked_widen::<Micros>(), None);
+    assert_eq!(
+        Duration::<Seconds>::from_ticks(i64::MIN / 1_000_000).checked_widen::<Micros>().map(|d| d.ticks()),
+        Some(i64::MIN / 1_000_000 * 1_000_000)
+    );
+    assert_eq!(Duration::<Seconds, u8>::from_ticks(255).checked_widen::<Millis>(), None);
+    assert_eq!(TimePoint::<Seconds, u32>::from_ticks(4_294_967).checked_widen::<Millis>().map(|t| t.ticks()), Some(4_294_967_000));
+    assert_eq!(TimePoint::<Seconds, u32>::from_ticks(4_294_968).checked_widen::<Millis>(), None);
+    // Narrowing is not a widening: explicit, with to_unit / floor / ceil.
+    assert_eq!(Duration::<Micros>::from_ticks(1_500_000).checked_widen::<Seconds>(), None);
+    assert_eq!(Duration::<Micros>::from_ticks(2_000_000).checked_widen::<Seconds>().map(|d| d.ticks()), Some(2));
+}
+
+#[test]
+#[should_panic(expected = "arithmetic overflow of the tick type")]
+fn widening_past_the_tick_type_panics() {
+    let _: Duration<Micros> = Duration::<Seconds>::from_ticks(i64::MAX / 1_000_000 + 1).into();
+}
+
+#[test]
+fn arithmetic_on_two_units_is_in_the_finer_one() {
+    use psio::time::{Millis, Nanos};
+    let t = TimePoint::<Micros>::from_ticks(1_000_000);
+    let second = Duration::<Seconds>::from_ticks(1);
+    // Under the operators the coarser side converts: `into()` is exact.
+    let later: TimePoint<Micros> = t + second.into();
+    assert_eq!(later.ticks(), 2_000_000);
+    // (`point - x` is also `point - point`, so there the target is named)
+    assert_eq!((t - Duration::<Micros>::from(second)).ticks(), 0);
+    let mut moving = t;
+    moving += second.into();
+    moving -= Duration::<Millis>::from_ticks(500).into();
+    assert_eq!(moving.ticks(), 1_500_000);
+    let mut total = Duration::<Micros>::zero();
+    total += second.into();
+    total -= Duration::<Millis>::from_ticks(1).into();
+    assert_eq!(total.ticks(), 999_000);
+    assert!(Duration::<Micros>::from_ticks(1_000_000) == second.into());
+    assert!(Duration::<Micros>::from_ticks(1_000_001) > second.into());
+    // The same-unit operators still settle the unit of a bare literal.
+    assert_eq!(t + Duration::from_ticks(1), TimePoint::from_ticks(1_000_001));
+    assert_eq!(second + Duration::from_ticks(1), Duration::from_ticks(2));
+
+    // By name, with either side the finer: the result is in the finer unit.
+    let named: TimePoint<Micros> = t.add_mixed(second);
+    assert_eq!(named, later);
+    assert_eq!(t.sub_mixed(second).ticks(), 0);
+    let coarse = TimePoint::<Seconds>::from_ticks(10);
+    let finer: TimePoint<Micros> = coarse.add_mixed(Duration::<Micros>::from_ticks(5));
+    assert_eq!(finer.ticks(), 10_000_005);
+    assert_eq!(coarse.sub_mixed(Duration::<Millis>::from_ticks(1)).ticks(), 9_999);
+    let between: Duration<Micros> = finer.duration_since_mixed(coarse);
+    assert_eq!(between.ticks(), 5);
+    assert_eq!(coarse.duration_since_mixed(finer).ticks(), -5);
+    let sum: Duration<Millis> = second.add_mixed(Duration::<Millis>::from_ticks(250));
+    assert_eq!(sum.ticks(), 1_250);
+    assert_eq!(Duration::<Millis>::from_ticks(250).sub_mixed(second).ticks(), -750);
+    assert_eq!(Duration::<Nanos>::from_ticks(1).add_mixed(Duration::<Micros>::from_ticks(1)).ticks(), 1_001);
+    let m = MonotonicPoint::<Millis>::from_ticks(5).add_mixed(second);
+    assert_eq!(m.ticks(), 1_005);
+    assert_eq!(MonotonicPoint::<Seconds>::from_ticks(1).duration_since_mixed(m).ticks(), -5);
+    // The same unit on both sides is the same-unit rule.
+    assert_eq!(second.add_mixed(second).ticks(), 2);
+
+    // Overflow: None from the checked twins, at the boundary.
+    let top = TimePoint::<Micros>::MAX;
+    assert_eq!(top.checked_add_mixed(second), None);
+    assert_eq!(top.checked_sub_mixed(second).map(|t| t.ticks()), Some(i64::MAX - 1_000_000));
+    let edge = TimePoint::<Micros>::from_ticks(i64::MAX - 1_000_000);
+    assert_eq!(edge.checked_add_mixed(second), Some(top));
+    assert_eq!(TimePoint::<Micros>::MIN.checked_sub_mixed(second), None);
+    // (the coarse side does not fit the finer unit at all)
+    assert_eq!(TimePoint::<Seconds>::MAX.checked_add_mixed(Duration::<Micros>::zero()), None);
+    assert_eq!(top.checked_duration_since_mixed(TimePoint::<Seconds>::from_ticks(-1)), None);
+    assert_eq!(
+        top.checked_duration_since_mixed(TimePoint::<Seconds>::from_ticks(1)).map(|d| d.ticks()),
+        Some(i64::MAX - 1_000_000)
+    );
+    assert_eq!(Duration::<Micros>::MAX.checked_add_mixed(second), None);
+    assert_eq!(Duration::<Seconds>::MAX.checked_sub_mixed(Duration::<Micros>::zero()), None);
+    assert_eq!(
+        Duration::<Micros>::MIN.checked_add_mixed(second).map(|d| d.ticks()),
+        Some(i64::MIN + 1_000_000)
+    );
+}
+
+#[test]
+#[should_panic(expected = "arithmetic overflow of the tick type")]
+fn mixed_addition_past_the_tick_type_panics() {
+    let _ = TimePoint::<Micros>::MAX.add_mixed(Duration::<Seconds>::from_ticks(1));
+}
+
+#[test]
+fn values_of_two_units_compare() {
+    use psio::time::{Millis, Nanos};
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let second = Duration::<Seconds>::from_ticks(1);
+    assert_eq!(second.cmp_mixed(&Duration::<Micros>::from_ticks(1_000_000)), Equal);
+    assert_eq!(Duration::<Micros>::from_ticks(1_000_000).cmp_mixed(&second), Equal);
+    assert_eq!(second.cmp_mixed(&Duration::<Micros>::from_ticks(1_000_001)), Less);
+    assert_eq!(Duration::<Millis>::from_ticks(999).cmp_mixed(&second), Less);
+    assert_eq!(Duration::<Nanos>::from_ticks(-1).cmp_mixed(&Duration::<Seconds>::zero()), Less);
+    assert_eq!(TimePoint::<Seconds>::from_ticks(2).cmp_mixed(&TimePoint::<Micros>::from_ticks(1_999_999)), Greater);
+    assert_eq!(TimePoint::<Micros>::from_ticks(2_000_000).cmp_mixed(&TimePoint::<Seconds>::from_ticks(2)), Equal);
+    assert_eq!(MonotonicPoint::<Millis>::from_ticks(1).cmp_mixed(&MonotonicPoint::<Micros>::from_ticks(1_000)), Equal);
+    // Exact where the coarser value does not fit the finer unit's tick type.
+    assert_eq!(Duration::<Seconds>::MAX.cmp_mixed(&Duration::<Nanos>::MAX), Greater);
+    assert_eq!(Duration::<Seconds>::MIN.cmp_mixed(&Duration::<Nanos>::MIN), Less);
+    assert_eq!(Duration::<Seconds, u64>::MAX.cmp_mixed(&Duration::<Nanos, u64>::MAX), Greater);
+    assert_eq!(TimePoint::<Seconds>::MAX.cmp_mixed(&TimePoint::<Micros>::MAX), Greater);
+    assert_eq!(Duration::<Seconds, u8>::from_ticks(255).cmp_mixed(&Duration::<Millis, u8>::from_ticks(255)), Greater);
+    // Any two units, also ones with no common finer unit declared.
+    assert_eq!(second.cmp_mixed(&second), Equal);
+}
