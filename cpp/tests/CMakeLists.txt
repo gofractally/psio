@@ -80,6 +80,9 @@ psio_add_test(psio_view_access_tests view_access_tests.cpp)
 # Named accessors on record views (reflect<T>::proxy): read views, mutable
 # views, members under caps, and the psiserve view tests adapted to PSSZ.
 psio_add_test(psio_view_named_tests view_named_tests.cpp)
+# From a view to its value: unpack(), psio::value_of, from_pssz(view) —
+# including members under a maxDynamicData cap and bounded members.
+psio_add_test(psio_view_unpack_tests view_unpack_tests.cpp)
 
 # psio::mutable_view (docs/pssz-spec.md §17): in-place overwrite of fixed-size
 # values in a PSSZ frame; the frame stays valid and canonical.
