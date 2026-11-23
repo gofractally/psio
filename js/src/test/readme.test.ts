@@ -141,8 +141,8 @@ test('README: the schema as JSON', () => {
 });
 
 test('README: custom types', () => {
-  const AccountNumber = custom('AccountNumber', u64, { toText: numberToName, fromText: nameToNumber });
-  const Balance = record('Balance', { owner: AccountNumber, amount: u64 });
+  const Identifier = custom('Identifier', u64, { toText: numberToName, fromText: nameToNumber });
+  const Balance = record('Balance', { owner: Identifier, amount: u64 });
   const data = Balance.encode({ owner: nameToNumber('alice'), amount: 5n });
   assert.deepEqual(Balance.decode(data), { owner: nameToNumber('alice'), amount: 5n });
   assert.equal(Balance.psszToJson(data), '{"owner":"alice","amount":5}');
@@ -170,13 +170,13 @@ test('README: custom types', () => {
 test('README: what a blockchain client needs', async () => {
   // The service publishes its schema; the client packs an action's
   // arguments from it, builds a transaction and hashes its canonical bytes.
-  const AccountNumber = custom('AccountNumber', u64, { toText: numberToName, fromText: nameToNumber });
+  const Identifier = custom('Identifier', u64, { toText: numberToName, fromText: nameToNumber });
   const serviceSchema = PsszSchema.decode(
-    generateSchema({ transfer: record('transfer', { to: AccountNumber, amount: u64, memo: utf8 }) }).encode(),
-    { handlers: { AccountNumber: { toText: (v) => numberToName(v as bigint), fromText: nameToNumber } } },
+    generateSchema({ transfer: record('transfer', { to: Identifier, amount: u64, memo: utf8 }) }).encode(),
+    { handlers: { Identifier: { toText: (v) => numberToName(v as bigint), fromText: nameToNumber } } },
   );
   const args = serviceSchema.type('transfer').jsonToPssz('{"to":"bob","amount":"2500000000000000000","memo":"rent"}');
-  const Action = record('Action', { sender: AccountNumber, service: AccountNumber, method: utf8, rawData: bytes });
+  const Action = record('Action', { sender: Identifier, service: Identifier, method: utf8, rawData: bytes });
   const Transaction = record('Transaction', { expiration: timePoint('seconds', u32), actions: list(Action) });
   const tx = Transaction.encode({
     expiration: 1767225600n,

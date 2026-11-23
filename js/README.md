@@ -878,7 +878,7 @@ for one field. The full rules are under [Text](#text).
 
 A custom type is a type with an identity of its own over its wire type, of
 any shape — a record, a transparent type, an enum, a variant, a tuple, a
-list: a **text form** (an account name over a `u64`, `major.minor` over a
+list: a **text form** (a name over a `u64`, `major.minor` over a
 record), an **invariant** (a key that must be a DER sequence, `lo <= hi`),
 or both. It is `custom(id, wire, handler)`: on the wire and as a JavaScript
 value it is exactly its wire type; the handler supplies the text form
@@ -888,15 +888,25 @@ invariant (`check`). In the Schema IR it is `Custom { type: <wire type>, id }`.
 ```typescript
 import { custom, record, u64, nameToNumber, numberToName } from 'psio';
 
-// An account name: a u64 in the bytes and in JavaScript, its name in text.
-const AccountNumber = custom('AccountNumber', u64, { toText: numberToName, fromText: nameToNumber });
-const Balance = record('Balance', { owner: AccountNumber, amount: u64 });
+// An identifier: a u64 in the bytes and in JavaScript, its name in text.
+// The handler here is PSIO's own identifier coder (see "Names" below).
+const Identifier = custom('Identifier', u64, { toText: numberToName, fromText: nameToNumber });
+const Balance = record('Balance', { owner: Identifier, amount: u64 });
 
 const bytes = Balance.encode({ owner: nameToNumber('alice'), amount: 5n });
 Balance.decode(bytes);            // { owner: <the u64 of "alice">, amount: 5n }
 Balance.psszToJson(bytes);        // '{"owner":"alice","amount":5}'
 Balance.jsonToValue('{"owner":"alice","amount":5}');
 ```
+
+`nameToNumber` / `numberToName` are one particular coding of names into
+numbers, PSIO's own. **An application that has its own name coding supplies
+its own text handler**: the two functions of that coding, under the id its
+schema uses for the type. A psibase account number, for example, is coded by
+psibase's account-name rules, which are not these; a client of a psibase
+service gives `toText` / `fromText` from psibase's coder for that id, and
+using `nameToNumber` there would produce different numbers for the same
+names.
 
 - A handler works on the **decoded value of the wire type**; every member is
   optional. `toText(value)` returns the text, `fromText(text)` returns a
@@ -994,7 +1004,7 @@ Release.decode(bytes);                           // { version: { major: 1, minor
 
   | registry | text | invariant |
   |---|---|---|
-  | no handler for the id | the wire type's own text (the account as its number, the version as `{"major":1,"minor":2}`), which reads back to the same bytes | **not checked**: the node is its wire type, structure only |
+  | no handler for the id | the wire type's own text (the identifier as its number, the version as `{"major":1,"minor":2}`), which reads back to the same bytes | **not checked**: the node is its wire type, structure only |
   | a handler for the id | the handler's text, or the wire type's when it has only `check` | checked, on the binary and the text entry points alike |
   | strict (`requireHandlers: true`) and no handler for the id | an error, "no handler registered for a custom type" | the same error, on the binary entry points too (`encode`, `decode`, `validate`, keys), wherever a value of the type occurs |
 
@@ -1015,7 +1025,7 @@ Release.decode(bytes);                           // { version: { major: 1, minor
 | Check untrusted bytes | `type.validate(bytes)`; every reader fails with a typed error |
 | Compute database keys and scan ranges | `encodeKey`, `encodeKeyPrefix`, `keyPrefixUpperBound` |
 | Present 64-bit values safely | `bigint` values; I-JSON text (numbers up to 2^53 − 1, strings beyond) |
-| Account names | `nameToNumber` / `numberToName`, as the handler of a `custom` type |
+| Names shown as text (accounts, identifiers) | a `custom` type whose handler is the chain's own name coding, supplied by the application ([custom types](#custom-types)); `nameToNumber` / `numberToName` are PSIO's identifier coder, for types that are declared to use it |
 | Call a method of a service | `schema.interface(name).method(name)`: `args.jsonToPssz(text)` / `args.encode(value)` for the call, `result.decode(bytes)` for the reply ([interfaces](#interfaces)) |
 | Method numbers | `methodToNumber` / `numberToMethod` |
 | Accept an upgraded schema | `psszEvolvesFrom(older, newer)` ([compatibility checking](#compatibility-checking)) |
