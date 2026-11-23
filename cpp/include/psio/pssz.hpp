@@ -3152,19 +3152,30 @@ namespace psio {
 
    // ── Evolution check ───────────────────────────────────────────────────
    //
-   // `pssz_evolves_from<Old, New>` is true iff data written for `Old` is
-   // readable as `New` and data written for `New` is readable as `Old` under
-   // the automatic (type-derived width) profile:
+   // `pssz_evolves_from<Old, New>` is true iff, under the automatic
+   // (type-derived width) profile, New's reader reads EVERY value Old's
+   // writer can produce, and Old's reader reads every value of New that is
+   // also a value of Old's type (it reports appended fields as unknown, and
+   // rejects a value that uses a bound New widened):
    //
    //   - New's fields are Old's fields, in order, followed only by plain
    //     optional fields (an appended field must own an offset slot and be
    //     able to be absent);
-   //   - the two have the same offset width. An optional field may not be
-   //     added if it would change the type's width: an explicit
-   //     maxDynamicData always rules, and without one the width falls back to
-   //     the bound inferred from the fields, which an appended field can
-   //     move. Reserve room with an explicit maxDynamicData to evolve;
-   //   - DWNC status is unchanged, and a DWNC record does not gain fields.
+   //   - the two have the same offset width, at every depth. An optional
+   //     field may not be added if it would change the type's width: an
+   //     explicit maxDynamicData always rules, and without one the width
+   //     falls back to the bound inferred from the fields, which an appended
+   //     field can move. Reserve room with an explicit maxDynamicData to
+   //     evolve;
+   //   - DWNC status is unchanged, and a DWNC record does not gain fields;
+   //   - member annotations (docs/pssz-spec.md 3.5, 7.5): a length bound
+   //     may only widen — New's [min, max] contains Old's — and only while
+   //     every width stays the same; utf8 is the same on both sides; sorted
+   //     / unique / unique_keys are the same on both sides;
+   //   - caps: New's maxDynamicData admits everything Old's writer can
+   //     produce (at least Old's cap; or, when Old has none, at least Old's
+   //     inferred bound); New has no more fields than Old's maxFields and
+   //     does not raise it.
    //
    // A prefix field may itself have evolved (a nested record, or a vector /
    // array / optional / variant of one) provided it meets the same rules and
@@ -3180,26 +3191,205 @@ namespace psio {
       template <typename T, typename A>
       consteval bool widths_unchanged() noexcept;
 
-      // Field I of Old and of New agree on what their annotations do to the
-      // widths of the values nested in the field: either neither narrows
-      // anything (the widths are those of the types, which layout_evolves
-      // compares), or the two fields are the same type with the same
-      // annotations.
+      // ── What a member's annotations say, Old against New ────────────────
+      //
+      // The annotations of a member are part of its type (docs/pssz-spec.md
+      // 3.5), so a revision is compatible only if, at the member and at every
+      // position below it:
+      //
+      //   widths   every offset width is the same (annotation_widths_agree);
+      //   bounds   everything Old's length bound admits, New's admits: the
+      //            range [min, max] (exact<N> is [N, N]; no bound is
+      //            [0, unbounded]) may only widen. A tightened bound makes
+      //            the new reader reject records the old writer produced;
+      //   utf8     the same on both sides: raw bytes are not UTF-8 text and
+      //            a UTF-8 string is not arbitrary bytes;
+      //   sorted / unique / unique_keys   the same on both sides.
+      struct length_range
+      {
+         std::uint64_t min = 0;
+         std::uint64_t max = ~std::uint64_t{0};
+      };
+      template <typename... Ss>
+      consteval length_range length_range_of(const std::tuple<Ss...>& specs) noexcept
+      {
+         length_range r;
+         if constexpr (::psio::has_spec_v<::psio::length_bound, std::tuple<Ss...>>)
+         {
+            const ::psio::length_bound lb = std::get<::psio::length_bound>(specs);
+            if (lb.min) r.min = *lb.min;
+            if (lb.max) r.max = *lb.max;
+            if (lb.exact) r.min = r.max = *lb.exact;
+         }
+         return r;
+      }
+      template <typename TO, typename TN, typename SO, typename SN>
+      consteval bool annotation_specs_evolve(const SO& so, const SN& sn) noexcept
+      {
+         if constexpr (is_std_optional_v<TO> && is_std_optional_v<TN>)
+            return annotation_specs_evolve<typename TO::value_type, typename TN::value_type>(so,
+                                                                                             sn);
+         else
+         {
+            const length_range ro = length_range_of(so), rn = length_range_of(sn);
+            if (rn.min > ro.min || rn.max < ro.max)
+               return false;
+            if (::psio::has_spec_v<::psio::utf8_spec, SO> != ::psio::has_spec_v<::psio::utf8_spec, SN>)
+               return false;
+            // (A map / set is ordered and unique by type, whatever container
+            // holds it: std::map evolves into std::unordered_map.)
+            if constexpr (!is_assoc_v<TO> || !is_assoc_v<TN>)
+            {
+               if (::psio::find_spec<::psio::sorted_spec>(so) !=
+                   ::psio::find_spec<::psio::sorted_spec>(sn))
+                  return false;
+               if (::psio::has_spec_v<::psio::unique_keys_spec, SO> !=
+                   ::psio::has_spec_v<::psio::unique_keys_spec, SN>)
+                  return false;
+            }
+            if constexpr (ann::has_elements_v<TO> && ann::has_elements_v<TN>)
+            {
+               if constexpr (is_assoc_v<TO> && is_assoc_v<TN>)
+                  return annotation_specs_evolve<::psio::detail::assoc_key_t<TO>,
+                                                 ::psio::detail::assoc_key_t<TN>>(
+                     ann::element_specs(so), ann::element_specs(sn));
+               else if constexpr (!is_assoc_v<TO> && !is_assoc_v<TN>)
+                  return annotation_specs_evolve<typename TO::value_type, typename TN::value_type>(
+                     ann::element_specs(so), ann::element_specs(sn));
+               else
+                  return false;
+            }
+            else if constexpr (::psio::detail::is_map_v<TO> && ::psio::detail::is_map_v<TN>)
+               return annotation_specs_evolve<::psio::detail::assoc_key_t<TO>,
+                                              ::psio::detail::assoc_key_t<TN>>(
+                         ann::key_specs(so), ann::key_specs(sn)) &&
+                      annotation_specs_evolve<typename TO::mapped_type, typename TN::mapped_type>(
+                         ann::value_specs(so), ann::value_specs(sn));
+            else if constexpr (ann::is_tuple<TO>::value && ann::is_tuple<TN>::value)
+            {
+               if constexpr (std::tuple_size_v<TO> != std::tuple_size_v<TN>)
+                  return false;
+               else
+                  return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                     return (annotation_specs_evolve<
+                                std::remove_const_t<std::tuple_element_t<Is, TO>>,
+                                std::remove_const_t<std::tuple_element_t<Is, TN>>>(
+                                ann::at_specs<Is>(so), ann::at_specs<Is>(sn)) &&
+                             ...);
+                  }(std::make_index_sequence<std::tuple_size_v<TO>>{});
+            }
+            else if constexpr (is_std_variant_v<TO> && is_std_variant_v<TN>)
+            {
+               if constexpr (std::variant_size_v<TO> != std::variant_size_v<TN>)
+                  return false;
+               else
+                  return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+                     return (annotation_specs_evolve<std::variant_alternative_t<Is, TO>,
+                                                     std::variant_alternative_t<Is, TN>>(
+                                ann::at_specs<Is>(so), ann::at_specs<Is>(sn)) &&
+                             ...);
+                  }(std::make_index_sequence<std::variant_size_v<TO>>{});
+            }
+            else
+               return true;
+         }
+      }
+
+      // Every offset width at and below a position is the same under the
+      // two carriers. TO and TN have the same shape (layout_evolves holds).
+      template <typename TO, typename AO, typename TN, typename AN>
+      consteval bool annotation_widths_agree() noexcept
+      {
+         if constexpr (std::is_same_v<AO, no_ann> && std::is_same_v<AN, no_ann>)
+            return true;  // the widths of the types, which layout_evolves compares
+         else if constexpr (is_psio_box_v<TO> && is_psio_box_v<TN>)
+            return annotation_widths_agree<typename is_psio_box<TO>::elem, ann::cap_only<AO>,
+                                           typename is_psio_box<TN>::elem, ann::cap_only<AN>>();
+         else if constexpr (::psio::is_transparent_v<TO> && ::psio::is_transparent_v<TN>)
+            return annotation_widths_agree<::psio::transparent_inner_t<TO>, ann::cap_only<AO>,
+                                           ::psio::transparent_inner_t<TN>, ann::cap_only<AN>>();
+         else if constexpr (is_std_optional_v<TO> && is_std_optional_v<TN>)
+            return annotation_widths_agree<typename TO::value_type, AO, typename TN::value_type,
+                                           AN>();
+         else if constexpr ((is_std_vector_v<TO> && is_std_vector_v<TN>) ||
+                            (is_bounded_v<TO> && is_bounded_v<TN>) ||
+                            (is_std_array_v<TO> && is_std_array_v<TN>))
+            return (is_fixed_v<typename TO::value_type> ||
+                    width_for<TO, AO>() == width_for<TN, AN>()) &&
+                   annotation_widths_agree<typename TO::value_type, ann::element_ann<AO>,
+                                           typename TN::value_type, ann::element_ann<AN>>();
+         else if constexpr (is_assoc_v<TO> && is_assoc_v<TN>)
+            return (is_fixed_v<::psio::detail::assoc_entry_t<TO>> ||
+                    width_for<TO, AO>() == width_for<TN, AN>()) &&
+                   annotation_widths_agree<::psio::detail::assoc_entry_t<TO>, ann::entry_ann<TO, AO>,
+                                           ::psio::detail::assoc_entry_t<TN>,
+                                           ann::entry_ann<TN, AN>>();
+         else if constexpr (is_std_variant_v<TO> && is_std_variant_v<TN>)
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return (annotation_widths_agree<std::variant_alternative_t<Is, TO>,
+                                               ann::at_ann<AO, Is>,
+                                               std::variant_alternative_t<Is, TN>,
+                                               ann::at_ann<AN, Is>>() &&
+                       ...);
+            }(std::make_index_sequence<std::variant_size_v<TO>>{});
+         else if constexpr (is_std_tuple_v<TO> && is_std_tuple_v<TN> &&
+                            !requires { typename TO::psio_annotated_tuple; } &&
+                            !requires { typename TN::psio_annotated_tuple; })
+            return width_for<TO, AO>() == width_for<TN, AN>() &&
+                   []<std::size_t... Is>(std::index_sequence<Is...>) {
+                      return (annotation_widths_agree<
+                                 std::remove_const_t<std::tuple_element_t<Is, TO>>,
+                                 ann::at_ann<AO, Is>,
+                                 std::remove_const_t<std::tuple_element_t<Is, TN>>,
+                                 ann::at_ann<AN, Is>>() &&
+                              ...);
+                   }(std::make_index_sequence<std::tuple_size_v<TO>>{});
+         else
+            return true;
+      }
+
+      // Field I of Old and of New: the same widths, and annotations New's
+      // reader accepts every Old value under.
       template <Record Old, Record New, std::size_t I>
-      consteval bool member_widths_agree() noexcept
+      consteval bool member_annotations_evolve() noexcept
       {
          using FO = typename record_traits<Old>::template member_type<I>;
          using FN = typename record_traits<New>::template member_type<I>;
-         if constexpr (widths_unchanged<FO, member_ann<Old, I>>() &&
-                       widths_unchanged<FN, member_ann<New, I>>())
-            return true;
-         else if constexpr (std::is_same_v<FO, FN> &&
-                            std::is_same_v<typename record_member_annotations<Old, I>::value_t,
-                                           typename record_member_annotations<New, I>::value_t>)
-            return record_member_annotations<Old, I>::value ==
-                   record_member_annotations<New, I>::value;
-         else
-            return false;
+         return annotation_widths_agree<FO, member_ann<Old, I>, FN, member_ann<New, I>>() &&
+                annotation_specs_evolve<FO, FN>(record_member_annotations<Old, I>::value,
+                                                record_member_annotations<New, I>::value);
+      }
+
+      // The caps of the two records (docs/pssz-spec.md 7.5).
+      //   maxDynamicData: everything Old's writer can produce must fit New's
+      //   cap — New's cap is at least Old's, or Old has none and its inferred
+      //   bound fits. (The width is compared separately.)
+      //   maxFields: Old's promise holds — New has no more fields than Old's
+      //   cap allows and does not raise the cap.
+      template <Record Old, Record New>
+      consteval bool record_caps_evolve() noexcept
+      {
+         constexpr auto new_cap = ::psio::max_dynamic_data_v<New>;
+         if constexpr (new_cap.has_value())
+         {
+            constexpr auto old_limit = [] {
+               if constexpr (::psio::max_dynamic_data_v<Old>.has_value())
+                  return ::psio::max_dynamic_data_v<Old>;
+               else
+                  return ::psio::max_encoded_size<Old>();
+            }();
+            if (!old_limit.has_value() || *old_limit > *new_cap)
+               return false;
+         }
+         constexpr auto old_fields = ::psio::max_fields_v<Old>;
+         if constexpr (old_fields.has_value())
+         {
+            if (record_traits<New>::member_count > *old_fields)
+               return false;
+            if (!::psio::max_fields_v<New>.has_value() || *::psio::max_fields_v<New> > *old_fields)
+               return false;
+         }
+         return true;
       }
 
       template <Record Old, Record New>
@@ -3228,13 +3418,13 @@ namespace psio {
                                              typename RN::template member_type<Is>>
                             : (layout_evolves<typename RO::template member_type<Is>,
                                               typename RN::template member_type<Is>>() &&
-                               member_widths_agree<Old, New, Is>()))) &&
+                               member_annotations_evolve<Old, New, Is>()))) &&
                        ...);
             }(std::make_index_sequence<NO>{});
             constexpr bool suffix = []<std::size_t... Is>(std::index_sequence<Is...>) {
                return (omittable_field_v<New, NO + Is> && ...);
             }(std::make_index_sequence<NN - NO>{});
-            return prefix && suffix;
+            return prefix && suffix && record_caps_evolve<Old, New>();
          }
       }
 

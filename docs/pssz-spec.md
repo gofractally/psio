@@ -1501,11 +1501,20 @@ not change.
   field has no way to be absent: old data is rejected by the new reader.
   The wire carries no schema, so this rule is enforced by schema-upgrade
   checks, not by readers. In C++:
-  `static_assert(psio::pssz_evolves_from<Old, New>)`, which also
-  requires an unchanged width and DWNC status.)
-✓ Change a field's `length_bound{.max}` annotation to a tighter or
-  looser value, provided W doesn't change. (If W changes, callers
-  must rebuild against the new schema; the wire format is incompatible.)
+  `static_assert(psio::pssz_evolves_from<Old, New>)`, which checks
+  every rule of this section and the next: an unchanged width at every
+  depth, DWNC status, member annotations and caps.)
+✓ **Widen** a length bound — raise a `max`, lower or drop a `min`, replace
+  `exact N` by a range that contains N, drop the bound — at the member or
+  at any position below it (§3.5), provided no offset width changes
+  anywhere (the member's own list / map / tuple, and the record). The new
+  reader then accepts every value the old writer produced. An old reader
+  rejects a new value that uses the added room, exactly as it would reject
+  any value outside its type: widen a bound only once every reader that
+  must read the new values has the new schema. (If a W changes, the wire
+  format is incompatible.)
+✓ Raise a record's `max-dynamic-data` within the same width class, or
+  declare one that is at least the bound inferred for the old type.
 ✓ Add a new alternative to a variant (provided the new alt is at the
   end of the variant's alternative list).
 ✓ Evolve the inner type of a `Nested(T)` member by these same rules
@@ -1525,9 +1534,18 @@ not change.
 ✗ Reorder variant alternatives.
 ✗ Change the key type of a map or the element type of a set, or turn a
   list into a map / set of the same entries (§5.9.4).
-✗ Decrease a field's `length_bound{.max}` to a value smaller than
-  any encoded buffer. (Width may shift narrower, breaking old wire
-  bytes.)
+✗ **Tighten** a length bound — lower a `max`, raise or add a `min`, add a
+  bound where there was none, turn a range into `exact N` — at any depth.
+  The bytes of an old value may be unchanged, but the new reader rejects
+  every old record outside the new bound (and a narrower W would change
+  the bytes).
+✗ Change `utf8` at any position, in either direction: a raw string is any
+  bytes and a UTF-8 string is text; a reader of one is not a reader of the
+  other, although the bytes of a valid text are the same.
+✗ Change `sorted` / `unique` / `unique_keys` on a list member.
+✗ Lower a record's `max-dynamic-data`, or move it to another width class.
+✗ Give a record more fields than its `max-fields`, raise `max-fields`, or
+  drop it (§16): the cap is a promise about every later revision.
 ✗ Add the `dwnc` flag to a previously-extensible record.
   (DWNC removes the header, so old decoders reading a header where
   there isn't one will misinterpret bytes.)

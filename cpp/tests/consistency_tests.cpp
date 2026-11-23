@@ -525,3 +525,132 @@ TEST_CASE("as<hex_tag> on a wide integer is a text presentation only", "[consist
    CHECK(object_of.operator()<Wide>().members.size() == 4);
    CHECK(object_of.operator()<Wide>() == object_of.operator()<Plain>());
 }
+
+// ── pssz_evolves_from compares the annotations that are part of the type ──
+namespace cons_evo
+{
+#define CONS_EVO(NAME, OWNER, TAGS, ...)                                    \
+   struct NAME                                                              \
+   {                                                                        \
+      std::uint64_t            id = 0;                                      \
+      std::string              owner;                                       \
+      std::vector<std::string> tags;                                        \
+      PSIO_REFLECT(NAME, id, attr(owner, OWNER), attr(tags, TAGS) __VA_OPT__(, ) __VA_ARGS__) \
+   };
+   CONS_EVO(V1, utf8 | max<32>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Same, utf8 | max<32>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Wider, utf8 | max<64>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Tighter, utf8 | max<16>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Raw, max<32>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(ElemWider, utf8 | max<32>, max<8> | element(max<20>), maxDynamicData(1024))
+   CONS_EVO(ElemTighter, utf8 | max<32>, max<8> | element(max<8>), maxDynamicData(1024))
+   CONS_EVO(ElemUtf8, utf8 | max<32>, max<8> | element(utf8 | max<16>), maxDynamicData(1024))
+   CONS_EVO(CountWider, utf8 | max<32>, max<12> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(WithMin, utf8 | max<32> | min<1>, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Unbounded, utf8, max<8> | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(Sorted, utf8 | max<32>, max<8> | sorted | element(max<16>), maxDynamicData(1024))
+   CONS_EVO(CapWider, utf8 | max<32>, max<8> | element(max<16>), maxDynamicData(4096))
+   CONS_EVO(CapTighter, utf8 | max<32>, max<8> | element(max<16>), maxDynamicData(512))
+   CONS_EVO(CapOtherWidth, utf8 | max<32>, max<8> | element(max<16>), maxDynamicData(100000))
+   // Without a cap every type has the width of its own bound: here the
+   // record is 2 bytes wide and its list of tags 1. A bound that moves the
+   // list into the next width class is not compatible although the record's
+   // own width stays.
+   CONS_EVO(Open, utf8 | max<300>, max<8> | element(max<16>))
+   CONS_EVO(OpenWideList, utf8 | max<300>, max<8> | element(max<40>))
+   CONS_EVO(OpenWider, utf8 | max<400>, max<8> | element(max<16>))
+   CONS_EVO(OpenCapped, utf8 | max<300>, max<8> | element(max<16>), maxDynamicData(600))
+   CONS_EVO(OpenCappedLow, utf8 | max<300>, max<8> | element(max<16>), maxDynamicData(400))
+#undef CONS_EVO
+
+   struct Fields3
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::uint32_t> b;
+      PSIO_REFLECT(Fields3, a, b, maxFields(3), maxDynamicData(64))
+   };
+   struct Fields3Grown
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::uint32_t> b, c;
+      PSIO_REFLECT(Fields3Grown, a, b, c, maxFields(3), maxDynamicData(64))
+   };
+   struct Fields3Raised   // within its own cap, beyond the original's
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::uint32_t> b, c, d;
+      PSIO_REFLECT(Fields3Raised, a, b, c, d, maxFields(8), maxDynamicData(64))
+   };
+   struct Fields3Dropped
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::uint32_t> b, c;
+      PSIO_REFLECT(Fields3Dropped, a, b, c, maxDynamicData(64))
+   };
+   struct Fields3Lowered   // lowered to the current count: the promise still holds
+   {
+      std::uint32_t                a = 0;
+      std::optional<std::uint32_t> b;
+      PSIO_REFLECT(Fields3Lowered, a, b, maxFields(2), maxDynamicData(64))
+   };
+}  // namespace cons_evo
+
+TEST_CASE("pssz_evolves_from: member annotations and caps", "[consistency][evolves]")
+{
+   using namespace cons_evo;
+   using psio::pssz_evolves_from;
+   STATIC_REQUIRE(pssz_evolves_from<V1, Same>);
+   // A bound may only widen (the new reader must read every old record),
+   // and only while every width stays the same.
+   STATIC_REQUIRE(pssz_evolves_from<V1, Wider>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, Tighter>);
+   STATIC_REQUIRE(!pssz_evolves_from<Wider, V1>);
+   STATIC_REQUIRE(pssz_evolves_from<V1, ElemWider>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, ElemTighter>);
+   STATIC_REQUIRE(pssz_evolves_from<V1, CountWider>);
+   STATIC_REQUIRE(!pssz_evolves_from<CountWider, V1>);
+   STATIC_REQUIRE(pssz_evolves_from<V1, Unbounded>);      // under the cap the widths are the cap's
+   STATIC_REQUIRE(!pssz_evolves_from<Unbounded, V1>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, WithMin>);       // a new lower bound refuses old values
+   STATIC_REQUIRE(pssz_evolves_from<WithMin, V1>);
+   // utf8 / raw and sorted are the member's type.
+   STATIC_REQUIRE(!pssz_evolves_from<V1, Raw>);
+   STATIC_REQUIRE(!pssz_evolves_from<Raw, V1>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, ElemUtf8>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, Sorted>);
+   STATIC_REQUIRE(!pssz_evolves_from<Sorted, V1>);
+   // The cap may grow within its width class and may not shrink.
+   STATIC_REQUIRE(pssz_evolves_from<V1, CapWider>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, CapTighter>);
+   STATIC_REQUIRE(!pssz_evolves_from<V1, CapOtherWidth>);
+   // Adding a cap: only one the old type's inferred bound fits.
+   STATIC_REQUIRE(*psio::max_encoded_size<Open>() <= 600);
+   STATIC_REQUIRE(*psio::max_encoded_size<Open>() > 400);
+   STATIC_REQUIRE(pssz_evolves_from<Open, OpenCapped>);
+   STATIC_REQUIRE(!pssz_evolves_from<Open, OpenCappedLow>);
+   STATIC_REQUIRE(pssz_evolves_from<OpenCapped, Open>);   // dropping it: nothing old is refused
+   // Without a cap, a widened bound that moves a nested list's offset table
+   // into another width class changes the bytes.
+   STATIC_REQUIRE(psio::auto_pssz_width_v<Open> == psio::auto_pssz_width_v<OpenWideList>);
+   STATIC_REQUIRE(!pssz_evolves_from<Open, OpenWideList>);
+   STATIC_REQUIRE(pssz_evolves_from<Open, OpenWider>);
+
+   // What the check promises, on bytes: every record of V1 is a record of
+   // Wider, and a V1 record at its bound is not a record of Tighter.
+   V1 full;
+   full.owner = std::string(32, 'a');
+   full.tags  = {std::string(16, 'b')};
+   const auto frame = psio::to_pssz(full);
+   CHECK(psio::validate_pssz<Wider>(bytes_of(frame)).ok());
+   CHECK(psio::validate_pssz<CapWider>(bytes_of(frame)).ok());
+   CHECK(!psio::validate_pssz<Tighter>(bytes_of(frame)).ok());
+   CHECK(!psio::validate_pssz<ElemTighter>(bytes_of(frame)).ok());
+
+   // maxFields: a revision has no more fields than the original's cap and
+   // does not raise or drop it.
+   STATIC_REQUIRE(pssz_evolves_from<Fields3, Fields3Grown>);
+   STATIC_REQUIRE(!pssz_evolves_from<Fields3, Fields3Raised>);
+   STATIC_REQUIRE(!pssz_evolves_from<Fields3, Fields3Dropped>);
+   STATIC_REQUIRE(pssz_evolves_from<Fields3, Fields3Lowered>);
+   STATIC_REQUIRE(!pssz_evolves_from<Fields3Lowered, Fields3Grown>);
+}

@@ -70,8 +70,39 @@ a `std::string`; both bounds are enforced by encode, decode and validation.
 **Trailing data.** A buffer holds exactly one value. Fixed-size values must
 occupy exactly their span in decode as well as validate.
 
-**Compile-time check.** `psio::pssz_evolves_from<Old, New>` is true iff New is
-Old plus optional fields at an unchanged automatic width and DWNC status.
+**Compile-time check.** `psio::pssz_evolves_from<Old, New>` is true iff the
+new reader reads every value the old writer can produce, and the old reader
+reads every new value that is also a value of the old type. Exactly:
+
+1. *Fields.* New's fields are Old's, in order, followed only by optional
+   fields; DWNC status is unchanged and a DWNC record gains none.
+2. *Widths.* The record's automatic offset width is unchanged, and so is the
+   width of every list, map, set, array, tuple and pair at and below every
+   member (a member annotation, or the record's cap, can move those without
+   moving the record's own width).
+3. *Length bounds.* At the member and at every position below it
+   (`element`, `keys`, `values`, `at<I>`), New's range contains Old's:
+   `[min, max]`, where `exact N` is `[N, N]` and no bound is `[0, ∞)`. A
+   bound may only **widen**. Tightening one — the case this check used to
+   miss — keeps the bytes of old values but makes the new reader reject the
+   old records outside it.
+4. *`utf8`* is the same on both sides at every position.
+5. *`sorted` / `unique` / `unique_keys`* are the same on both sides.
+6. *`maxDynamicData`.* New's cap, if it has one, is at least Old's cap — or,
+   when Old has none, at least Old's inferred bound (`max_encoded_size`).
+   Dropping a cap is allowed when rule 2 still holds.
+7. *`maxFields`.* If Old has one, New has no more fields than it allows and
+   declares a `maxFields` that is not larger.
+8. A bound stated in a wrapper type (`psio::bounded<T, N>`,
+   `psio::utf8_string<N>`) is part of the C++ type: the two revisions must
+   use the same type there. Widen such a member by moving the bound to an
+   annotation first (same bytes, same schema), then widening it.
+
+The relation is transitive, and it is deliberately one-directional for
+bounds and caps: `pssz_evolves_from<Old, New>` does not imply
+`pssz_evolves_from<New, Old>`. Rust's `pssz_evolves_from` currently refuses
+*any* change of a bound (its shapes compare the bound for equality), which
+is stricter than `docs/pssz-spec.md` §7.5 requires; rule 3 is the spec's.
 
 **Rust.** `rust/psio` implements the same rules through one frame parser
 (`pssz_checked::record_spans_into`, a port of `pssz_record_spans` and
