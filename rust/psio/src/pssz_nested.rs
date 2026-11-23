@@ -200,7 +200,7 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
     const MAX_ENCODED_SIZE: Option<usize> = nested_bound(N);
     const IS_FIXED_SIZE: bool = false;
     const FIXED_SIZE: usize = 0;
-    const AUTO_BOUND: Option<usize> = nested_bound(N);
+    const INFERRED_BOUND: Option<usize> = nested_bound(N);
     // The inner value is always in the automatic profile, whatever `F` is.
     const SHAPE: crate::pssz::Shape = crate::pssz::Shape::node(
         crate::pssz::ShapeKind::Nested,

@@ -195,10 +195,13 @@ macro_rules! assoc_consts {
             &[<$list as PsszPack<F>>::SHAPE],
         );
         const MIN_ENCODED_SIZE: usize = 0;
-        const MAX_ENCODED_SIZE: Option<usize> = <Self as PsszPack<F>>::AUTO_BOUND;
+        const MAX_ENCODED_SIZE: Option<usize> = match $bound {
+            Some(n) => checked::sequence_max(n, <$list as PsszPack<F>>::MAX_ENCODED_SIZE, <$list as PsszPack<F>>::IS_FIXED_SIZE, <Self as PsszPack<F>>::OFFSET_WIDTH),
+            None => None,
+        };
         const IS_FIXED_SIZE: bool = false;
         const FIXED_SIZE: usize = 0;
-        const AUTO_BOUND: Option<usize> = match $bound {
+        const INFERRED_BOUND: Option<usize> = match $bound {
             Some(n) => checked::sequence_bound(n, <$list as PsszPack<F>>::AUTO_BOUND, <$list as PsszPack<F>>::IS_FIXED_SIZE),
             None => None,
         };

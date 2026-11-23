@@ -263,6 +263,20 @@ pub const fn auto_pssz_width<T: PsszPack<Pssz> + ?Sized>() -> usize {
     T::OFFSET_WIDTH
 }
 
+/// The inferred bound of `T` (docs/pssz-spec.md 3.2; C++
+/// `inferred_bound<T>()`): what a width is chosen from. Never reads `T`'s
+/// own cap.
+pub const fn inferred_bound<T: PsszPack<Pssz> + ?Sized>() -> Option<usize> {
+    T::INFERRED_BOUND
+}
+
+/// The maximum encoded size of `T` (docs/pssz-spec.md 3.7; C++
+/// `max_encoded_size<T>()`): no automatic-profile encoding of a `T` is
+/// longer. `None` when there is no finite maximum.
+pub const fn max_encoded_size<T: PsszPack<Pssz> + ?Sized>() -> Option<usize> {
+    T::MAX_ENCODED_SIZE
+}
+
 /// Encoding trait. `F` is the format tag.
 pub trait PsszPack<F: PsszFormat> {
     /// A plain `Option`: as a trailing record field it is pruned when None
@@ -278,8 +292,15 @@ pub trait PsszPack<F: PsszFormat> {
     /// a 1-byte selector is needed (only zero / nonzero matters).
     const MIN_ENCODED_SIZE: usize;
 
-    /// Tight maximum encoded size under `F` when known. Informational; NOT
-    /// the bound used for width selection (see `AUTO_BOUND`).
+    /// The maximum encoded size (docs/pssz-spec.md 3.7; C++
+    /// `max_encoded_size<T>()`): no encoding of a value of this type under
+    /// `F` is longer; `None` when there is no finite maximum. Every header,
+    /// slot and offset table is counted at the width that is written
+    /// (`OFFSET_WIDTH`), a member at its own maximum, and a capped type is
+    /// the smaller of its cap and that sum (the cap when something inside is
+    /// unbounded). Conservative by one selector byte per optional and by
+    /// `ceil(N / 8) + 1` for a bitlist. No width is chosen from it: that is
+    /// `INFERRED_BOUND`.
     const MAX_ENCODED_SIZE: Option<usize>;
 
     /// True iff the type has a compile-time constant wire size.
@@ -292,13 +313,24 @@ pub trait PsszPack<F: PsszFormat> {
     /// type's lifetime width promise and caps the complete encoded size.
     const MAX_DYNAMIC_DATA: Option<usize> = None;
 
+    /// The inferred bound (docs/pssz-spec.md 3.2; C++ `inferred_bound<T>()`):
+    /// the number widths are chosen from. It never reads this type's own
+    /// cap, a capped member counts as its cap in full (`AUTO_BOUND`), and
+    /// each type's own header / slots / table are counted at the width
+    /// [`fit`] picks. `None` is unbounded. Must match C++ exactly: it is
+    /// ABI. It does not depend on the position. It is not the largest
+    /// encoding of a capped type: that is `MAX_ENCODED_SIZE`.
+    const INFERRED_BOUND: Option<usize> = None;
+
     /// What an enclosing type reserves for this one, and what selects this
-    /// type's own width: the explicit cap when declared, otherwise the
-    /// bound C++ `max_encoded_size<T>()` infers (docs/pssz-spec.md 3.2),
-    /// which counts each type's own header / slots / table at the width that
-    /// type ends up with ([`fit`]). `None` is unbounded. Must match C++
-    /// exactly: it is ABI. It does not depend on the position.
-    const AUTO_BOUND: Option<usize> = None;
+    /// type's own width (docs/pssz-spec.md 3.1 `effective_max_dynamic`; C++
+    /// `effective_max_dynamic_v<T>`): the explicit cap when declared,
+    /// otherwise `INFERRED_BOUND`. Derived; a codec defines the two it is
+    /// made of.
+    const AUTO_BOUND: Option<usize> = match Self::MAX_DYNAMIC_DATA {
+        Some(cap) => Some(cap),
+        None => Self::INFERRED_BOUND,
+    };
 
     /// Width of this type's own header and offset slots under `F`. The
     /// default is a record's: the width class of `AUTO_BOUND`, whatever the
@@ -532,7 +564,7 @@ macro_rules! pssz_impl_primitive_le {
             const MAX_ENCODED_SIZE: Option<usize> = Some(std::mem::size_of::<$ty>());
             const IS_FIXED_SIZE:    bool  = true;
             const FIXED_SIZE:       usize = std::mem::size_of::<$ty>();
-            const AUTO_BOUND: Option<usize> = Some(std::mem::size_of::<$ty>());
+            const INFERRED_BOUND: Option<usize> = Some(std::mem::size_of::<$ty>());
             const SHAPE: Shape = Shape::leaf(stringify!($ty), std::mem::size_of::<$ty>(), true);
             fn pssz_size(&self) -> usize { std::mem::size_of::<$ty>() }
             fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -634,7 +666,7 @@ impl<F: PsszFormat> PsszPack<F> for Uint256 {
     const MAX_ENCODED_SIZE: Option<usize> = Some(32);
     const IS_FIXED_SIZE:    bool  = true;
     const FIXED_SIZE:       usize = 32;
-    const AUTO_BOUND: Option<usize> = Some(32);
+    const INFERRED_BOUND: Option<usize> = Some(32);
     const SHAPE: Shape = Shape::leaf("u256", 32, true);
     fn pssz_size(&self) -> usize { 32 }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -702,7 +734,7 @@ impl<F: PsszFormat> PsszPack<F> for bool {
     const MAX_ENCODED_SIZE: Option<usize> = Some(1);
     const IS_FIXED_SIZE:    bool  = true;
     const FIXED_SIZE:       usize = 1;
-    const AUTO_BOUND: Option<usize> = Some(1);
+    const INFERRED_BOUND: Option<usize> = Some(1);
     const SHAPE: Shape = Shape::leaf("bool", 1, true);
     fn pssz_size(&self) -> usize { 1 }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -873,7 +905,7 @@ pub use crate::value_types::{Bitlist, Bitvector, BoundError, BoundedBytes, Bound
 /// C++ `psio::utf8_string<N>`: UTF-8, at most N bytes.
 impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
     pssz_string_consts!(Some(N), "string<=", N);
-    const AUTO_BOUND: Option<usize> = bounded_utf8_auto_bound(N);
+    const INFERRED_BOUND: Option<usize> = bounded_utf8_auto_bound(N);
     fn pssz_size(&self) -> usize { self.0.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedString overflow; use try_to_pssz");
@@ -1034,7 +1066,7 @@ impl<const N: usize> BoundedRawString<N> {
 }
 impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedRawString<N> {
     pssz_string_consts!(Some(N), "raw_string<=", N);
-    const AUTO_BOUND: Option<usize> = Some(N);
+    const INFERRED_BOUND: Option<usize> = Some(N);
     fn pssz_size(&self) -> usize { self.0.len() }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
         <Self as PsszPack<F>>::pssz_pack_checked(self, out).expect("pssz: BoundedRawString overflow; use try_to_pssz");
@@ -1084,7 +1116,7 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedRawString<N> {
     }
 }
 
-/// Bound C++ `max_encoded_size` assigns to `psio::utf8_string<N>`.
+/// Bound C++ `inferred_bound` assigns to `psio::utf8_string<N>`.
 const fn bounded_utf8_auto_bound(n: usize) -> Option<usize> { Some(n) }
 
 // ── References and Box: wire-transparent ───────────────────────────────────
@@ -1098,7 +1130,7 @@ macro_rules! pssz_forward_consts {
         const IS_FIXED_SIZE: bool = <$T as PsszPack<F>>::IS_FIXED_SIZE;
         const FIXED_SIZE: usize = <$T as PsszPack<F>>::FIXED_SIZE;
         const MAX_DYNAMIC_DATA: Option<usize> = <$T as PsszPack<F>>::MAX_DYNAMIC_DATA;
-        const AUTO_BOUND: Option<usize> = <$T as PsszPack<F>>::AUTO_BOUND;
+        const INFERRED_BOUND: Option<usize> = <$T as PsszPack<F>>::INFERRED_BOUND;
         const OFFSET_WIDTH: usize = <$T as PsszPack<F>>::OFFSET_WIDTH;
         const RECORD_WIDTH_BENEATH: usize = <$T as PsszPack<F>>::RECORD_WIDTH_BENEATH;
         const CHILD_WIDER_THAN_CAP: bool = <$T as PsszPack<F>>::CHILD_WIDER_THAN_CAP;
@@ -1135,6 +1167,8 @@ impl<F: PsszFormat, T: PsszPack<F> + ?Sized> PsszPack<F> for Box<T> {
     const IS_FIXED_SIZE: bool = <T as PsszPack<F>>::IS_FIXED_SIZE;
     const FIXED_SIZE: usize = <T as PsszPack<F>>::FIXED_SIZE;
     const MAX_DYNAMIC_DATA: Option<usize> = <T as PsszPack<F>>::MAX_DYNAMIC_DATA;
+    const INFERRED_BOUND: Option<usize> = None;
+    // Not the boxed type's cap either: a box reserves nothing.
     const AUTO_BOUND: Option<usize> = None;
     // A box has no header or table of its own (the boxed value is encoded
     // at its own width, at this position: a box passes the position cap
@@ -1206,13 +1240,11 @@ fn validate_sequence<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>>(
 
 impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for [T; N] {
     const MIN_ENCODED_SIZE: usize = if T::IS_FIXED_SIZE { N.saturating_mul(T::FIXED_SIZE) } else { N };
-    const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
-        Some(m) => N.checked_mul(if T::IS_FIXED_SIZE { m } else { m.saturating_add(<Self as PsszPack<F>>::OFFSET_WIDTH) }),
-        None    => None,
-    };
+    const MAX_ENCODED_SIZE: Option<usize> =
+        checked::sequence_max(N, T::MAX_ENCODED_SIZE, T::IS_FIXED_SIZE, <Self as PsszPack<F>>::OFFSET_WIDTH);
     const IS_FIXED_SIZE:    bool  = T::IS_FIXED_SIZE;
     const FIXED_SIZE:       usize = if T::IS_FIXED_SIZE { N.saturating_mul(T::FIXED_SIZE) } else { 0 };
-    const AUTO_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
+    const INFERRED_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
     const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
     const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::Array, N, <Self as PsszPack<F>>::OFFSET_WIDTH, T::IS_FIXED_SIZE, &[T::SHAPE]);
@@ -1432,13 +1464,11 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Vec<T>
 /// elements are bounded and the bound is small enough, 4 otherwise.
 impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<T, N> {
     const MIN_ENCODED_SIZE: usize = 0;
-    const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
-        Some(m) => N.checked_mul(if T::IS_FIXED_SIZE { m } else { m.saturating_add(<Self as PsszPack<F>>::OFFSET_WIDTH) }),
-        None    => None,
-    };
+    const MAX_ENCODED_SIZE: Option<usize> =
+        checked::sequence_max(N, T::MAX_ENCODED_SIZE, T::IS_FIXED_SIZE, <Self as PsszPack<F>>::OFFSET_WIDTH);
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
-    const AUTO_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
+    const INFERRED_BOUND: Option<usize> = checked::sequence_bound(N, T::AUTO_BOUND, T::IS_FIXED_SIZE);
     const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
     const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::node(ShapeKind::List, N, <Self as PsszPack<F>>::OFFSET_WIDTH, false, &[T::SHAPE]);
@@ -1506,7 +1536,7 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for Bitvector<N> {
     const IS_FIXED_SIZE:    bool  = true;
     const FIXED_SIZE:       usize = crate::pssz_bits::byte_count(N);
     // ceil(N / 8) bytes, inline (docs/pssz-spec.md 3.2).
-    const AUTO_BOUND: Option<usize> = Some(crate::pssz_bits::byte_count(N));
+    const INFERRED_BOUND: Option<usize> = Some(crate::pssz_bits::byte_count(N));
     const SHAPE: Shape = Shape::leaf("bitvector", N, true);
     fn pssz_size(&self) -> usize { crate::pssz_bits::byte_count(N) }
     fn pssz_pack(&self, out: &mut Vec<u8>) {
@@ -1559,10 +1589,10 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for Bitvector<N> {
 
 impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
     const MIN_ENCODED_SIZE: usize         = 1;  // always ≥ delimiter byte
-    const MAX_ENCODED_SIZE: Option<usize> = Some(1 + (MAX_N + 7) / 8);
+    const MAX_ENCODED_SIZE: Option<usize> = <Self as PsszPack<F>>::INFERRED_BOUND;
     // ceil(N / 8) + 1: the bits and the delimiter bit (docs/pssz-spec.md
     // 3.2). The bound every implementation uses, not the exact maximum.
-    const AUTO_BOUND: Option<usize> = crate::pssz_bits::byte_count(MAX_N).checked_add(1);
+    const INFERRED_BOUND: Option<usize> = crate::pssz_bits::byte_count(MAX_N).checked_add(1);
     const SHAPE: Shape = Shape::leaf("bitlist", MAX_N, false);
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
@@ -1624,15 +1654,13 @@ impl<F: PsszFormat, T: PsszPack<F>> PsszPack<F> for Option<T> {
     fn pssz_is_none(&self) -> bool { self.is_none() }
     fn pssz_none_bytes() -> Option<&'static [u8]> { Some(if T::MIN_ENCODED_SIZE == 0 { &[0] } else { &[] }) }
     const MIN_ENCODED_SIZE: usize = if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 };
-    const MAX_ENCODED_SIZE: Option<usize> = match T::MAX_ENCODED_SIZE {
-        Some(m) => Some((if T::MIN_ENCODED_SIZE == 0 { 1 } else { 0 }) + m),
-        None    => None,
-    };
+    // One selector byte, as in the inferred bound (docs/pssz-spec.md 3.7).
+    const MAX_ENCODED_SIZE: Option<usize> = checked::bound_add(T::MAX_ENCODED_SIZE, 1);
     const IS_FIXED_SIZE:    bool  = false;
     const FIXED_SIZE:       usize = 0;
     // C++ reserves one selector byte for every optional, whether or not
     // this payload uses one.
-    const AUTO_BOUND: Option<usize> = checked::bound_add(T::AUTO_BOUND, 1);
+    const INFERRED_BOUND: Option<usize> = checked::bound_add(T::AUTO_BOUND, 1);
     const RECORD_WIDTH_BENEATH: usize = T::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = Shape::optional(T::MIN_ENCODED_SIZE == 0, &[T::SHAPE]);
     fn pssz_size(&self) -> usize {
@@ -1740,7 +1768,7 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>> PsszValidate<F> for Option
 // std::tuple: header, slots, optional-suffix pruning. () is a zero-field
 // record (a bare header), not an empty span.
 
-/// C++ `max_encoded_size<std::tuple<...>>()` (docs/pssz-spec.md 3.2): a
+/// C++ `inferred_bound<std::tuple<...>>()` (docs/pssz-spec.md 3.2): a
 /// tuple is the extensible positional record of its elements: the header
 /// and one slot per element that is not an inline fixed payload, at the
 /// tuple's own width ([`fit`]), and per element its bound (its explicit cap
@@ -1750,7 +1778,8 @@ pub const fn tuple_bound(fields: &[(Option<usize>, bool)]) -> Option<usize> {
     checked::record_bound(fields, false)
 }
 
-/// C++ `max_encoded_size<std::variant<...>>()` (docs/pssz-spec.md 3.2): one
+/// The bound of a variant (docs/pssz-spec.md 3.2, 3.7), from its
+/// alternatives' inferred bounds or maximum encoded sizes: one
 /// selector byte, then the widest alternative. Unbounded when an
 /// alternative is.
 #[doc(hidden)]
@@ -1812,10 +1841,12 @@ macro_rules! pssz_tuple {
     ($(($ty:ident, $index:tt)),* $(,)?) => {
         impl<F: PsszFormat, $($ty: PsszPack<F>),*> PsszPack<F> for ($($ty,)*) {
             const MIN_ENCODED_SIZE: usize = 1;  // the header
-            const MAX_ENCODED_SIZE: Option<usize> = <Self as PsszPack<F>>::AUTO_BOUND;
+            const MAX_ENCODED_SIZE: Option<usize> = checked::record_max(
+                &[$((<$ty as PsszPack<F>>::MAX_ENCODED_SIZE, <$ty as PsszPack<F>>::IS_FIXED_SIZE)),*],
+                false, <Self as PsszPack<F>>::OFFSET_WIDTH, None);
             const IS_FIXED_SIZE: bool = false;
             const FIXED_SIZE: usize = 0;
-            const AUTO_BOUND: Option<usize> = tuple_bound(&[$((<$ty as PsszPack<F>>::AUTO_BOUND, <$ty as PsszPack<F>>::IS_FIXED_SIZE)),*]);
+            const INFERRED_BOUND: Option<usize> = tuple_bound(&[$((<$ty as PsszPack<F>>::AUTO_BOUND, <$ty as PsszPack<F>>::IS_FIXED_SIZE)),*]);
             // A tuple is not a record: the position cap bounds it, and it
             // hands the position to its elements.
             const OFFSET_WIDTH: usize = position_width::<F>(<Self as PsszPack<F>>::AUTO_BOUND);
@@ -2295,8 +2326,9 @@ mod tests {
         assert_eq!(<Bitlist<16> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE, Some(3));
         assert_eq!(<Bitvector<12> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE, Some(2));
 
-        // Option<fixed> max: 0 selector + 4 payload = 4.
-        assert_eq!(<Option<u32> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE, Some(4));
+        // Option<fixed>: one selector byte is counted for every optional
+        // (docs/pssz-spec.md 3.7), although this one writes none.
+        assert_eq!(<Option<u32> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE, Some(5));
         // Option<string> max: 1 selector + unbounded → None.
         assert_eq!(<Option<String> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE, None);
         // Option<BoundedString<16>> max: 1 selector + 16.
@@ -2306,18 +2338,18 @@ mod tests {
     #[test]
     fn auto_pssz_format_picks_narrowest_width() {
         // Uint256 fits in pssz8 (32 ≤ 255).
-        assert_eq!(choose_pssz_format_width(<Uint256 as PsszPack<Pssz32>>::MAX_ENCODED_SIZE),
+        assert_eq!(choose_pssz_format_width(<Uint256 as PsszPack<Pssz32>>::INFERRED_BOUND),
                     PsszWidth::W8);
         // BoundedList<u32, 8> max is 32 → pssz8.
-        assert_eq!(choose_pssz_format_width(<BoundedList<u32, 8> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE),
+        assert_eq!(choose_pssz_format_width(<BoundedList<u32, 8> as PsszPack<Pssz32>>::INFERRED_BOUND),
                     PsszWidth::W8);
         // BoundedString<1000> max 1000 → pssz16.
-        assert_eq!(choose_pssz_format_width(<BoundedString<1000> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE),
+        assert_eq!(choose_pssz_format_width(<BoundedString<1000> as PsszPack<Pssz32>>::INFERRED_BOUND),
                     PsszWidth::W16);
         // Unbounded types → pssz32.
-        assert_eq!(choose_pssz_format_width(<String as PsszPack<Pssz32>>::MAX_ENCODED_SIZE),
+        assert_eq!(choose_pssz_format_width(<String as PsszPack<Pssz32>>::INFERRED_BOUND),
                     PsszWidth::W32);
-        assert_eq!(choose_pssz_format_width(<Vec<u32> as PsszPack<Pssz32>>::MAX_ENCODED_SIZE),
+        assert_eq!(choose_pssz_format_width(<Vec<u32> as PsszPack<Pssz32>>::INFERRED_BOUND),
                     PsszWidth::W32);
     }
 

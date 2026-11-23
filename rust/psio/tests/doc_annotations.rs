@@ -286,10 +286,12 @@ const _: () = {
     // The cap may grow inside its width class, and may not shrink.
     assert!(pssz_evolves_from::<AccountV1, AccountCapRaised>());
     assert!(!pssz_evolves_from::<AccountCapRaised, AccountV1>());
-    // max_encoded_size stays the bound inferred from the fields; the cap is
-    // what rules.
-    assert!(matches!(<AccountV1 as psio::pssz::PsszPack<psio::pssz::Pssz>>::MAX_ENCODED_SIZE, Some(187)));
+    // The inferred bound stays what the fields add up to; the cap is what
+    // rules, and the largest encoding has the header and the two slots at
+    // the width the cap selects (2 bytes, not 1).
+    assert!(matches!(<AccountV1 as psio::pssz::PsszPack<psio::pssz::Pssz>>::INFERRED_BOUND, Some(187)));
     assert!(matches!(<AccountV1 as psio::pssz::PsszPack<psio::pssz::Pssz>>::AUTO_BOUND, Some(1024)));
+    assert!(matches!(<AccountV1 as psio::pssz::PsszPack<psio::pssz::Pssz>>::MAX_ENCODED_SIZE, Some(190)));
 };
 
 #[test]
@@ -323,7 +325,8 @@ struct Receipt {
 #[test]
 fn a_transparent_type_with_a_bounded_member() {
     use psio::pssz::{BoundedString, Pssz, PsszPack as Pack};
-    assert_eq!(<Memo as Pack<Pssz>>::MAX_ENCODED_SIZE, Some(80));
+    assert_eq!(<Memo as Pack<Pssz>>::INFERRED_BOUND, Some(80));
+    assert_eq!(<Receipt as Pack<Pssz>>::INFERRED_BOUND, Some(1 + 8 + 1 + 80));
     assert_eq!(<Receipt as Pack<Pssz>>::MAX_ENCODED_SIZE, Some(1 + 8 + 1 + 80));
     assert_eq!(auto_pssz_width::<Receipt>(), 1);
     // Memo has the bytes, the key and the text of the bounded string.
@@ -372,11 +375,13 @@ const _: () = assert!(pssz_evolves_from::<bank::args::transfer, bank_v2::args::t
 fn method_arguments_in_text_and_under_a_cap() {
     use psio::json::{decode, validate, Json};
     use psio::pssz::{Pssz, PsszPack as Pack};
-    // max_encoded_size is the bound inferred from the parameters, not the
-    // cap: header 1 + slot 1 + from 8 + to 8 + amount 8 + memo 80.
-    assert_eq!(<bank::args::transfer as Pack<Pssz>>::MAX_ENCODED_SIZE, Some(2 + 8 + 8 + 8 + 80));
+    // The inferred bound is that of the parameters, not the cap: header 1
+    // + slot 1 + from 8 + to 8 + amount 8 + memo 80. The largest argument
+    // list has the header and the slot 2 bytes wide (the cap's class).
+    assert_eq!(<bank::args::transfer as Pack<Pssz>>::INFERRED_BOUND, Some(2 + 8 + 8 + 8 + 80));
+    assert_eq!(<bank::args::transfer as Pack<Pssz>>::MAX_ENCODED_SIZE, Some(2 * 2 + 8 + 8 + 8 + 80));
     assert_eq!(<bank::args::transfer as Pack<Pssz>>::MAX_DYNAMIC_DATA, Some(1024));
-    assert_eq!(<bank::args::open as Pack<Pssz>>::MAX_ENCODED_SIZE, Some(3 + 32 + (8 + 8 * 16)));
+    assert_eq!(<bank::args::open as Pack<Pssz>>::INFERRED_BOUND, Some(3 + 32 + (8 + 8 * 16)));
     let args = bank::args::transfer { from: 1, to: 2, amount: 500, memo: "rent".into() };
     let bytes = psio::to_pssz(&args);
     // An optional argument appended under the cap: old callers still work.

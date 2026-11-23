@@ -520,8 +520,8 @@ fn the_cap_and_the_parameter_bounds_select_the_width_and_are_enforced() {
     assert_eq!(auto_pssz_width::<args::transfer>(), 2);
     assert_eq!(<args::transfer as PsszPack<psio::Pssz>>::MAX_DYNAMIC_DATA, Some(256));
     assert_eq!(auto_pssz_width::<args::transfer_uncapped>(), 1);
-    assert_eq!(<args::transfer_uncapped as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(107));
-    assert_eq!(<args::batch as PsszPack<psio::Pssz>>::MAX_ENCODED_SIZE, Some(44));
+    assert_eq!(<args::transfer_uncapped as PsszPack<psio::Pssz>>::INFERRED_BOUND, Some(107));
+    assert_eq!(<args::batch as PsszPack<psio::Pssz>>::INFERRED_BOUND, Some(44));
     assert_eq!(auto_pssz_width::<args::note>(), 1);
 
     // `method-args/transfer/...` of the fixture: ("al", 5, "hi").

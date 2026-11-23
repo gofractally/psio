@@ -112,7 +112,7 @@ const _: () = {
     assert!(!pssz_evolves_from::<V1, CapTighter>());
     assert!(!pssz_evolves_from::<V1, CapOtherWidth>());
     // Adding a cap: only one the old type's inferred bound fits.
-    let inferred = match <Open as PsszPack<Pssz>>::MAX_ENCODED_SIZE {
+    let inferred = match <Open as PsszPack<Pssz>>::INFERRED_BOUND {
         Some(bound) => bound,
         None => panic!("Open has an inferred bound"),
     };
@@ -245,6 +245,10 @@ fn order_constraints_are_enforced_by_writers_and_checking_readers() {
     // The constraints change no byte, no width, no bound and no schema.
     assert_eq!(frame, psio::to_pssz(&loose(&ok)));
     assert_eq!(key, try_to_key(&loose(&ok)).unwrap());
+    assert_eq!(
+        <Ranked as PsszPack<Pssz>>::INFERRED_BOUND,
+        <Loose as PsszPack<Pssz>>::INFERRED_BOUND
+    );
     assert_eq!(
         <Ranked as PsszPack<Pssz>>::MAX_ENCODED_SIZE,
         <Loose as PsszPack<Pssz>>::MAX_ENCODED_SIZE
@@ -492,6 +496,7 @@ struct Memo {
 
 #[test]
 fn a_transparent_type_that_bounds_its_member_is_that_bounded_type() {
+    assert_eq!(<Memo as PsszPack<Pssz>>::INFERRED_BOUND, Some(80));
     assert_eq!(<Memo as PsszPack<Pssz>>::MAX_ENCODED_SIZE, Some(80));
     assert_eq!(auto_pssz_width::<Vec<Memo>>(), auto_pssz_width::<Vec<BoundedString<80>>>());
     let memo = Memo { text: "hi".into() };

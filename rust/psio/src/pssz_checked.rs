@@ -539,7 +539,7 @@ pub const fn fixed_region(w: usize, layouts: &[Layout]) -> usize {
     total
 }
 
-/// C++ `max_encoded_size` for a record or tuple (docs/pssz-spec.md 3.2):
+/// C++ `inferred_bound` for a record or tuple (docs/pssz-spec.md 3.2):
 /// the header (unless DWNC) and one slot per field that is not stored
 /// inline, at the record's own width (`fit`), plus each field's bound.
 pub const fn record_bound(fields: &[(Option<usize>, bool)], dwnc: bool) -> Option<usize> {
@@ -564,7 +564,7 @@ pub const fn record_bound(fields: &[(Option<usize>, bool)], dwnc: bool) -> Optio
     crate::pssz::fit(words, Some(total))
 }
 
-/// C++ `max_encoded_size` for `count` elements (array, bounded list, the
+/// C++ `inferred_bound` for `count` elements (array, bounded list, the
 /// entries of a bounded map or set): the elements and, when they are not
 /// fixed-size, the offset table of `count` slots at the sequence's own
 /// width (`fit`).
@@ -584,6 +584,65 @@ pub const fn sequence_bound(count: usize, element: Option<usize>, fixed: bool) -
         Some(payload)
     } else {
         crate::pssz::fit(count, Some(payload))
+    }
+}
+
+/// The maximum encoded size of a record or tuple (docs/pssz-spec.md 3.7):
+/// the header (unless DWNC) and one slot per field that is not stored
+/// inline, at `width` — the width the record really has —, plus each
+/// field's own maximum; never more than `cap`, and `cap` when a field is
+/// unbounded.
+pub const fn record_max(
+    fields: &[(Option<usize>, bool)],
+    dwnc: bool,
+    width: usize,
+    cap: Option<usize>,
+) -> Option<usize> {
+    let mut words: usize = if dwnc { 0 } else { 1 };
+    let mut total: Option<usize> = Some(0);
+    let mut at = 0;
+    while at < fields.len() {
+        let (bound, fixed) = fields[at];
+        if !fixed {
+            words += 1;
+        }
+        total = match (total, bound) {
+            (Some(t), Some(b)) => t.checked_add(b),
+            _ => None,
+        };
+        at += 1;
+    }
+    let sum = match (words.checked_mul(width), total) {
+        (Some(w), Some(t)) => w.checked_add(t),
+        _ => None,
+    };
+    match (cap, sum) {
+        (Some(cap), Some(sum)) => Some(if sum < cap { sum } else { cap }),
+        (Some(cap), None) => Some(cap),
+        (None, sum) => sum,
+    }
+}
+
+/// The maximum encoded size of `count` elements (docs/pssz-spec.md 3.7):
+/// each at its own maximum and, when they are not fixed-size, the offset
+/// table of `count` slots at `width`, the width the sequence really has.
+pub const fn sequence_max(count: usize, element: Option<usize>, fixed: bool, width: usize) -> Option<usize> {
+    if count == 0 {
+        return Some(0);
+    }
+    let payload = match element {
+        Some(e) => match count.checked_mul(e) {
+            Some(p) => p,
+            None => return None,
+        },
+        None => return None,
+    };
+    if fixed {
+        return Some(payload);
+    }
+    match count.checked_mul(width) {
+        Some(table) => table.checked_add(payload),
+        None => None,
     }
 }
 

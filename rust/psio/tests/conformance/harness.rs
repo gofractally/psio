@@ -10,6 +10,9 @@ pub struct TypeInfo {
     pub id: String,
     pub shape: String,
     pub auto_width: usize,
+    /// docs/pssz-spec.md 3.2: what a width is chosen from.
+    pub inferred_bound: Option<u64>,
+    /// docs/pssz-spec.md 3.7: the largest encoding.
     pub max_encoded_size: Option<u64>,
     pub max_dynamic_data: Option<u64>,
     pub fixed: bool,
@@ -348,9 +351,24 @@ pub fn manifest<T: All>(info: &TypeInfo) -> Result<(), String> {
     }
     // C++ reports the inferred bound separately from the cap; the cap rules.
     let bound = <T as PsszPack<Pssz>>::AUTO_BOUND.map(|c| c as u64);
-    let expected = info.max_dynamic_data.or(info.max_encoded_size);
+    let expected = info.max_dynamic_data.or(info.inferred_bound);
     if bound != expected {
         problems.push(format!("bound {bound:?} != {expected:?}"));
+    }
+    let inferred = psio::pssz::inferred_bound::<T>().map(|c| c as u64);
+    if inferred != info.inferred_bound {
+        problems.push(format!("inferred bound {inferred:?} != {:?}", info.inferred_bound));
+    }
+    let largest = psio::pssz::max_encoded_size::<T>().map(|c| c as u64);
+    if largest != info.max_encoded_size {
+        problems.push(format!("max encoded size {largest:?} != {:?}", info.max_encoded_size));
+    }
+    // How the three relate (docs/pssz-spec.md 3.7).
+    match (cap, largest, inferred) {
+        (Some(cap), Some(largest), _) if largest <= cap => {}
+        (None, Some(largest), Some(inferred)) if largest <= inferred => {}
+        (None, None, None) => {}
+        other => problems.push(format!("cap / max encoded size / inferred bound {other:?}")),
     }
     let fixed = <T as PsszPack<Pssz>>::IS_FIXED_SIZE;
     if fixed != info.fixed || (fixed && <T as PsszPack<Pssz>>::FIXED_SIZE != info.fixed_size) {

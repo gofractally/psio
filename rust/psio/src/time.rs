@@ -596,7 +596,7 @@ macro_rules! time_value {
             const MAX_ENCODED_SIZE: Option<usize> = R::MAX_ENCODED_SIZE;
             const IS_FIXED_SIZE: bool = R::IS_FIXED_SIZE;
             const FIXED_SIZE: usize = R::FIXED_SIZE;
-            const AUTO_BOUND: Option<usize> = R::AUTO_BOUND;
+            const INFERRED_BOUND: Option<usize> = R::INFERRED_BOUND;
             // Not the tick integer's shape: an integer and a time value
             // (or two time values of different kind, unit or tick type) are
             // different types to `pssz_evolves_from`, as in C++.

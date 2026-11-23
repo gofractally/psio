@@ -39,6 +39,14 @@
 //! A prefix field may itself have evolved (a nested record, or a vector /
 //! array / optional / variant / tuple of one) under the same rules.
 //!
+//! A variant (an enum with data) may gain alternatives **at the end**
+//! (docs/pssz-spec.md 7.5): New's alternatives are Old's, in order, each
+//! evolved by these rules, followed by any number of new ones. A variant
+//! writes no offsets, so it has no width to compare; a new alternative that
+//! is larger than the others raises the variant's bound, and the change is
+//! refused when that moves the width of anything that holds the variant
+//! (rule 2), exactly as for an appended field. Under a cap nothing moves.
+//!
 //! Maps, sets and nested values (docs/pssz-spec.md 5.9.4, 5.8, 7.5):
 //!   - a map evolves when its value type does: the entry is a 2-tuple whose
 //!     key type is the same and whose value type evolves. The key type
@@ -100,7 +108,7 @@ pub struct Shape {
     pub dwnc: bool,
     /// A record's explicit `max_dynamic_data`.
     pub cap: Option<usize>,
-    /// A record's inferred bound (`PsszPack::MAX_ENCODED_SIZE`): what a cap
+    /// A record's inferred bound (`PsszPack::INFERRED_BOUND`): what a cap
     /// declared later must admit.
     pub bound: Option<usize>,
     /// A record's `max_fields`.
@@ -272,7 +280,13 @@ const fn all_evolve(old: &[Shape], new: &[Shape], count: usize) -> bool {
 
 /// C++ `detail::pssz_impl::layout_evolves`.
 pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
-    if old.kind as u8 != new.kind as u8 || old.width != new.width || old.fixed != new.fixed {
+    if old.kind as u8 != new.kind as u8 || old.fixed != new.fixed {
+        return false;
+    }
+    // A variant writes no offsets: the width in its shape is only the class
+    // of its bound, which an appended alternative may raise. Whatever holds
+    // the variant compares its own width.
+    if !matches!(old.kind, ShapeKind::Variant) && old.width != new.width {
         return false;
     }
     match old.kind {
@@ -302,8 +316,12 @@ pub const fn shape_evolves(old: &Shape, new: &Shape) -> bool {
         // The inner value is a frame of its own: it evolves as a top-level
         // type does.
         ShapeKind::Nested => new.param >= old.param && all_evolve(old.children, new.children, 1),
+        // docs/pssz-spec.md 7.5: New's alternatives are Old's, in order,
+        // each evolved by these rules, followed by any number of new ones.
+        // A larger new alternative is refused where it moves the width of
+        // what holds the variant (a record, tuple, array, list, map).
         ShapeKind::Variant => {
-            old.children.len() == new.children.len()
+            new.children.len() >= old.children.len()
                 && all_evolve(old.children, new.children, old.children.len())
         }
         ShapeKind::Record | ShapeKind::Tuple => {

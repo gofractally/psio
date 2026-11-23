@@ -47,6 +47,38 @@ fn every_fixture_type_is_mapped_to_the_same_logical_type() {
     assert!(fixture.types.len() >= 100, "fixture type manifest shrank");
 }
 
+// max_encoded_size is an upper bound of the encoding: no canonical frame of
+// the automatic profile, of any fixture type, is longer than the number the
+// Rust type computes (which `manifest` checks is the fixture's).
+#[test]
+fn no_canonical_vector_exceeds_its_types_max_encoded_size() {
+    let fixture = fixture();
+    let registry = registry();
+    let mut largest = BTreeMap::new();
+    for info in &fixture.types {
+        let entry = registry.get(&info.id).unwrap_or_else(|| panic!("unmapped type id: {}", info.id));
+        (entry.manifest)(info).unwrap_or_else(|e| panic!("{}: {e}", info.id));
+        largest.insert(info.id.clone(), info.max_encoded_size);
+    }
+    assert!(largest.values().filter(|m| m.is_some()).count() > 100);
+    let (mut checked, mut at_maximum) = (0, 0);
+    for v in &fixture.vectors {
+        if v.format != "auto" || v.expect != "canonical" {
+            continue;
+        }
+        let Some(max) = *largest.get(&v.ty).unwrap_or_else(|| panic!("{}: unknown type {}", v.name, v.ty)) else {
+            continue;
+        };
+        let size = (v.hex.len() / 2) as u64;
+        assert!(size <= max, "{}: {size} bytes > max_encoded_size {max}", v.name);
+        checked += 1;
+        at_maximum += usize::from(size == max);
+    }
+    assert!(checked > 300, "{checked}");
+    // The bound is not vacuous: some vectors sit exactly on it.
+    assert!(at_maximum > 0);
+}
+
 #[test]
 fn every_vector_reaches_the_fixture_outcome_on_every_entry_point() {
     let fixture = fixture();

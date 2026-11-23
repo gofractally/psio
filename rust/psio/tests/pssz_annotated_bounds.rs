@@ -164,6 +164,7 @@ impl<T> All for T where
 fn same_type<A: All + PartialEq, W: All>(ann: &A, wrap: &W) {
     fn consts<F: PsszFormat, A: PsszPack<F>, W: PsszPack<F>>() {
         assert_eq!(A::AUTO_BOUND, W::AUTO_BOUND);
+        assert_eq!(A::INFERRED_BOUND, W::INFERRED_BOUND);
         assert_eq!(A::MAX_ENCODED_SIZE, W::MAX_ENCODED_SIZE);
         assert_eq!(A::OFFSET_WIDTH, W::OFFSET_WIDTH);
         assert_eq!(A::IS_FIXED_SIZE, W::IS_FIXED_SIZE);
@@ -270,9 +271,9 @@ fn an_annotated_member_is_the_bounded_type() {
 
 #[test]
 fn the_bounds_select_the_widths_the_fixture_pins() {
-    // conformance/pssz-vectors.json: auto_width and max_encoded_size.
+    // conformance/pssz-vectors.json: auto_width and inferred_bound.
     fn bound<T: PsszPack<Pssz>>() -> (usize, Option<usize>) {
-        (auto_pssz_width::<T>(), T::MAX_ENCODED_SIZE)
+        (auto_pssz_width::<T>(), T::INFERRED_BOUND)
     }
     assert_eq!(bound::<AnnTags>(), (1, Some(138)));
     assert_eq!(bound::<AnnRawTags>(), (1, Some(138)));

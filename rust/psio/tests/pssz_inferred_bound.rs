@@ -1,6 +1,6 @@
 // The Rust port of cpp/tests/pssz_inferred_bound_tests.cpp: the inferred
 // size bound of variants and tuples (docs/pssz-spec.md 3.2).
-//   Variant(Ts...)  1 + max(max_encoded_size(T_i))
+//   Variant(Ts...)  1 + max(inferred_bound(T_i))
 //   Tuple(Ts...)    the extensible record of its elements: header + per
 //                   element its payload (+ an offset slot when variable)
 // with the header and every slot counted at the tuple's own width (`fit`).
@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 type Name = BoundedString<32>;
 
 const fn bound<T: PsszPack<Pssz>>() -> Option<usize> {
-    T::AUTO_BOUND
+    T::INFERRED_BOUND
 }
 const fn width<T: PsszPack<Pssz>>() -> usize {
     T::OFFSET_WIDTH

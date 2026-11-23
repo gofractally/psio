@@ -52,6 +52,7 @@ struct MethodRow {
     max_dynamic_data: Option<u64>,
     max_fields: Option<u64>,
     width: usize,
+    inferred_bound: Option<u64>,
     max_encoded_size: Option<u64>,
 }
 #[derive(serde::Deserialize)]
@@ -175,8 +176,12 @@ fn method_row<M: Method + PsszPack<Pssz>>(row: &MethodRow) {
     assert_eq!(M::HAS_RESULT, row.result, "{}", row.name);
     assert_eq!(<M as PsszPack<Pssz>>::MAX_DYNAMIC_DATA.map(|n| n as u64), row.max_dynamic_data, "{}", row.name);
     assert_eq!(auto_pssz_width::<M>(), row.width, "{}", row.name);
-    // The inferred bound: the cap is not part of it.
+    // The inferred bound: the cap is not part of it. The maximum encoded
+    // size: the largest argument list (docs/pssz-spec.md 3.7).
+    assert_eq!(<M as PsszPack<Pssz>>::INFERRED_BOUND.map(|n| n as u64), row.inferred_bound, "{}", row.name);
     assert_eq!(<M as PsszPack<Pssz>>::MAX_ENCODED_SIZE.map(|n| n as u64), row.max_encoded_size, "{}", row.name);
+    assert_eq!(psio::pssz::inferred_bound::<M>(), <M as PsszPack<Pssz>>::INFERRED_BOUND);
+    assert_eq!(psio::pssz::max_encoded_size::<M>(), <M as PsszPack<Pssz>>::MAX_ENCODED_SIZE);
     let info = &token::Tag::METHODS[M::INDEX];
     assert_eq!((info.name, info.params, info.named, info.has_result), (M::NAME, M::PARAM_NAMES, M::NAMED, M::HAS_RESULT));
     assert_eq!(row.args, format!("token.{}", row.name));

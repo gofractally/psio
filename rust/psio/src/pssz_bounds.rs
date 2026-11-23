@@ -287,7 +287,7 @@ impl<F: PsszFormat, L: PsszPack<F> + Elements, R: Rule<L::Item>> PsszPack<F> for
     const IS_FIXED_SIZE: bool = L::IS_FIXED_SIZE;
     const FIXED_SIZE: usize = L::FIXED_SIZE;
     const MAX_DYNAMIC_DATA: Option<usize> = L::MAX_DYNAMIC_DATA;
-    const AUTO_BOUND: Option<usize> = L::AUTO_BOUND;
+    const INFERRED_BOUND: Option<usize> = L::INFERRED_BOUND;
     const OFFSET_WIDTH: usize = L::OFFSET_WIDTH;
     const RECORD_WIDTH_BENEATH: usize = L::RECORD_WIDTH_BENEATH;
     // The constraint is the member's type: both sides of an evolution have
@@ -1068,7 +1068,7 @@ where
     const IS_FIXED_SIZE: bool = <T::As as PsszPack<F>>::IS_FIXED_SIZE;
     const FIXED_SIZE: usize = <T::As as PsszPack<F>>::FIXED_SIZE;
     const MAX_DYNAMIC_DATA: Option<usize> = <T::As as PsszPack<F>>::MAX_DYNAMIC_DATA;
-    const AUTO_BOUND: Option<usize> = <T::As as PsszPack<F>>::AUTO_BOUND;
+    const INFERRED_BOUND: Option<usize> = <T::As as PsszPack<F>>::INFERRED_BOUND;
     const OFFSET_WIDTH: usize = <T::As as PsszPack<F>>::OFFSET_WIDTH;
     const RECORD_WIDTH_BENEATH: usize = <T::As as PsszPack<F>>::RECORD_WIDTH_BENEATH;
     const SHAPE: Shape = <T::As as PsszPack<F>>::SHAPE;

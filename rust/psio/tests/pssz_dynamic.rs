@@ -907,3 +907,32 @@ mod automatic {
         assert!(codec::encode::<Pssz>(&schema, &deep, &value).is_err());
     }
 }
+
+// C++ `std::vector<char>` now builds Custom{List<u8>, "hex"}, the node of
+// `Vec<u8>` (cpp/tests/schema_byte_list_tests.cpp). A published schema may
+// still hold the former node, Custom{List<Custom{u8, "char"}>, "hex"}: it is
+// read as the same bytes, with the same width and the same key.
+#[test]
+fn the_former_char_element_byte_list_is_still_read_as_bytes() {
+    let schema = Schema::default();
+    let u8_type = AnyType::new(AnyValue::Int(Int { bits: 8, isSigned: false }));
+    let char_type = AnyType::new(AnyValue::Custom(Custom { r#type: Box::new(u8_type.clone()), id: "char".into() }));
+    let hex = |element: &AnyType| {
+        AnyType::new(AnyValue::Custom(Custom {
+            r#type: Box::new(AnyType::new(AnyValue::List(List { r#type: Box::new(element.clone()) }))),
+            id: "hex".into(),
+        }))
+    };
+    let (former, now) = (hex(&char_type), hex(&u8_type));
+    codec::validate_schema(&schema).unwrap();
+    let bytes = [0u8, 128, 255];
+    let value = Value::Bytes(bytes.to_vec());
+    for ty in [&former, &now] {
+        // No unknown fields.
+        assert_eq!(codec::validate(&schema, ty, &bytes).unwrap(), false);
+        assert_eq!(codec::decode_exact::<Pssz>(&schema, ty, &bytes).unwrap(), value);
+        assert_eq!(codec::encode::<Pssz>(&schema, ty, &value).unwrap(), bytes);
+    }
+    assert_eq!(codec::auto_width(&schema, &former).unwrap(), codec::auto_width(&schema, &now).unwrap());
+    assert_eq!(codec::to_key(&schema, &former, &value).unwrap(), codec::to_key(&schema, &now, &value).unwrap());
+}
