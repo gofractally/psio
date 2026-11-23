@@ -82,6 +82,8 @@ Transfer.view(bytes).get('amount');                   // 18446744073709551615n, 
 | `type.encodeKey(value)` / `type.decodeKey(bytes)` / `type.validateKey(bytes)` | The `key` format ([keys](#keys)). |
 | `type.encodeKeyPrefix(elements)` / `keyPrefixUpperBound(bytes)` | A prefix key and the exclusive end of its range. |
 | `type.width` | The offset width of the type's own header / slots / offset table. |
+| `type.maxEncodedSize` | The inferred size bound (`max_encoded_size`) as a `bigint`, or `null` when unbounded. |
+| `type.childWiderThanCap` | A capped record holds a record wider than its cap allows ([widths](#typed-definitions)): a query, not an error. |
 | `jsonToPssz(schema, root, format, text)`, `psszToJson(schema, root, format, bytes)`, `validatePssz(schema, root, bytes)` | The text conversions and validation under the C++ / Rust names. |
 
 ## Typed definitions
@@ -174,17 +176,22 @@ integers. A variant alternative's I-JSON key is its name, or
 `alt(type, { ijsonName })`; a C++ `std::variant` without labels is
 `variant({ 0: alt(u32, { ijsonName: 'uint32' }), 1: ... })`.
 
-**Widths, caps and bounds.** Offset widths are derived from the type: a
-record or tuple whose size is bounded uses 1- or 2-byte offsets, otherwise 4.
-The bound is inferred (`docs/pssz-spec.md` §3.2): fixed-size members,
-bounded strings and lists, a member `lengthBound`, a variant (one selector
-byte plus its widest alternative) and a tuple or pair (the record of its
-elements: a 4-byte header, each element's payload, 4 more for each variable
-element) are bounded when everything they hold is; a plain string or list
-without a bound is not, and neither is anything holding one. An explicit
-`maxDynamicData` always rules: the width follows from the cap alone, whether
-the inferred bound is smaller, larger or absent. A list's offset table is
-always 4 bytes wide. Bounds and caps are enforced on encode and on every
+**Widths, caps and bounds.** Offset widths are derived from the type, and
+every type that has offsets takes its own: a record, a tuple or a pair (a
+header and one slot per variable member), and a list, an array, a map or a
+set of variable-size elements (an offset table of one entry per element). The
+width is 1 byte when the type's size bound is at most 255, 2 through 65 535,
+otherwise 4. The bound is inferred (`docs/pssz-spec.md` §3.2): fixed-size
+members, bounded strings and lists, a member `lengthBound`, bit types
+(`bitvector(n)` is ⌈n/8⌉ bytes, `bitlist(n)` one more), a variant (one
+selector byte plus its widest alternative), a tuple or pair (the record of
+its elements) are bounded when everything they hold is; a plain string or
+list without a bound is not, and neither is anything holding one. Each type
+counts its own header, slots and table at its own width — the narrowest whose
+worst case fits — and what it holds at that type's finished bound. An
+explicit `maxDynamicData` always rules its record: the width follows from the
+cap alone, whether the inferred bound is smaller, larger or absent. A tuple
+has at most 255 elements. Bounds and caps are enforced on encode and on every
 decode (`decode`, `validate`, bytes to text, a view's `toValue()`).
 
 ```typescript
@@ -192,11 +199,39 @@ const Small = record('Small', { tag: boundedUtf8(8), ids: boundedList(u16, 4), k
 Small.width;                                    // 1
 record('Note', { text: utf8 }, { maxDynamicData: 200 }).width;   // 1
 record('Open', { text: utf8 }).width;           // 4
-tuple(u64, boundedUtf8(32), u8).width;          // 1   (4 + 8 + 36 + 1 = 49 bytes at most)
+record('Open', { text: utf8 }).maxEncodedSize;  // null: unbounded
+tuple(u64, boundedUtf8(32), u8).width;          // 1
+tuple(u64, boundedUtf8(32), u8).maxEncodedSize; // 43n   (1 + 8 + (1 + 32) + 1)
 record('Event', { at: u64, what: variant({ tick: u8, point: tuple(u32, u32) }) }).width;   // 1
 tuple(u32, utf8).width;                         // 4   (an unbounded element)
+boundedList(boundedUtf8(16), 15).width;         // 1   (15 * (1 + 16) = 255: a 1-byte offset table)
+boundedList(boundedUtf8(17), 15).width;         // 2   (15 * (2 + 17) = 285)
+list(boundedUtf8(16)).width;                    // 4   (no count bound)
 Small.type({ width: 2 });                       // the explicit psio::pssz_<2> profile, a PsszType
 ```
+
+**A record's cap bounds what lies beneath it** (`docs/pssz-spec.md` §3.6).
+Nothing inside a record capped at N bytes is larger than N, so the lists,
+arrays, maps, sets and tuples beneath it — through lists, optionals,
+variants and tuples, down to the next record or nested value — take the width
+class of the cap when their own bound is larger or absent. The member types
+stay the plain ones, and nothing else changes: no new check, no new schema.
+
+```typescript
+const Memo = record('Memo', { token: u32, memo: utf8, tags: list(utf8), rows: list(list(utf8)) },
+                    { maxDynamicData: 255 });
+toHex(Memo.encode({ token: 1, memo: 'hi', tags: ['ab', 'c'], rows: [['x']] }));
+// '07' '01000000' '07' '09' '0e' '6869' '0204' '6162' '63' '01' '01' '78': every offset is one byte
+const Envelope = record('Envelope', { body: record('Body', { text: utf8 }) }, { maxDynamicData: 255 });
+Envelope.childWiderThanCap;                     // true: Body keeps its own 4-byte offsets
+```
+
+A tighter bound of the member's own still wins, and a looser one is clamped
+by the cap. A record keeps its own width wherever it appears (its bytes do
+not depend on what holds it), so a child record that should be narrow
+declares its own cap or bounds; `childWiderThanCap` (C++
+`psio::pssz_child_wider_than_cap_v<T>`) reports a capped record that holds a
+wider one. The explicit profiles ignore all of this.
 
 **Recursive types** name themselves through `lazy`, with the type written out:
 
@@ -335,7 +370,8 @@ const Post = record('Post', {
 type Post = Infer<typeof Post>;
 // { title: string; tags: string[]; votes: Map<string, number[]>; origin: [string, number, Uint8Array];
 //   body: { type: 'Text'; value: string } | { type: 'Parts'; value: string[] }; reply: Uint8Array[] | null }
-Post.width;                                    // 2: every position is bounded (1675 bytes at most)
+Post.width;                                    // 2: every position is bounded
+Post.maxEncodedSize;                           // 1566n
 ```
 
 | Option | Bounds |
@@ -355,16 +391,16 @@ exactly where `utf8: true` is written.
 
 **The member is the type its bounds describe.** `tags` above is a bounded
 list of bounded UTF-8 strings: it has that type's size bound (so the record
-narrows its offsets), that type's widths at every depth — a tuple, a pair, a
-map entry or an array of variable elements below the member takes its width
-from the bounds of its position; a list's own table is 4 wide either way —
-the same bytes, and the same checks. The wrapper types say the same thing in
+narrows its offsets), that type's widths at every depth — a list, a map, a
+set, an array of variable elements, a tuple or a pair at or below the member
+takes its width from the bounds of its position: the list below has a 1-byte
+offset table — the same bytes, and the same checks. The wrapper types say the same thing in
 the type, and a reader cannot tell the two apart:
 
 ```typescript
 const Tags    = record('Tags', { tags: field(list(rawString), { max: 8, element: { utf8: true, max: 16 } }) });
 const Wrapped = record('Tags', { tags: boundedList(boundedUtf8(16), 8) });
-toHex(Tags.encode({ tags: ['ab', 'c'] }));     // '0101080000000a000000616263'
+toHex(Tags.encode({ tags: ['ab', 'c'] }));     // '01010204616263'
 toHex(Wrapped.encode({ tags: ['ab', 'c'] }));  // the same bytes
 ```
 
@@ -392,8 +428,9 @@ Post.encode({ ...post, tags: ['a'.repeat(17)] });   // throws PsszError: pssz IR
 are the tuple of its parameters. `argumentTuple(parameters, options)`
 declares it: each parameter bounded by its `field(type, bounds)`, and
 `maxDynamicData` capping the encoded arguments. The cap rules the tuple's
-offset width for the method's lifetime; without one the width follows from
-the parameters' bounds.
+offset width for the method's lifetime, and — the argument tuple being a
+record for this purpose — the widths of the lists, maps and tuples among the
+arguments; without one the width follows from the parameters' bounds.
 
 ```typescript
 import { argumentTuple, field, optional, rawString, u32, u64, toHex } from 'psio';
@@ -405,7 +442,7 @@ const Transfer  = argumentTuple(parameters, { maxDynamicData: 256 });
 const Transfer2 = argumentTuple({ ...parameters, fee: optional(u32) }, { maxDynamicData: 256 });
 
 Transfer.width;                                 // 2: the cap (256) rules
-argumentTuple(parameters).width;                // 1: no cap, the bounds give 116 bytes at most
+argumentTuple(parameters).width;                // 1: no cap, the bounds give 107 bytes at most
 const args = Transfer.encode({ to: 'al', amount: 5n, memo: 'hi' });
 toHex(args);                                    // '0c000c0005000000000000000e00616c6869'
 Transfer2.decode(args);                         // { to: 'al', amount: 5n, memo: 'hi', fee: null }
