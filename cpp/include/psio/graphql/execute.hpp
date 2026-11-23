@@ -361,7 +361,7 @@ namespace psio::graphql
          {
             // A leaf with a wire form of its own and no value accessor (a
             // record or enum with a text adapter): decode that one value.
-            const L value = ::psio::decode<L>(typename V::format_type{}, v._psio_data());
+            const L value = v.unpack();
             return write_leaf<L>(e, value, f);
          }
       }
@@ -623,6 +623,34 @@ namespace psio::graphql
          }
       }
 
+      // A parameter's arguments, from position `at` on: one, or for an
+      // argument group one per member. `at` ends after the last one read;
+      // on failure it is the position of the argument that has no valid
+      // value.
+      template <typename P>
+      bool decode_param(exec& e, const plan_field& f, std::size_t& at, P& out)
+      {
+         if constexpr (argument_group<P>)
+         {
+            using R = reflect<P>;
+            return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ([&] {
+                  if constexpr (object_def<P>::template meta<Is>().hidden)
+                     return true;
+                  else
+                     return decode_param(e, f, at, out.*(R::template member_pointer<Is>));
+               }() && ...);
+            }(std::make_index_sequence<R::member_count>{});
+         }
+         else
+         {
+            if (!decode_input(e, e.arg(f, at), out))
+               return false;
+            ++at;
+            return true;
+         }
+      }
+
       struct context_slot
       {
       };
@@ -670,8 +698,8 @@ namespace psio::graphql
                          using A = std::tuple_element_t<Ks, Args>;
                          if constexpr (!is_context_param_v<A>)
                          {
-                            constexpr std::size_t at = slot_args<T, I>::template arg_index<Ks>;
-                            if (!decode_input(e, e.arg(f, at), std::get<Ks>(args)))
+                            std::size_t at = slot_args<T, I>::template arg_index<Ks>;
+                            if (!decode_param(e, f, at, std::get<Ks>(args)))
                             {
                                bad = at;
                                return false;
@@ -682,7 +710,18 @@ namespace psio::graphql
                       ...);
                if (bad != static_cast<std::size_t>(-1))
                   return e.fail_field(f, cat("Argument \"", f.desc->args[bad].name, "\" has an invalid value."));
-               if constexpr (std::is_void_v<typename S::result>)
+               if constexpr (slot_value<T, I>::deferred)
+               {
+                  // The result's own arguments, then the value it resolves to.
+                  deferred_args_t<typename S::result> extra{};
+                  std::size_t                         at = slot_args<T, I>::own_count;
+                  if (!decode_param(e, f, at, extra))
+                     return e.fail_field(f, cat("Argument \"", f.desc->args[at].name, "\" has an invalid value."));
+                  decltype(auto) value = resolve_deferred(
+                     static_cast<context&>(e), call<I>(e, obj, args, std::index_sequence<Ks...>{}), extra);
+                  return write(e, value, f, f.child);
+               }
+               else if constexpr (std::is_void_v<typename S::result>)
                {
                   call<I>(e, obj, args, std::index_sequence<Ks...>{});
                   e.w.append(std::string_view{"true"});
@@ -718,8 +757,7 @@ namespace psio::graphql
                else if constexpr (by_view)
                {
                   // A method needs the object: decode it from the view.
-                  const T object =
-                     ::psio::decode<T>(typename std::remove_cv_t<Src>::format_type{}, src._psio_data());
+                  const T object = src.unpack();
                   return invoke<I>(e, object, f);
                }
                else
@@ -727,8 +765,44 @@ namespace psio::graphql
             }
          }
 
+         // Slot K of the record held by the flattened member I.
+         template <std::size_t I, std::size_t K>
+         static bool flat_slot(exec& e, const void* source, const plan_field& f)
+         {
+            using M  = typename flat_member<T, I>::type;
+            Src& src = *static_cast<Src*>(const_cast<void*>(source));
+            decltype(auto) member = def::template get<I>(src);
+            using U               = std::remove_cvref_t<decltype(member)>;
+            if constexpr (is_view_v<U>)
+               return handlers<M, const U>::table[K](e, &member, f);
+            else
+               return handlers<M, const M>::table[K](e, &member, f);
+         }
+         // `_` of a record without members.
+         static bool placeholder_slot(exec& e, const void*, const plan_field&)
+         {
+            e.w.append(std::string_view{"true"});
+            return true;
+         }
+
+         template <std::size_t I, std::size_t N>
+         static constexpr void fill(std::array<handler, N>& out)
+         {
+            constexpr std::size_t base = slot_base<T, I>();
+            if constexpr (def::template is_flat<I>)
+               [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+                  ((out[base + Ks] = &flat_slot<I, Ks>), ...);
+               }(std::make_index_sequence<slot_width<T, I>()>{});
+            else
+               out[base] = &slot<I>;
+         }
+         // Indexed by field_desc::slot.
          static constexpr auto table = []<std::size_t... Is>(std::index_sequence<Is...>) {
-            return std::array<handler, sizeof...(Is)>{&slot<Is>...};
+            std::array<handler, def::slot_count == 0 ? 1 : flat_slot_count<T>()> out{};
+            (fill<Is>(out), ...);
+            if constexpr (def::slot_count == 0)
+               out[0] = &placeholder_slot;
+            return out;
          }(std::make_index_sequence<def::slot_count>{});
       };
 

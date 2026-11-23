@@ -18,12 +18,12 @@ PSIO_REFLECT(Account, id, name, memo)
 struct Query {
    const Db* db;
    std::optional<Account> account(std::uint64_t id) const;            // account(id: UInt64!): Account
-   auto accounts(std::optional<std::int32_t> first, std::optional<std::string> after) const
-   {                                                                   // accounts(first: Int, after: String): AccountConnection
-      return psio::graphql::paginate(db->accounts_by_id(), {first, {}, {}, after});
+   auto accounts(psio::graphql::page_args page) const                  // accounts(first: Int, last: Int, before: String,
+   {                                                                   //          after: String): AccountConnection
+      return psio::graphql::paginate(db->accounts_by_id(), page);
    }
 };
-PSIO_REFLECT(Query, attr(db, psio::graphql::hidden), method(account, id), method(accounts, first, after))
+PSIO_REFLECT(Query, attr(db, psio::graphql::hidden), method(account, id), method(accounts, page))
 
 using api = psio::graphql::schema<Query>;
 std::string out;
@@ -92,8 +92,10 @@ shape.
 
 | C++ | GraphQL |
 |---|---|
-| reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field |
-| the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible |
+| reflected record | Object. Fields: the reflected data members, then the reflected `const` (or static) methods. A method with parameters is a field with arguments named by the reflected parameter names (`method(find, id, limit)`; every parameter must be named). A `const` method returning `void` is not a field. A member annotated `psio::graphql::flatten` is replaced by its own fields ([Flattened members](#flattened-members)) |
+| reflected record without members or methods (`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`) | Object with the one field `_: Boolean`, always `true` ([Records without members](#records-without-members)) |
+| instantiation of a reflected class template, `Box<A>` | Object named `Box_A` ([Class templates](#class-templates)) |
+| the same record as a parameter | Input object named `<Name>Input` (unchanged if the name already ends in `Input`); must be default-constructible. A record marked `psio::graphql::arguments` is not an input object but one argument per member ([Argument groups](#argument-groups)) |
 | `std::optional<T>`, `T*`, `unique_ptr`, `shared_ptr` | nullable `T`; every other type is non-null |
 | `psio::graphql::result<T>` (or any type with `has_value()`, `*`, `error()`) | nullable `T`; an error becomes a field error |
 | `std::vector`, `std::array`, `std::span`, any type with `begin()`/`end()` | List. The range is iterated once, lazily: a method can return a generator-like range and nothing is materialised |
@@ -121,6 +123,7 @@ shape.
 | `psio::view<T, Fmt, Store>`, `psio::buffer<T, Fmt, Store>`, `std::reference_wrapper<T>` | `T` (see [Views](#views)). The same record reached through different sources is one GraphQL type |
 | `psio::nested<T>` (`psio/nested.hpp`), as a value or through a view | `T`: the inner value, read in place through the view over the nested bytes. Output only |
 | `psio::graphql::connection<Node>` | `<Node>Connection`, `<Node>Edge`, `PageInfo` (see [Connections](#connections)) |
+| a method result `R` with a `psio::graphql::resolver<R>` | what `resolver<R>::resolve` returns; the field gains `resolver<R>::arguments` ([Results with arguments of their own](#results-with-arguments-of-their-own)) |
 
 A type invariant (`docs/pssz-spec.md` §18) holds here as in `psio::ijson`: an
 argument or variable that violates it is a validation error, a result that
@@ -175,8 +178,110 @@ specialising `psio::graphql::type_name<T>` (`input_type_name<T>` for its
 input-object name) with a `static constexpr std::string_view value`.
 
 Descriptions (`doc`) and deprecation appear in introspection and SDL.
-Enum values, arguments and input fields of methods have no place for an
-annotation and so no description.
+Enum values and the parameters of a method have no place for an annotation
+and so no description; a member of an argument group has (its `doc` is the
+argument's description).
+
+### Records without members
+
+GraphQL has no object type without fields, and a selection set cannot be
+empty. A reflected record with no members and no methods — a marker such as
+`struct TLSInfo { PSIO_REFLECT(TLSInfo) };`, an alternative of a union that
+carries no data — is the object type
+
+```graphql
+type TLSInfo { _: Boolean }
+```
+
+whose field `_` is always `true`. This is the placeholder SDL-first servers
+write for a type that has no field yet (`_: Boolean` in graphql-tools and
+Apollo schemas); the type keeps its name, so `__typename` and `... on
+TLSInfo` work, an `std::optional<TLSInfo>` is still `null` or an object, and
+a client that only wants presence selects `tls { _ }` or
+`tls { __typename }`. The same holds for a query root without members. A
+record whose members are all *hidden* is still a compile error (that is a
+mistake, not a marker), and so is an empty record as an input object.
+
+### Class templates
+
+`PSIO_REFLECT` gives every instantiation of a class template the template's
+own name, so two instantiations in one schema would be two types with one
+name. The GraphQL name of an instantiation whose template arguments are all
+types is therefore
+
+```
+<Template>_<Arg>_<Arg>...        Box<Account> -> Box_Account     Pair<A, B> -> Pair_A_B
+```
+
+where each argument is written as in a tuple's or a union's name: its
+GraphQL name (`Int`, `String`, `Account`, `Box_Account`), `Optional<T>` for
+an optional, `<T>List` for a list (`Box<std::vector<Box<int>>>` is
+`Box_Box_IntList`). Its input object is `<that>Input`. The name depends only
+on the type, not on the schema or on which instantiations appear, so it is
+the same in every build. An argument that has no GraphQL name (a tag type)
+is a compile error asking for a `type_name` specialisation.
+
+To choose the name, specialise `type_name` for the template — the existing
+mechanism; a partial specialisation covers all instantiations:
+
+```cpp
+// by a string that is a template argument
+template <typename Node, psio::fixed_string Name>
+struct psio::graphql::type_name<Page<Node, Name>> { static constexpr std::string_view value = Name.view(); };
+
+// composed from the argument's GraphQL name: Account -> AccountWithBlockContext
+template <typename T>
+struct psio::graphql::type_name<WithBlockContext<T>> {
+   static constexpr std::string_view value = psio::graphql::affixed_name<"", T, "WithBlockContext">;
+};
+```
+
+`affixed_name<Prefix, T, Suffix>` is `Prefix` + the GraphQL name of `T` +
+`Suffix`. A template with non-type arguments (`Page<Node, "AccountPage">`)
+cannot be taken apart by the library: without a `type_name` every
+instantiation has the template's name, which is a compile error as soon as
+two that differ meet in a schema. (Two C++ types with one name and the same
+fields are one GraphQL type; that is how a record reached through a value
+and through a view is one type.)
+
+`psio::graphql::connection<Node>` and `edge<Node>` are named
+`<Node>Connection` and `<Node>Edge` by such specialisations; specialise
+`type_name<connection<X>>` to rename one.
+
+### Flattened members
+
+`psio::graphql::flatten` on a data member puts the member's fields in the
+enclosing object type, in the member's place:
+
+```cpp
+template <typename T>
+struct WithBlockContext {
+   EventBlockInfo block;
+   T              data;
+   PSIO_REFLECT(WithBlockContext, block, attr(data, psio::graphql::flatten))
+};
+// type InviteEventWithBlockContext { block: EventBlockInfo!  inviteId: Int!  actor: AccountNumber!  event: String! }
+```
+
+- The member must be a reflected record held by value (not an optional, a
+  list or a variant: those have no fields to lift). Its data members and its
+  methods (with their arguments) become fields; a member it hides stays
+  hidden; flattening nests (a flattened member of a flattened member).
+- **Two fields with one name are a compile error** ("two members of an
+  object type have the same GraphQL name"): rename one with `name_as` or
+  hide it.
+- The member itself is not a field (`data { ... }` is unknown), and its type
+  appears in the schema only if something else refers to it.
+- Resolution costs one extra indirect call per flattened field; through a
+  view the member is the sub-view, so only selected fields are read.
+- **GraphQL only.** The record's encodings — PSSZ, JSON, the key — and its
+  schema (`psio::schema`) are unchanged: `data` remains a nested member
+  there. As an *input* object the type also keeps `data` as a nested input
+  object. In Rust the same shape is `#[graphql(flatten)]` on the field of an
+  `async-graphql` `SimpleObject`, which is likewise GraphQL-only; serde's
+  `#[serde(flatten)]` (a JSON-level flatten) has no psio counterpart and the
+  psio derives reject it, so the JSON of the two languages stays the same
+  nested form.
 
 ### Compile-time errors
 
@@ -186,7 +291,11 @@ same GraphQL name (including `Foo`'s input object against a type named
 `FooInput`), two members of a type with the same name, a member whose type
 has no mapping, a `std::variant` alternative that is not a record, a method
 with unnamed parameters, an unsupported argument type, an optional of an
-optional, `id` on a non-scalar, an object type with no visible field.
+optional, `id` on a non-scalar, an object type whose members are all hidden,
+`flatten` on a member that is not a reflected record, two arguments of a
+field with one name (a parameter and a member of an argument group), a
+template argument without a GraphQL name, `page_budget` with a source that
+has no `row_bytes()`.
 A `psio::nested<T, nested_validation::deferred>` member is a type with no
 mapping (an enclosing reader has not checked that its bytes are a `T`: hide
 it, or expose the `T` from a method after validating), and a nested value
@@ -246,6 +355,7 @@ plan and the request's variables, in declaration order:
 
 - scalars, enums, `std::optional`, `std::vector` and reflected records
   (input objects) of those;
+- an *argument group*: one argument per member (below);
 - a parameter of type `psio::graphql::context&` (or `const context&`)
   receives the request context and is not an argument. `context::user<T>()`
   returns the object attached with `request::user(obj)` if it is a `T`, else
@@ -255,6 +365,74 @@ It may return a value, a reference, a view or buffer of encoded data, an
 optional or pointer, a range of any of those, or `result<T>` /
 `psio::graphql::fail("message")` for a field error.
 
+### Argument groups
+
+A reflected record marked as a group of arguments is, as a parameter, not
+an input object: each of its members is an argument of the field, named by
+the member, in the member's place among the arguments.
+
+```cpp
+struct Paging { std::optional<std::int32_t> first; std::optional<std::string> after; };
+PSIO_REFLECT(Paging, first, attr(after, psio::graphql::doc{"Where to start."}))
+PSIO_TYPE_ATTRS(Paging, psio::graphql::arguments)
+
+std::vector<Row> rows(std::string prefix, Paging page) const;     // method(rows, prefix, page)
+// rows(prefix: String!, first: Int, after: String): [Row!]!
+```
+
+A class template cannot be annotated; specialise the trait instead:
+`template <typename K> inline constexpr bool
+psio::graphql::argument_group<Range<K>> = true;`.
+
+- Each member is typed as a parameter of that type would be (an optional
+  member is a nullable argument, any other a required one); `name_as`,
+  `hidden` (not an argument; keeps its default) and `doc` apply.
+- A member that is itself a group is taken apart the same way, so groups
+  compose (`struct IndexArgs { key_range<K> range; page_args page; }`).
+- The parameter's own name is not used. Two arguments of one field with the
+  same name are a compile error.
+- A group must be default-constructible. Only a parameter (or a group's
+  member) of exactly the group type is taken apart: `std::optional<Paging>`
+  and `std::vector<Paging>` are an input object `PagingInput`.
+- The plan is the same as for separate parameters — one value per argument
+  — so variables, validation, introspection and plan reuse see ordinary
+  arguments.
+
+`psio::graphql::page_args` (`first`, `last`, `before`, `after`) and
+`psio::graphql::key_range<K>` (`gt`, `ge`, `lt`, `le`) are groups
+([Connections](#connections)).
+
+### Results with arguments of their own
+
+`psio::graphql::resolver<R>` lets a *result type* bring the arguments that
+complete it. A method that returns an `R` is then a field with the method's
+arguments followed by those of `resolver<R>::arguments` (an argument
+group), and its value — and so its GraphQL type — is what `resolve`
+returns:
+
+```cpp
+template <typename Key>
+struct IndexArgs { psio::graphql::key_range<Key> range; psio::graphql::page_args page;
+                   PSIO_REFLECT(IndexArgs, range, page) };
+template <typename Key>
+inline constexpr bool psio::graphql::argument_group<IndexArgs<Key>> = true;
+
+template <typename Row, typename Key>
+struct psio::graphql::resolver<TableIndex<Row, Key>> {
+   using arguments = IndexArgs<Key>;
+   static auto resolve(TableIndex<Row, Key>&& index, const arguments& a)   // optionally a third: context&
+   { return psio::graphql::paginate(IndexView{std::move(index)}, a.range, a.page); }
+};
+
+auto users() const { return table.getIndex<0>(); }   // method(users)
+// users(gt: K, ge: K, lt: K, le: K, first: Int, last: Int, before: String, after: String): UserConnection
+```
+
+Written once by the embedder for its index type, this makes every method
+that returns an index a connection field, with nothing in the service code.
+It applies to method results only (a data member of such a type is mapped
+as its type is).
+
 **Mutations.** `schema<Query, Mutation>`: every reflected method of
 `Mutation` (const or not) is a field of the mutation type; a `void` method
 is `Boolean!` and yields `true`. The top-level fields of a mutation run one
@@ -263,8 +441,53 @@ Subscriptions are rejected at validation.
 
 ## Connections
 
-`graphql/connection.hpp` implements Relay cursor connections over a *row
-source*: a cursor over rows ordered by opaque key bytes.
+`graphql/connection.hpp` implements Relay cursor connections (the GraphQL
+Cursor Connections Specification) over rows the embedder supplies, ordered
+by opaque key bytes. There is no database code in psio.
+
+```cpp
+struct Query {
+   // accounts(gt: AccountNumber, ge: AccountNumber, lt: AccountNumber, le: AccountNumber,
+   //          first: Int, last: Int, before: String, after: String): AccountConnection
+   auto accounts(psio::graphql::key_range<AccountNumber> range, psio::graphql::page_args page) const
+   { return psio::graphql::paginate(accounts_index(), range, page); }
+};
+PSIO_REFLECT(Query, method(accounts, range, page))
+```
+
+```graphql
+type AccountConnection { edges: [AccountEdge!]!  pageInfo: PageInfo! }
+type AccountEdge       { node: Account!  cursor: String! }
+type PageInfo          { hasNextPage: Boolean!  hasPreviousPage: Boolean!  startCursor: String  endCursor: String }
+```
+
+### The source
+
+The embedder supplies one of two things; `paginate` takes either.
+
+**An ordered index** — what a database index has: positions from `begin()`
+to `end()`, found by key bytes.
+
+```cpp
+template <typename X>
+concept ordered_index = requires(const X& x, std::span<const char> key, /* position */ it) {
+   x.begin();  x.end();           // bidirectional positions: ++it, --it, it == it
+   x.lower_bound(key);            // first position with key >= `key`, else end()
+   x.upper_bound(key);            // first position with key >  `key`, else end()
+   x.key(it);                     // the key bytes there: a span, or an owning container
+   x.row(it);                     // the row there: a value, or a view / buffer of an encoded row
+   // optional: x.row_bytes(it)   // its size, for a byte budget
+};
+```
+
+An index over part of a table (the rows under a key prefix) answers within
+its part: its bounds never leave `[begin(), end())`, and its keys are the
+bytes after the prefix. The index is held by value when it is passed as an
+rvalue and by reference when it is an lvalue, so make it a cheap handle.
+
+**A row source** — a cursor with seek and step, for a store that is not
+iterator-shaped. `index_source<X>` is the row source over an ordered index;
+`paginate` works on this form.
 
 ```cpp
 template <typename S>
@@ -274,30 +497,89 @@ concept row_source = requires(S& s, std::span<const char> key) {
    { s.seek_before(key) } -> bool;    // last row with key < `key`
    { s.next() } -> bool;              { s.prev() } -> bool;
    { s.key() } -> std::span<const char>;
-   s.row();                           // a value, or a view / buffer of an encoded row
+   s.row();
+   // optional: s.seek_at_or_after(key) -> bool   (else: seek_before + next)
+   // optional: s.row_bytes() -> std::size_t      (for a byte budget)
 };
-
-result<connection<Node>> paginate(Source&&, const page_args& {first, last, before, after}, std::size_t max_page_size = 100);
 ```
 
-For a database index the key bytes are the `psio::key` encoding of the index
-key (it sorts bytewise as the values do), and a source restricted to a key
-prefix seeks within `[prefix, psio::key_prefix_upper_bound(prefix))`
-(`psio::key_prefix<Key>(…)` builds the prefix). There is no database code
-in psio; `cpp/tests/graphql_fixture.hpp` has an in-memory source
-(`IndexSource` over a `std::map`) that shows both.
+`psio::graphql::transform(source, fn)` is the source whose rows are
+`fn(row)` — a stored row shown as another record. Keys and cursors are the
+underlying source's. When the rows are views and are not transformed, only
+the selected fields of each node are read from the encoded row.
 
-`paginate` reads one page — at most `max_page_size` rows, plus one row on
-each side for `pageInfo` — whatever the size of the index. `first` pages
-forward from `after`, `last` backward from `before`; `before` / `after`
-together bound a window; `first` with `last`, a negative size and a
-malformed cursor are field errors. A cursor is the hex of the row's key.
-The page's type is `<Node>Connection { edges: [<Node>Edge!]! pageInfo:
-PageInfo! }`, `<Node>Edge { node cursor }`. When the rows are views, only
-the selected fields of each node are read.
+The key bytes are whatever orders the rows. For a database index they are
+the `psio::key` encoding of the index key, which sorts bytewise as the
+values do (`cpp/tests/graphql_service_fixture.hpp` has such an index over a
+`std::map`: `Index<Row, Key>`).
 
-A paged field's arguments named `first` / `last` (of type `Int`) are its
-page size for the complexity limit.
+### Pages, ranges, budgets
+
+```cpp
+paginate(source, page)                 // all rows
+paginate(source, range, page)          // the rows in a key_range<K>
+paginate(source, bounds, page)         // the rows in key_bounds (bytes)
+   // each with an optional last argument:
+   //   page_limits  — a number: the largest page (default 100)
+   //   page_budget{.max_bytes = N, .max_page_size = 100}
+-> result<connection<Node>>            // Node: what source.row() yields
+```
+
+**`page_args`** — `first`, `last` (`Int`), `before`, `after` (`String`).
+`first` pages forward from `after`, `last` backward from `before`; with
+neither, the first `max_page_size` rows. `before` and `after` together bound
+a window. `first` with `last`, a negative size and a malformed cursor are
+field errors. A page never has more than `max_page_size` edges, whatever
+`first` says.
+
+**`pageInfo`** follows the Relay algorithm. Paging forward, `hasNextPage`
+is true when the range has a row beyond the page — one that `first`, the
+page-size cap or the byte budget left out, or one at or after `before` —
+and `hasPreviousPage` when `after` is given and the range has a row before
+the page. Paging backward, the mirror image. `startCursor` / `endCursor`
+are `null` for a page without edges.
+
+**Cursors** are the key bytes of the row in **hex** (`String`): a cursor is
+the row's position in the index, so it stays valid when rows are inserted or
+removed around it, and one index needs no cursor state. Hex rather than
+base64 because the engine writes it from the key with no intermediate
+buffer, it reads in either case, it is safe in a URL and in JSON without
+escaping, and it is the form psibase's cursors already have; base64 would
+save a third of the cursor's length and nothing else. Clients must treat it
+as opaque.
+
+**`key_range<K>`** — `gt`, `ge`, `lt`, `le`, each an optional `K`, the
+arguments typed by the key (`gt: AccountNumber`). The bounds are encoded
+with `psio::key` (`to_bounds(range) -> result<key_bounds>`) and combined
+with the cursors: a page shows rows inside the range *and* between the
+cursors, and a cursor outside the range does not widen it. `K` may be a
+leading part of the index key — the first element of a composite key
+`(owner, id)`: `ge` / `lt` then bound by that element, `gt` skips and `le`
+includes every row that starts with it (`key_bounds::beyond` / `through`
+use `psio::key_prefix_upper_bound`). For a whole key the two readings
+coincide: no key encoding is a prefix of another's. A bound that has no key
+(a string that is not UTF-8) is a field error. A service that computes its
+range builds the `key_range` (`{.ge = start}`) or the `key_bounds` itself.
+
+**`page_budget`** — a page's rows together have at most `max_bytes` bytes,
+as the source counts them (`row_bytes()`: the stored size of the row; a
+compile error if the source has none). A page that has rows to show always
+has at least one edge, however large the row, and a page cut short says so
+in `pageInfo`, so a client that follows `endCursor` sees every row. The
+budget is on what the page *reads*, not on the response text: `paginate`
+returns before a byte of the response is written, and what the response
+holds of a row depends on the selection. `limits::max_response_bytes`
+remains the bound on the response.
+
+`paginate` reads one page — its rows, plus one step on each side for
+`pageInfo` — whatever the size of the index. A paged field's arguments
+named `first` / `last` (of type `Int`, whether parameters or members of a
+group) are its page size for the complexity limit.
+
+**A connection built by hand** (rows of a query in another system):
+`connection_builder<Node>` — `add(node, cursor_bytes)`, then
+`std::move(b).finish(has_previous_page, has_next_page)`. The cursor bytes
+are what the client hands back, in hex.
 
 ## Introspection and SDL
 
@@ -390,16 +672,28 @@ only `psio::ijson` encoding, 84.7 KiB with the engine and no introspection
 (+77.5 KiB), 101.1 KiB with introspection (+94 KiB). Not measured for
 WebAssembly (no WASI sysroot on the machine).
 
+Connections, measured the same way (`__text` bytes, no introspection): the
+program above is 82.1 KiB; with one connection field over an ordered index
+of a `std::map`, taking the four page arguments as parameters and a
+hand-written row source, 91.1 KiB (+9 KiB for `paginate`, the connection
+types and the map); with `key_range<std::uint64_t>` and `page_args` as
+parameters over the same index through `index_source`, 93.6 KiB (+2.5 KiB:
+the key encoding of the bounds, the range checks, the adapter); with a
+`page_budget`, 93.8 KiB. Argument groups, flattened members, template names
+and the `_` field cost a program that does not use them 0.2 KiB.
+
 ## Not supported
 
 - **Subscriptions.**
 - **Interfaces.** Reflection has no notion that maps to them; unions
   (`std::variant`) are the only abstract types.
-- **Argument and input-field default values**; `ID` as an argument type
-  (a method parameter cannot be annotated).
+- **Argument and input-field default values**; `ID` as an argument type.
+- **A byte budget on the response text of a page** (`page_budget` counts
+  the rows read; see [Connections](#connections)).
 - **Custom directives**; only `@skip` and `@include` (and `@deprecated` in
   the schema). `@specifiedBy` is not listed and `specifiedByURL` is null.
-- **Descriptions of enum values, arguments and input fields of methods.**
+- **Descriptions of enum values and of method parameters** (a member of an
+  argument group has one).
 - **Unicode escapes of the form `\u{…}`** (they postdate October 2021).
 - Validation reports the errors it finds while planning: a fragment that is
   never used is reported as unused but its body is not validated further, and
@@ -420,8 +714,9 @@ WebAssembly (no WASI sysroot on the machine).
 | `cpp/include/psio/graphql/plan.hpp` | validation, `document`, `plan_cache` |
 | `cpp/include/psio/graphql/execute.hpp` | `request`, the executor, response writing |
 | `cpp/include/psio/graphql/introspection.hpp` | `__schema` / `__type`, `sdl()` |
-| `cpp/include/psio/graphql/connection.hpp` | `row_source`, `paginate`, `connection` |
+| `cpp/include/psio/graphql/connection.hpp` | `ordered_index`, `row_source`, `transform`, `page_args`, `key_range`, `paginate`, `connection` |
 | `cpp/tests/graphql_tests.cpp`, `graphql_fixture.hpp` | the conformance suite and its schema |
-| `cpp/tests/graphql_noexceptions.cpp` | exception-disabled build-and-run check |
+| `cpp/tests/graphql_service_tests.cpp`, `graphql_service_fixture.hpp`, `graphql_service_checks.hpp` | a query root shaped like a psibase service's (connections over indexes, key ranges, a byte budget, transformed rows, flattened members, class templates, markers) and the rules behind it |
+| `cpp/tests/graphql_noexceptions.cpp`, `graphql_service_noexceptions.cpp` | exception-disabled build-and-run checks |
 | `cpp/tests/graphql_schema_fail.cpp` | schemas that must not compile |
 | `cpp/benchmarks/bench_graphql.cpp` | benchmark against the previous engine |

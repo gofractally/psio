@@ -44,6 +44,7 @@
 #include <psio/annotate.hpp>
 #include <psio/detail/nested_fwd.hpp>
 #include <psio/ext_int.hpp>
+#include <psio/fixed_string.hpp>
 #include <psio/json.hpp>
 #include <psio/name_lookup.hpp>
 #include <psio/reflect.hpp>
@@ -120,6 +121,36 @@ namespace psio::graphql
       constexpr bool operator==(const deprecated&) const = default;
    };
 
+   // The member's own fields are presented as fields of the enclosing object
+   // type, in the member's place (output only; the member must be a
+   // reflected record):
+   //    template <typename T> struct WithBlock {
+   //       BlockInfo block; T data;
+   //       PSIO_REFLECT(WithBlock, block, attr(data, psio::graphql::flatten))
+   //    };
+   // gives `{ block {...} <the fields of T> }`. Two fields with one name are
+   // a compile error.
+   struct flatten_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const flatten_spec&) const = default;
+   };
+   inline constexpr flatten_spec flatten{};
+   // Type-level: a reflected record that, as a method PARAMETER, is not an
+   // input object but a group of arguments — each member is one argument of
+   // the field, named by the member:
+   //    struct Paging { std::optional<std::int32_t> first; std::optional<std::string> after; };
+   //    PSIO_REFLECT(Paging, first, after)
+   //    PSIO_TYPE_ATTRS(Paging, psio::graphql::arguments)
+   //    ... rows(Paging page) const;      // rows(first: Int, after: String)
+   // A class template cannot be annotated: specialise `argument_group`.
+   struct arguments_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const arguments_spec&) const = default;
+   };
+   inline constexpr arguments_spec arguments{};
+
    // Name of a type that cannot be annotated. Specialise with
    //    static constexpr std::string_view value = "SearchResult";
    // `input_type_name<T>` names T used as an input object (default: the
@@ -130,6 +161,42 @@ namespace psio::graphql
    };
    template <typename T>
    struct input_type_name
+   {
+   };
+
+   // True for a parameter type whose members are the field's arguments (see
+   // `arguments`). Specialise for a class template:
+   //    template <typename K>
+   //    inline constexpr bool psio::graphql::argument_group<Range<K>> = true;
+   namespace detail
+   {
+      template <typename T>
+      constexpr bool annotated_argument_group() noexcept
+      {
+         if constexpr (Reflected<T> && !std::is_enum_v<T>)
+            return has_spec_v<arguments_spec, std::remove_cvref_t<decltype(annotate<type<T>{}>)>>;
+         else
+            return false;
+      }
+   }  // namespace detail
+   template <typename T>
+   inline constexpr bool argument_group = detail::annotated_argument_group<T>();
+
+   // A method result that is completed by arguments of its own: the field
+   // takes the method's arguments followed by those of `arguments` (an
+   // argument group), and its value is what `resolve` returns. Specialise
+   // for the type an index or a query builder has:
+   //    template <typename Row, typename Key>
+   //    struct psio::graphql::resolver<TableIndex<Row, Key>> {
+   //       struct arguments { key_range<Key> range; page_args page; ... };
+   //       static auto resolve(TableIndex<Row, Key>&& index, const arguments& a)
+   //       { return psio::graphql::paginate(source_of(index), a.range, a.page); }
+   //    };
+   // so that `auto rows() const { return table.index(); }` is the field
+   // `rows(gt, ge, lt, le, first, last, before, after): RowConnection`.
+   // `resolve` may take a third parameter `context&`.
+   template <typename R>
+   struct resolver
    {
    };
 
@@ -518,6 +585,8 @@ namespace psio::graphql
       {
          char        d[192]{};
          std::size_t n = 0;
+         // (A name longer than the buffer indexes past it: a compile error,
+         // as every name is built in a constant expression.)
          constexpr name_buf& add(std::string_view s)
          {
             for (char c : s)
@@ -652,6 +721,48 @@ namespace psio::graphql
          }
       };
 
+      // An instantiation of a reflected class template whose arguments are
+      // all types is named `<Template>_<Arg>_<Arg>...` (WithBlock<Account> is
+      // `WithBlock_Account`), each argument by its GraphQL name as in a
+      // tuple's or a union's name. A template with non-type arguments cannot
+      // be taken apart: name it with type_name<T>.
+      template <typename T>
+      constexpr bool composable() noexcept
+      {
+         using L = logical_t<T>;
+         if constexpr (Nullable<L>)
+            return composable<typename nullable_inner<L>::type>();
+         else
+            return shape_of<L>() != shape::unsupported;
+      }
+      template <typename T>
+      struct template_args
+      {
+         static constexpr bool is_instance = false;
+      };
+      template <template <typename...> class C, typename... Ts>
+      struct template_args<C<Ts...>>
+      {
+         static constexpr bool is_instance = sizeof...(Ts) != 0;
+         static constexpr bool nameable    = (composable<Ts>() && ...);
+         static constexpr void add(name_buf& out) { ((out.add("_"), compose_name<Ts>(out)), ...); }
+      };
+      template <typename T>
+      struct template_namer
+      {
+         static constexpr name_buf make()
+         {
+            static_assert(template_args<T>::nameable,
+                          "psio::graphql: a template argument of this reflected class template "
+                          "has no GraphQL name, so the instantiation has none: specialise "
+                          "psio::graphql::type_name<T>");
+            name_buf out;
+            out.add(reflect<T>::name);
+            template_args<T>::add(out);
+            return out;
+         }
+      };
+
       // The annotated or reflected name of a record / enum / adapter type.
       template <typename T>
       constexpr std::string_view declared_name() noexcept
@@ -662,6 +773,8 @@ namespace psio::graphql
             return std::string_view{std::get<name_as>(annotate<type<T>{}>).value};
          else if constexpr (is_text_adapter_v<T> && schema_custom_v<T>)
             return schema_custom_id<T>();
+         else if constexpr (Reflected<T> && template_args<T>::is_instance)
+            return stored_name<template_namer<T>>::value;
          else if constexpr (Reflected<T>)
             return reflect<T>::name;
          else if constexpr (ReflectedEnum<T>)
@@ -899,6 +1012,7 @@ namespace psio::graphql
          bool             hidden     = false;
          bool             is_id      = false;
          bool             deprecated = false;
+         bool             flatten    = false;
          std::uint32_t    cost       = 1;
          std::string_view description{};
          std::string_view reason{};
@@ -914,6 +1028,8 @@ namespace psio::graphql
             m.hidden = true;
          if constexpr (has_spec_v<id_spec, A>)
             m.is_id = true;
+         if constexpr (has_spec_v<flatten_spec, A>)
+            m.flatten = true;
          if constexpr (has_spec_v<::psio::graphql::cost, A>)
             m.cost = std::get<::psio::graphql::cost>(annotate<Ptr>).value;
          if constexpr (has_spec_v<doc, A>)
@@ -973,6 +1089,11 @@ namespace psio::graphql
             return m;
          }
 
+         // Slot I is a member annotated graphql::flatten (and not hidden):
+         // its fields stand in its place.
+         template <std::size_t I>
+         static constexpr bool is_flat = I < field_slots && meta<I>().flatten && !meta<I>().hidden;
+
          // Field slot I of a value or of a view.
          template <std::size_t I, typename Src>
          static decltype(auto) get(Src& src)
@@ -992,6 +1113,8 @@ namespace psio::graphql
          static constexpr std::size_t slot_count  = sizeof...(Ts);
          template <std::size_t I>
          static constexpr bool is_method = false;
+         template <std::size_t I>
+         static constexpr bool is_flat = false;
 
          struct namer
          {
@@ -1046,6 +1169,76 @@ namespace psio::graphql
          static constexpr bool is_const  = reflect<T>::template method_is_const<J>;
          static constexpr bool is_static = reflect<T>::template method_is_static<J>;
       };
+
+      // A method result completed by arguments of its own (resolver<R>).
+      template <typename R>
+      concept Deferred = requires { typename resolver<std::remove_cvref_t<R>>::arguments; };
+      template <typename R>
+      using deferred_args_t = typename resolver<std::remove_cvref_t<R>>::arguments;
+      template <typename R>
+      decltype(auto) resolve_deferred(context& c, R&& value, const deferred_args_t<R>& args)
+      {
+         using Res = resolver<std::remove_cvref_t<R>>;
+         if constexpr (requires { Res::resolve(std::forward<R>(value), args, c); })
+            return Res::resolve(std::forward<R>(value), args, c);
+         else
+            return Res::resolve(std::forward<R>(value), args);
+      }
+      // What the field of slot I yields: the member, the method's result,
+      // or what the result's resolver makes of it.
+      template <typename T, std::size_t I>
+      struct slot_value
+      {
+         using type = typename slot_types<T, I>::result;
+         static constexpr bool deferred = false;
+      };
+      template <typename T, std::size_t I>
+         requires(Reflected<T> && I >= reflect<T>::member_count &&
+                  Deferred<typename slot_types<T, I>::result>)
+      struct slot_value<T, I>
+      {
+         using raw  = typename slot_types<T, I>::result;
+         using type = decltype(resolve_deferred(std::declval<context&>(), std::declval<raw>(),
+                                                std::declval<const deferred_args_t<raw>&>()));
+         static constexpr bool deferred = true;
+      };
+
+      // A flattened member's record type.
+      template <typename T, std::size_t I>
+      struct flat_member
+      {
+         using type = typename slot_types<T, I>::result;
+         static_assert(Reflected<type> && !std::is_enum_v<type> && shape_of<type>() == shape::object,
+                       "psio::graphql::flatten annotates a member that is a reflected record "
+                       "(held by value)");
+      };
+      // Resolver slots: one per member or method, and for a flattened
+      // member one per slot of its record. A field's slot is its position
+      // in this numbering.
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_width() noexcept;
+      template <typename T>
+      constexpr std::size_t flat_slot_count() noexcept
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (slot_width<T, Is>() + ... + std::size_t{0});
+         }(std::make_index_sequence<object_def<T>::slot_count>{});
+      }
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_width() noexcept
+      {
+         if constexpr (object_def<T>::template is_flat<I>)
+            return flat_slot_count<typename flat_member<T, I>::type>();
+         else
+            return 1;
+      }
+      template <typename T, std::size_t I>
+      constexpr std::size_t slot_base() noexcept
+      {
+         return []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (slot_width<T, Is>() + ... + std::size_t{0});
+         }(std::make_index_sequence<I>{});
+      }
 
       // ── Type references, at the type level ───────────────────────────────
       //
@@ -1191,33 +1384,84 @@ namespace psio::graphql
          ::psio::graphql::detail::in_wrap<__VA_ARGS__>::info.nonnull                           \
    }
 
-      // An argument whose value is a page size: `first` / `last` of type Int.
+      // ── Arguments ────────────────────────────────────────────────────────
+      //
+      // A method parameter is one argument, named by the reflected parameter
+      // name — except the request context (no argument) and an argument
+      // group (graphql::arguments), whose members are arguments each, named
+      // by the member; a group inside a group is taken apart the same way.
       template <typename A>
-      inline constexpr bool is_page_size_v = std::is_integral_v<A> && !std::is_same_v<A, bool> &&
-                                             sizeof(A) <= 4;
-      template <typename A>
-      inline constexpr bool is_page_size_v<std::optional<A>> = is_page_size_v<A>;
+      constexpr std::size_t arg_width() noexcept
+      {
+         if constexpr (is_context_param_v<A>)
+            return 0;
+         else if constexpr (argument_group<A>)
+         {
+            static_assert(std::is_default_constructible_v<A>,
+                          "psio::graphql: an argument group must be default-constructible");
+            return []<std::size_t... Is>(std::index_sequence<Is...>) {
+               return ((object_def<A>::template meta<Is>().hidden
+                           ? std::size_t{0}
+                           : arg_width<typename reflect<A>::template member_type<Is>>()) +
+                       ... + std::size_t{0});
+            }(std::make_index_sequence<reflect<A>::member_count>{});
+         }
+         else
+            return 1;
+      }
+      template <typename A, std::size_t N>
+      constexpr void emit_args(std::array<arg_desc, N>& out, std::size_t& n, std::string_view name,
+                               std::string_view description = {})
+      {
+         if constexpr (is_context_param_v<A>)
+            return;
+         else if constexpr (argument_group<A>)
+         {
+            [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+               (([&] {
+                   constexpr slot_meta m = object_def<A>::template meta<Is>();
+                   if constexpr (!m.hidden)
+                      emit_args<typename reflect<A>::template member_type<Is>>(out, n, m.name,
+                                                                               m.description);
+                }()),
+                ...);
+            }(std::make_index_sequence<reflect<A>::member_count>{});
+         }
+         else
+         {
+            out[n] = arg_desc{name, PSIO_GRAPHQL_IN_REF(A), static_cast<std::uint16_t>(n), description};
+            ++n;
+         }
+      }
 
-      // The arguments of method slot I: its parameters that are not the
-      // request context, named by the reflected parameter names.
+      // The arguments of method slot I: those of its parameters, then those
+      // of its result's resolver (resolver<R>::arguments).
       template <typename T, std::size_t I>
       struct slot_args
       {
          using Args = typename slot_types<T, I>::args;
          static constexpr std::size_t arity = std::tuple_size_v<Args>;
 
-         static constexpr std::size_t count = []<std::size_t... Ks>(std::index_sequence<Ks...>) {
-            return (std::size_t{!is_context_param_v<std::tuple_element_t<Ks, Args>>} + ... + 0);
-         }(std::make_index_sequence<arity>{});
-
-         // Position of parameter K among the arguments.
+         // Position of parameter K's first argument.
          template <std::size_t K>
          static constexpr std::size_t arg_index = []<std::size_t... Ks>(std::index_sequence<Ks...>) {
-            return (std::size_t{!is_context_param_v<std::tuple_element_t<Ks, Args>>} + ... + 0);
+            return (arg_width<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>() + ... +
+                    std::size_t{0});
          }(std::make_index_sequence<K>{});
+
+         // Arguments of the parameters; position of the resolver's.
+         static constexpr std::size_t own_count = arg_index<arity>;
+         static constexpr std::size_t count     = [] {
+            if constexpr (slot_value<T, I>::deferred)
+               return own_count +
+                      arg_width<deferred_args_t<typename slot_types<T, I>::result>>();
+            else
+               return own_count;
+         }();
 
          static constexpr auto value = [] {
             std::array<arg_desc, count> out{};
+            std::size_t                 n = 0;
             if constexpr (arity != 0)
             {
                constexpr auto names =
@@ -1226,41 +1470,38 @@ namespace psio::graphql
                              "psio::graphql: a reflected method that is a GraphQL field must "
                              "name every parameter: method(name, param1, param2, ...)");
                [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
-                  (([&] {
-                      using A = std::tuple_element_t<Ks, Args>;
-                      if constexpr (!is_context_param_v<A>)
-                         out[arg_index<Ks>] =
-                            arg_desc{names[Ks], PSIO_GRAPHQL_IN_REF(std::remove_cvref_t<A>),
-                                     static_cast<std::uint16_t>(arg_index<Ks>)};
-                   }()),
+                  (emit_args<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>(out, n, names[Ks]),
                    ...);
                }(std::make_index_sequence<arity>{});
             }
+            if constexpr (slot_value<T, I>::deferred)
+            {
+               static_assert(argument_group<deferred_args_t<typename slot_types<T, I>::result>>,
+                             "psio::graphql: resolver<R>::arguments must be an argument group "
+                             "(psio::graphql::arguments)");
+               emit_args<deferred_args_t<typename slot_types<T, I>::result>>(out, n, {});
+            }
             return out;
          }();
-      };
 
-      // Index of the page-size argument named `name` of method slot I, or -1.
-      template <typename T, std::size_t I>
-      constexpr std::int8_t page_arg(std::string_view name) noexcept
-      {
-         using Args       = typename slot_types<T, I>::args;
-         std::int8_t found = -1;
-         if constexpr (std::tuple_size_v<Args> != 0)
+         static constexpr bool names_distinct = [] {
+            for (std::size_t i = 0; i < count; ++i)
+               for (std::size_t j = i + 1; j < count; ++j)
+                  if (value[i].name == value[j].name)
+                     return false;
+            return true;
+         }();
+
+         // Index of the page-size argument (of type Int) named `name`, or -1.
+         static constexpr std::int8_t page_arg(std::string_view name) noexcept
          {
-            constexpr auto names =
-               reflect<T>::template method_param_names<I - reflect<T>::member_count>;
-            [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
-               (([&] {
-                   if constexpr (is_page_size_v<std::remove_cvref_t<std::tuple_element_t<Ks, Args>>>)
-                      if (names[Ks] == name)
-                         found = static_cast<std::int8_t>(slot_args<T, I>::template arg_index<Ks>);
-                }()),
-                ...);
-            }(std::make_index_sequence<std::tuple_size_v<Args>>{});
+            for (std::size_t i = 0; i < count && i < 127; ++i)
+               if (value[i].name == name && value[i].type.depth == 0 &&
+                   value[i].type.named->name == "Int")
+                  return static_cast<std::int8_t>(i);
+            return -1;
          }
-         return found;
-      }
+      };
 
       // A slot is part of the object type when it is not hidden and, for a
       // method, when it can be called: const (or static), or any method of
@@ -1287,55 +1528,97 @@ namespace psio::graphql
       constexpr field_desc make_field() noexcept
       {
          constexpr slot_meta m = object_def<T>::template meta<I>();
-         using S               = slot_types<T, I>;
          field_desc f;
          f.name               = m.name;
-         f.slot               = static_cast<std::uint16_t>(I);
+         f.slot               = static_cast<std::uint16_t>(slot_base<T, I>());
          f.cost               = m.cost;
          f.deprecated         = m.deprecated;
          f.description        = m.description;
          f.deprecation_reason = m.reason;
-         if constexpr (std::is_void_v<typename S::result>)
+         using V = typename slot_value<T, I>::type;
+         if constexpr (std::is_void_v<V>)
             f.type = type_ref{&leaf_type<bool>::value, 0, 1};
          else
-            f.type = PSIO_GRAPHQL_OUT_REF(typename S::result);
+            f.type = PSIO_GRAPHQL_OUT_REF(V);
          if constexpr (m.is_id)
          {
-            static_assert(!std::is_void_v<typename S::result> &&
-                             out_wrap<typename S::result>::info.depth == 0 &&
-                             shape_of<typename out_wrap<typename S::result>::named>() == shape::leaf,
+            static_assert(!std::is_void_v<V> && out_wrap<V>::info.depth == 0 &&
+                             shape_of<typename out_wrap<V>::named>() == shape::leaf,
                           "psio::graphql::id annotates a scalar member");
             f.type.named = &id_type;
          }
          if constexpr (object_def<T>::template is_method<I>)
          {
+            static_assert(slot_args<T, I>::names_distinct,
+                          "psio::graphql: two arguments of a field have the same name (a "
+                          "parameter and a member of an argument group, or members of two "
+                          "groups)");
             f.args      = slot_args<T, I>::value.data();
             f.arg_count = static_cast<std::uint16_t>(slot_args<T, I>::count);
-            f.first_arg = page_arg<T, I>("first");
-            f.last_arg  = page_arg<T, I>("last");
+            f.first_arg = slot_args<T, I>::page_arg("first");
+            f.last_arg  = slot_args<T, I>::page_arg("last");
          }
          return f;
       }
+
+      // The field of an object type without members or methods (see
+      // object_fields::placeholder).
+      inline constexpr std::string_view placeholder_name = "_";
 
       template <typename T, bool Mutation>
       struct object_fields
       {
          static constexpr std::size_t slot_count = object_def<T>::slot_count;
 
-         static constexpr std::size_t count = []<std::size_t... Is>(std::index_sequence<Is...>) {
-            return (std::size_t{slot_visible<T, Mutation, Is>()} + ... + 0);
+         // GraphQL has no object type without fields. A record with no
+         // members and no methods (a marker: `struct TLSInfo {}`) gets the
+         // one field `_: Boolean`, which is always true — what servers with
+         // SDL-first schemas write for an empty type.
+         static constexpr bool placeholder = slot_count == 0;
+
+         // Fields slot I contributes.
+         template <std::size_t I>
+         static constexpr std::size_t fields_of() noexcept
+         {
+            if constexpr (!slot_visible<T, Mutation, I>())
+               return 0;
+            else if constexpr (object_def<T>::template is_flat<I>)
+               return object_fields<typename flat_member<T, I>::type, false>::real_count;
+            else
+               return 1;
+         }
+         static constexpr std::size_t real_count = []<std::size_t... Is>(std::index_sequence<Is...>) {
+            return (fields_of<Is>() + ... + std::size_t{0});
          }(std::make_index_sequence<slot_count>{});
+         static constexpr std::size_t count = real_count + (placeholder ? 1 : 0);
 
          static constexpr auto value = [] {
             std::array<field_desc, count> out{};
             std::size_t                   n = 0;
             [&]<std::size_t... Is>(std::index_sequence<Is...>) {
                (([&] {
-                   if constexpr (slot_visible<T, Mutation, Is>())
+                   if constexpr (!slot_visible<T, Mutation, Is>())
+                      return;
+                   else if constexpr (object_def<T>::template is_flat<Is>)
+                   {
+                      using M = typename flat_member<T, Is>::type;
+                      for (std::size_t k = 0; k < object_fields<M, false>::real_count; ++k)
+                      {
+                         out[n] = object_fields<M, false>::value[k];
+                         out[n].slot =
+                            static_cast<std::uint16_t>(out[n].slot + slot_base<T, Is>());
+                         ++n;
+                      }
+                   }
+                   else
                       out[n++] = make_field<T, Mutation, Is>();
                 }()),
                 ...);
             }(std::make_index_sequence<slot_count>{});
+            if constexpr (placeholder)
+               out[n++] = field_desc{.name = placeholder_name,
+                                     .type = type_ref{&leaf_type<bool>::value, 0, 0},
+                                     .slot = 0};
             return out;
          }();
 
@@ -1604,6 +1887,31 @@ namespace psio::graphql
          return out;
       }
    }  // namespace detail
+
+   // A name built from the GraphQL name of `T`, for a type_name
+   // specialisation of a class template:
+   //    template <typename T>
+   //    struct psio::graphql::type_name<WithBlock<T>> {
+   //       static constexpr std::string_view value =
+   //          psio::graphql::affixed_name<"", T, "WithBlock">;   // AccountWithBlock
+   //    };
+   namespace detail
+   {
+      template <fixed_string Prefix, typename T, fixed_string Suffix>
+      struct affix_namer
+      {
+         static constexpr name_buf make()
+         {
+            return name_buf{}
+               .add(Prefix.view())
+               .add(named_type_name<typename out_wrap<T>::named>())
+               .add(Suffix.view());
+         }
+      };
+   }  // namespace detail
+   template <fixed_string Prefix, typename T, fixed_string Suffix>
+   inline constexpr std::string_view affixed_name =
+      detail::stored_name<detail::affix_namer<Prefix, T, Suffix>>::value;
 
    struct exec;
    struct plan_field;

@@ -4,6 +4,7 @@
 
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -36,6 +37,44 @@ struct Empty
    int hidden_member = 0;
 };
 PSIO_REFLECT(Empty, attr(hidden_member, psio::graphql::hidden))
+
+// A class template with a non-type argument cannot be taken apart: its
+// instantiations share the reflected name unless type_name<T> names them.
+// (Two that have the same fields would be one GraphQL type.)
+template <bool Wide>
+struct Sized
+{
+   std::conditional_t<Wide, std::string, int> v{};
+   PSIO_REFLECT(Sized, v)
+};
+// A template argument that has no GraphQL name.
+struct Tag
+{
+};
+template <typename T>
+struct Tagged
+{
+   int v = 0;
+   PSIO_REFLECT(Tagged, v)
+};
+struct Part
+{
+   int ok   = 0;
+   int more = 0;
+   PSIO_REFLECT(Part, ok, more)
+};
+// Ten rows without sizes.
+struct Unsized
+{
+   bool                  seek_first() { return false; }
+   bool                  seek_last() { return false; }
+   bool                  seek_after(std::span<const char>) { return false; }
+   bool                  seek_before(std::span<const char>) { return false; }
+   bool                  next() { return false; }
+   bool                  prev() { return false; }
+   std::span<const char> key() { return {}; }
+   int                   row() { return 0; }
+};
 
 struct Query
 {
@@ -79,6 +118,29 @@ struct Query
 #elif defined(GQL_FAIL_EMPTY)
    Empty empty;
    PSIO_REFLECT(Query, ok, empty)
+#elif defined(GQL_FAIL_TEMPLATE_NAME)
+   Sized<false> one;
+   Sized<true>  two;
+   PSIO_REFLECT(Query, ok, one, two)
+#elif defined(GQL_FAIL_TEMPLATE_ARG)
+   Tagged<Tag> tagged;
+   PSIO_REFLECT(Query, ok, tagged)
+#elif defined(GQL_FAIL_FLATTEN_NAME)
+   // Part has a member named `ok` too.
+   Part part;
+   PSIO_REFLECT(Query, ok, attr(part, psio::graphql::flatten))
+#elif defined(GQL_FAIL_FLATTEN_SCALAR)
+   std::optional<Part> part;
+   PSIO_REFLECT(Query, ok, attr(part, psio::graphql::flatten))
+#elif defined(GQL_FAIL_ARGUMENT_NAME)
+   int rows(int first, psio::graphql::page_args page) const { return first + page.first.value_or(0); }
+   PSIO_REFLECT(Query, ok, method(rows, first, page))
+#elif defined(GQL_FAIL_BUDGET)
+   auto rows(psio::graphql::page_args page) const
+   {
+      return psio::graphql::paginate(Unsized{}, page, psio::graphql::page_budget{.max_bytes = 64});
+   }
+   PSIO_REFLECT(Query, ok, method(rows, page))
 #else
    PSIO_REFLECT(Query, ok)
 #endif

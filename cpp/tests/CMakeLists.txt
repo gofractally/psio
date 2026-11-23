@@ -883,6 +883,20 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
    target_compile_options(psio_graphql_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
 endif()
 add_test(NAME psio_graphql_noexceptions_test COMMAND psio_graphql_noexceptions_test)
+# The engine as a service uses it: a query root modelled on psibase's
+# (connections over indexes with key ranges and a byte budget, transformed
+# rows, flattened members, class templates, marker records), and the rules
+# behind it on small schemas.
+psio_add_test(psio_graphql_service_tests graphql_service_tests.cpp)
+add_executable(psio_graphql_service_noexceptions_test graphql_service_noexceptions.cpp)
+target_include_directories(psio_graphql_service_noexceptions_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_compile_features(psio_graphql_service_noexceptions_test PRIVATE cxx_std_23)
+target_link_libraries(psio_graphql_service_noexceptions_test PRIVATE Boost::headers)
+target_compile_definitions(psio_graphql_service_noexceptions_test PRIVATE PSIO_EXCEPTIONS_ENABLED=0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+   target_compile_options(psio_graphql_service_noexceptions_test PRIVATE -fno-exceptions -fno-rtti)
+endif()
+add_test(NAME psio_graphql_service_noexceptions_test COMMAND psio_graphql_service_noexceptions_test)
 # Schemas that must not compile, each with a message naming the reason.
 function(psio_graphql_compile_fail NAME DEFINE MESSAGE)
    add_test(NAME psio_graphql_${NAME}_compile_fail
@@ -902,6 +916,12 @@ psio_graphql_compile_fail(unsupported_argument GQL_FAIL_ARGUMENT "an argument mu
 psio_graphql_compile_fail(nested_optional GQL_FAIL_OPTIONAL "an optional of an optional has no GraphQL type")
 psio_graphql_compile_fail(id_on_object GQL_FAIL_ID "psio::graphql::id annotates a scalar member")
 psio_graphql_compile_fail(empty_object GQL_FAIL_EMPTY "needs at least one visible field")
+psio_graphql_compile_fail(template_name_conflict GQL_FAIL_TEMPLATE_NAME "have the same GraphQL type name")
+psio_graphql_compile_fail(template_argument_unnamed GQL_FAIL_TEMPLATE_ARG "has no GraphQL name")
+psio_graphql_compile_fail(flatten_collision GQL_FAIL_FLATTEN_NAME "have the same GraphQL name")
+psio_graphql_compile_fail(flatten_scalar GQL_FAIL_FLATTEN_SCALAR "flatten annotates a member that is a reflected record")
+psio_graphql_compile_fail(argument_name_conflict GQL_FAIL_ARGUMENT_NAME "two arguments of a field have the same name")
+psio_graphql_compile_fail(budget_unsized_source GQL_FAIL_BUDGET "no matching function for call to 'paginate'")
 
 # Consumer warning hygiene: every public header, with the core codecs
 # instantiated, compiles under -Wall -Wextra -Werror with PSIO's include
