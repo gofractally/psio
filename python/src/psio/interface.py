@@ -232,8 +232,8 @@ class Interface:
 
         What C++ ``SchemaBuilder::insert_interface`` builds for the same
         declaration (``conformance/interface-vectors.md``): per function its
-        name, its parameters (bounded types; a parameter without a name is
-        ``""``), its result (the type the return annotation makes of it; a
+        name, its parameters (bounded types; the parameters of a method
+        that does not name every one are ``"0"``, ``"1"``, ...), its result (the type the return annotation makes of it; a
         bound with no type form is the attribute ``result.lengthBound``) and
         the attributes ``maxFields`` / ``maxDynamicData``.  ``arguments``:
         every argument list is also a named type ``<interface>.<method>``, so
@@ -252,8 +252,9 @@ class Interface:
                     builder.insert(result.type)
                 params = [builder._member(f) for f in fields]
                 if not m.named:
-                    for p in params:
-                        p["name"] = ""
+                    # (positional: the member names of the argument list, never an empty or repeated name)
+                    for k, p in enumerate(params):
+                        p["name"] = str(k)
                 attributes = []
                 result_type = None
                 if result is not None:

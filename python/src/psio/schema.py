@@ -492,7 +492,8 @@ class Schema:
             raise SchemaError(FUNC_FIELDS)
         cap = _parse_cap(attributes)
         names = [p["name"] for p in params]
-        named = all(names) and len(set(names)) == len(names)
+        # Positional names are "0", "1", ...: no parameter is named so (C++ ``pssz_ir::argument_list``).
+        named = all(n and n != str(k) for k, n in enumerate(names))
         own = [{"name": "tuple", "value": "named" if named else "positional"}]
         own += [a for a in attributes if a.get("name") == "maxFields"]
         own += [a for a in attributes if a.get("name") == "maxDynamicData"]
