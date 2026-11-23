@@ -551,6 +551,10 @@ fn schema_ir_and_pssz_bytes_agree_with_the_typed_pssz_validator() {
     let schema = schema_of(&fx.schema_ir);
     let expressible: BTreeMap<&str, bool> = fx.types.iter().map(|t| (t.id.as_str(), t.ir)).collect();
     assert!(expressible.len() >= 200);
+    // The fixture as regenerated for the consistency round: every type and
+    // every row below goes through the schema.
+    assert_eq!((fx.types.len(), fx.vectors.len()), (360, 7035));
+    assert_eq!(fx.vectors.iter().filter(|v| v.name.starts_with("transparent-bounds/")).count(), 62);
 
     // One explicit profile (one inherited width). A type with a
     // maxDynamicData cap is accepted there too (the cap of the top-level

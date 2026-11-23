@@ -565,3 +565,31 @@ fn strict_validation_takes_a_raw_string_that_is_not_utf8() {
     assert!(validate_strict::<Pssz, Strings>(&bad).is_err());
     assert!(dynamic::validate(&schema, &root, &bad).is_err());
 }
+
+// ── Reserved custom ids on the wrong wire shape (item 3) ────────────────────
+
+#[test]
+fn a_reserved_id_on_another_wire_shape_is_a_malformed_schema() {
+    let int = |bits: u32| AnyType::new(V::Int(schema_ir::Int { bits, isSigned: false }));
+    let custom = |inner: AnyType, id: &str| {
+        AnyType::new(V::Custom(schema_ir::Custom { r#type: Box::new(inner), id: id.into() }))
+    };
+    let list = |inner: AnyType| AnyType::new(V::List(schema_ir::List { r#type: Box::new(inner) }));
+    let reads = |root: &AnyType| dynamic::auto_width(&Schema::default(), root).is_ok();
+    // The built-in shapes read.
+    assert!(reads(&custom(int(1), "bool")));
+    assert!(reads(&custom(list(int(8)), "string")));
+    assert!(reads(&custom(list(int(8)), "utf8")));
+    assert!(reads(&custom(int(64), "time-point-seconds")));
+    // The same ids on any other shape do not: the id would be read as the
+    // built-in type.
+    assert!(!reads(&custom(list(int(8)), "bool")));
+    assert!(!reads(&custom(int(8), "bool")));
+    assert!(!reads(&custom(int(32), "string")));
+    assert!(!reads(&custom(list(int(16)), "utf8")));
+    assert!(!reads(&custom(custom(list(int(8)), "string"), "time-point-seconds")));
+    assert!(!reads(&custom(int(64), "time-point-fortnights")));
+    assert!(!reads(&custom(int(64), "duration-")));
+    assert!(!reads(&custom(int(1), "set")));
+    assert!(!reads(&custom(int(8), "unknown")));
+}
