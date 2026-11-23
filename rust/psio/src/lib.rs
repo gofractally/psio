@@ -274,6 +274,11 @@ pub mod pjson_json;
 // Always compiled: pSSZ, keys, Json / IJson text, the Schema IR, time,
 // names, interfaces.
 mod value_types;
+pub mod hex;
+pub use hex::{
+    from_hex, from_hex_array, from_hex_into, to_hex, to_hex_into, to_hex_lower, to_hex_lower_into,
+    HexError,
+};
 pub mod json;
 #[cfg(feature = "async-graphql")]
 pub mod graphql_scalars;

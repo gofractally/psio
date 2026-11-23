@@ -540,7 +540,6 @@ pub struct Writer {
     form: IntForm,
 }
 
-const HEX_UPPER: &[u8; 16] = b"0123456789ABCDEF";
 const HEX_LOWER: &[u8; 16] = b"0123456789abcdef";
 
 fn is_noncharacter(cp: u32) -> bool {
@@ -648,10 +647,7 @@ impl Writer {
     fn hex(&mut self, bytes: &[u8]) {
         self.out.reserve(bytes.len() * 2 + 2);
         self.out.push(b'"');
-        for &b in bytes {
-            self.out.push(HEX_UPPER[(b >> 4) as usize]);
-            self.out.push(HEX_UPPER[(b & 15) as usize]);
-        }
+        crate::hex::encode_upper(bytes, &mut self.out);
         self.out.push(b'"');
     }
 
@@ -738,14 +734,7 @@ pub struct Reader<'a> {
     depth: usize,
 }
 
-fn hex_digit(c: u8) -> Option<u8> {
-    match c {
-        b'0'..=b'9' => Some(c - b'0'),
-        b'a'..=b'f' => Some(c - b'a' + 10),
-        b'A'..=b'F' => Some(c - b'A' + 10),
-        _ => None,
-    }
-}
+use crate::hex::digit as hex_digit;
 
 impl<'a> Reader<'a> {
     fn new(src: &'a [u8], ijson: bool) -> Self {
@@ -1502,10 +1491,7 @@ fn read_hex(r: &mut Reader<'_>, exact: Option<usize>) -> Result<Vec<u8>> {
     }
     let src = r.src;
     let begin = r.pos + 1;
-    let mut q = begin;
-    while q < src.len() && hex_digit(src[q]).is_some() {
-        q += 1;
-    }
+    let q = begin + crate::hex::digit_run(&src[begin..]);
     if q >= src.len() {
         return Err(r.err("json: unterminated string"));
     }
@@ -1520,10 +1506,7 @@ fn read_hex(r: &mut Reader<'_>, exact: Option<usize>) -> Result<Vec<u8>> {
         return Err(r.err("ijson: hex string has the wrong length"));
     }
     r.pos = q + 1;
-    Ok(digits
-        .chunks_exact(2)
-        .map(|pair| (hex_digit(pair[0]).unwrap() << 4) | hex_digit(pair[1]).unwrap())
-        .collect())
+    Ok(crate::hex::decode_vec(digits))
 }
 
 macro_rules! float {
