@@ -331,3 +331,110 @@ TEST_CASE("an undeclared enum value is carried by every typed C++ codec", "[cons
    CHECK(!psio::validate_json<Holder>(R"({"level":"medium","more":[]})").ok());
    CHECK(!psio::validate_json<Holder>(R"({"level":256,"more":[]})").ok());
 }
+
+// ── The key writer enforces bounds and UTF-8, like the pssz writer ───────
+namespace cons_key
+{
+   struct Bounded
+   {
+      std::uint32_t            id = 0;
+      std::string              name;
+      std::vector<std::string> tags;
+   };
+   PSIO_REFLECT(Bounded, id, attr(name, utf8 | max<4>), attr(tags, max<2> | element(max<3>)))
+   struct Wrapped
+   {
+      psio::utf8_string<4>                    name;
+      psio::bounded<std::uint16_t, 2>         codes;
+      std::optional<psio::utf8_string<4>>     alias;
+      std::vector<std::tuple<std::uint8_t, Bounded>> rows;
+   };
+   PSIO_REFLECT(Wrapped, name, codes, alias, rows)
+   struct Plain
+   {
+      std::uint32_t            id = 0;
+      std::string              name;
+      std::vector<std::string> tags;
+   };
+   PSIO_REFLECT(Plain, id, name, tags)
+}  // namespace cons_key
+
+TEST_CASE("key: the writer refuses a value outside a bound or not UTF-8", "[consistency][key]")
+{
+   using namespace cons_key;
+   namespace ki = psio::detail::key_impl;
+   // Keys without bounds are not checked at all.
+   STATIC_REQUIRE(!ki::has_writer_checks<Plain, false>());
+   STATIC_REQUIRE(!ki::has_writer_checks<std::tuple<std::uint32_t, std::string>, false>());
+   STATIC_REQUIRE(!ki::has_writer_checks<std::uint64_t, true>());
+   STATIC_REQUIRE(ki::has_writer_checks<Bounded, false>());
+   STATIC_REQUIRE(ki::has_writer_checks<Wrapped, false>());
+   STATIC_REQUIRE(ki::has_writer_checks<std::vector<std::optional<Bounded>>, false>());
+
+   auto refused = [](const auto& value, std::string_view message) {
+      INFO(message);
+      // The status form, the throwing forms, the helper, the sized write.
+      std::vector<char> out{'x'};
+      const auto        status = psio::encode_key_checked(value, out);
+      REQUIRE(!status.ok());
+      CHECK(std::string_view{status.error().what} == message);
+      CHECK(out == std::vector<char>{'x'});
+      CHECK_THROWS_AS(psio::encode(psio::key{}, value), psio::codec_exception);
+      CHECK_THROWS_AS(psio::encode(psio::key{}, value, out), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_key(value), psio::codec_exception);
+      std::vector<char>     buffer(256);
+      psio::fast_buf_stream sink{buffer.data(), buffer.size()};
+      CHECK_THROWS_AS(psio::encode(psio::key{}, value, sink), psio::codec_exception);
+      // The pssz writer refuses the same value.
+      std::vector<char> frame;
+      CHECK(!psio::encode_pssz_checked(psio::pssz{}, value, frame).ok());
+   };
+   auto accepted = [](const auto& value) {
+      std::vector<char> out;
+      REQUIRE(psio::encode_key_checked(value, out).ok());
+      const auto key = psio::to_key(value);
+      CHECK(out == std::vector<char>(key.begin(), key.end()));
+      CHECK(psio::validate_key<std::remove_cvref_t<decltype(value)>>(bytes_of(key)).ok());
+   };
+
+   accepted(Bounded{1, "abcd", {"abc", "x"}});
+   refused(Bounded{1, "abcde", {}}, "key: member length_bound violated");
+   refused(Bounded{1, "\xff", {}}, "utf8_spec: invalid leading byte");
+   refused(Bounded{1, "", {"a", "b", "c"}}, "key: member length_bound violated");
+   refused(Bounded{1, "", {"abcd"}}, "key: member length_bound violated");
+
+   Wrapped good;
+   good.name  = psio::utf8_string<4>{"abcd"};
+   good.codes = psio::bounded<std::uint16_t, 2>{std::vector<std::uint16_t>{1, 2}};
+   good.rows.emplace_back(std::uint8_t{1}, Bounded{1, "ab", {"x"}});
+   accepted(good);
+   {
+      Wrapped bad = good;
+      bad.name = psio::utf8_string<4>{"\xc0\x80"};
+      refused(bad, "key: utf8_string is not valid UTF-8");
+      bad = good;
+      bad.alias = psio::utf8_string<4>{"\xff"};
+      refused(bad, "key: utf8_string is not valid UTF-8");
+      bad = good;
+      bad.codes.storage() = {1, 2, 3};
+      refused(bad, "key: bounded list exceeds its bound");
+      bad = good;
+      std::get<1>(bad.rows[0]).name = "abcde";   // inside a list, a tuple and a record
+      refused(bad, "key: member length_bound violated");
+   }
+
+   // What the writer refuses, the reader rejects: the key bytes an unchecked
+   // writer would have produced for the same value.
+   const auto over = psio::to_key(Plain{1, "abcde", {}});
+   CHECK(!psio::validate_key<Bounded>(bytes_of(over)).ok());
+   const auto raw = psio::to_key(Plain{1, "\xff", {}});
+   CHECK(!psio::validate_key<Bounded>(bytes_of(raw)).ok());
+
+   // A prefix element is checked as the element it is.
+   using Key = std::tuple<psio::utf8_string<4>, std::uint32_t>;
+   CHECK_NOTHROW(psio::key_prefix<Key>(psio::utf8_string<4>{"abcd"}));
+   CHECK_THROWS_AS(psio::key_prefix<Key>(psio::utf8_string<4>{"\xff"}), psio::codec_exception);
+
+   // The sizing pass checks nothing (the write that follows does).
+   CHECK(psio::key_size(Bounded{1, "abcde", {}}) == over.size());
+}

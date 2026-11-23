@@ -1138,6 +1138,61 @@ namespace
       r.reason = reason;
    }
 
+   // ── Bounds and UTF-8 in a key ──────────────────────────────────────────
+   //
+   // A value outside a bound or a UTF-8 constraint of its type has no key:
+   // every writer refuses it and every reader rejects the bytes an unchecked
+   // writer would have produced (the key of the same record without the
+   // constraints).
+   void bound_reject(const std::string& name, const KBoundRaw& raw)
+   {
+      const KBound value{raw.shard, raw.name, raw.tags};
+      std::vector<char> out;
+      if (psio::encode_key_checked(value, out).ok() || !out.empty())
+         die("KBound/" + name + ": the checked key writer takes the value");
+      bool threw = false;
+      try
+      {
+         (void)psio::to_key(value);
+      }
+      catch (const psio::codec_exception&)
+      {
+         threw = true;
+      }
+      if (!threw) die("KBound/" + name + ": to_key takes the value");
+      if (psio::encode_pssz_checked(psio::pssz{}, value, out).ok())
+         die("KBound/" + name + ": the pssz writer takes the value");
+      key_reject<KBound>(name, to_hex(psio::encode(psio::key{}, raw)));
+   }
+   void emit_bounds()
+   {
+      value<KBound>("empty", KBound{});
+      value<KBound>("at_the_bounds", KBound{7, "abcd", {"xyz", ""}});
+      value<KBound>("multibyte", KBound{1, "h\xc3\xa9", {"a"}});
+      value<KBound>("nul_in_name", KBound{1, std::string("a\0b", 3), {}});
+      prefixes<KBound>("at_the_bounds", KBound{7, "abcd", {"xyz", ""}});
+      order<KBound>("picked", {KBound{}, KBound{0, "", {""}}, KBound{0, "a", {}},
+                               KBound{0, "a", {"a"}}, KBound{0, "a", {"a", "a"}},
+                               KBound{0, "a", {"b"}}, KBound{0, "ab", {}}, KBound{1, "", {}}});
+      bound_reject("name_over_bound", {7, "abcde", {}});
+      bound_reject("name_not_utf8", {7, "\xff", {}});
+      bound_reject("name_overlong_utf8", {7, "\xc0\x80", {}});
+      bound_reject("name_truncated_utf8", {7, "ab\xc3", {}});
+      bound_reject("too_many_tags", {7, "", {"a", "b", "c"}});
+      bound_reject("tag_over_bound", {7, "", {"abcd"}});
+      bound_reject("second_tag_over_bound", {7, "ab", {"a", "abcd"}});
+      // A raw tag is any bytes: not UTF-8 is fine there.
+      {
+         Row& r = add("value", type_id<KBound>(), "raw_tag_bytes");
+         const KBound v{7, "ab", {"\xff"}};
+         r.pssz = pssz_hex(v);
+         r.key  = to_hex(key_of(v));
+         std::string text;
+         if (psio::encode_json_checked(psio::json{}, v, text).ok())
+            die("KBound/raw_tag_bytes: a raw string that is not UTF-8 has text");
+      }
+   }
+
    void emit_custom_types()
    {
       using namespace custom_conf;
@@ -1281,6 +1336,7 @@ int main(int argc, char** argv)
    emit_time();
    emit_keys();
    emit_custom_types();
+   emit_bounds();
 
    const std::string text = render();
    Fixture           parsed;

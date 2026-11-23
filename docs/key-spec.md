@@ -149,6 +149,27 @@ prefix is not a value of the composite type). A reader that knows only the
 wire type (a schema with no handler) accepts such a key: the fixture kind
 `key-invariant` (`conformance/time-key-vectors.md`).
 
+### 5.1 Writing: bounds and UTF-8
+
+What a reader rejects, a writer does not write. A value outside a length
+bound or a UTF-8 constraint of its type — a bounded string or list, a UTF-8
+string, a record member's declared bound at any depth (`docs/pssz-spec.md`
+§3.5) — **has no key**, exactly as it has no PSSZ encoding (§16 there):
+
+| | writer |
+|---|---|
+| C++ | `psio::to_key` / `psio::encode(psio::key{}, ...)` / `psio::key_prefix` fail through `codec_exception` (abort without exceptions); `psio::encode_key_checked(value, out)` returns the status and leaves `out` unchanged. A key type with no bound and no UTF-8 constraint is not checked at all (decided at compile time) |
+| Rust | the derived `Key::key_pack` checks a member's annotations; the schema-driven key encoder checks member bounds |
+| JavaScript, Python | `toKey` / `to_key` raise |
+
+The messages of the C++ writer are `key: member length_bound violated`,
+`key: utf8_string exceeds its bound`, `key: utf8_string is not valid UTF-8`
+and `key: bounded list exceeds its bound` (and the UTF-8 validator's own
+for an annotated member). The shared fixture's `KBound` rows
+(`conformance/time-key-vectors.md`) give keys of values at the bounds and
+the keys an unchecked writer would produce past them, which every reader
+rejects.
+
 ## 6. Keys from a schema
 
 A reader that has only the Schema IR encodes the key of a dynamic value with

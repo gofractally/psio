@@ -177,6 +177,27 @@ namespace tk_conf
    };
    using KGuard = Tup<Name, std::optional<Range>, std::vector<Level>, DerKey>;
 
+   // A key with bounds and a UTF-8 member (docs/key-spec.md "Bounds and
+   // UTF-8"): `name` is a UTF-8 string of at most 4 bytes, `tags` a list of
+   // at most 2 raw strings of at most 3 bytes. KBoundRaw is the same record
+   // without the constraints: what an unchecked writer would produce.
+   struct KBound
+   {
+      std::uint32_t            shard = 0;
+      std::string              name;
+      std::vector<std::string> tags;
+      friend bool operator==(const KBound&, const KBound&)  = default;
+      friend auto operator<=>(const KBound&, const KBound&) = default;
+   };
+   PSIO_REFLECT(KBound, shard, attr(name, utf8 | max<4>), attr(tags, max<2> | element(max<3>)))
+   struct KBoundRaw
+   {
+      std::uint32_t            shard = 0;
+      std::string              name;
+      std::vector<std::string> tags;
+   };
+   PSIO_REFLECT(KBoundRaw, shard, name, tags)
+
    // ── Fixture ids ────────────────────────────────────────────────────────
    template <typename T>
    struct type_name;
@@ -241,6 +262,7 @@ namespace tk_conf
    TK_TYPE(Level, "Level")
    TK_TYPE(ShardKey, "ShardKey")
    TK_TYPE(KGuard, "tuple<Name,optional<Range>,list<Level>,DerKey>")
+   TK_TYPE(KBound, "KBound")
 #undef TK_TYPE
 
    template <typename T>
@@ -265,7 +287,7 @@ namespace tk_conf
                       KPair, MStrU32, MTuple, MNested, SU8, SStr, SI64, SF64, KMap,
                       SPacked,
                       Id, Blob, Endpoint, Ratio, Ref, Name, DerKey, Range, Level, ShardKey,
-                      KGuard>>{});
+                      KGuard, KBound>>{});
    }
 
    // The Schema IR of every fixture type, each under its fixture id. (Also

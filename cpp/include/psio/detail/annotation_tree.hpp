@@ -211,6 +211,11 @@ namespace psio::detail::ann
    template <typename... Ts>
    inline constexpr bool has_tree_specs_v<std::tuple<Ts...>> = (is_tree_spec_v<Ts> || ...);
 
+   // Whether a member's annotations ask for a check of its value: what a
+   // codec gates its call of check_member_annotations on.
+   template <typename Tuple>
+   inline constexpr bool has_value_checks_v = has_tree_specs_v<Tuple>;
+
    // ── Carriers ───────────────────────────────────────────────────────────
    //
    // Besides the annotation tuple of its position a carrier has `cap`: the
