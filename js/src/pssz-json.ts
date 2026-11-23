@@ -15,11 +15,14 @@
 // has no text. A raw string (Custom "string") holding bytes that are not
 // UTF-8 has no text. A Custom id that is not part of the binary form is its
 // handler's text as one JSON string, or its inner type's text without one.
+// A "json" node (any JSON value) is that value, inline. A Variant with the
+// attribute `untagged` is the bare value of its alternative, picked on
+// reading by the kind of JSON value found.
 //
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  Codec, MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, recordFields, setField, settleMember,
+  Codec, MAX_DEPTH, Node, PsszError, PsszJsonText, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, recordFields, setField, settleMember,
   unwrapOption, utf8CodePoint, utf8Valid, utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
   type IntForm, type IrEnumerator, type PsszCustomHandler, type VariantValue,
 } from './pssz-core.js';
@@ -575,7 +578,7 @@ interface MapKeyText {
 function keyTextOf(codec: Codec, key: Node): MapKeyText {
   let at = key;
   for (let hops = 0; hops <= 4096; ++hops) {
-    if (at.kind === 'string') return { form: 'string', node: at, missing: false };
+    if (at.kind === 'string' && !at.json) return { form: 'string', node: at, missing: false };
     if (at.kind !== 'custom') break;
     if (!at.boxed) {
       // A handler that presents the type decides the key's text. One that
@@ -592,6 +595,245 @@ function keyTextOf(codec: Codec, key: Node): MapKeyText {
 
 const NO_HANDLER = 'pssz IR: no handler registered for a custom type';
 
+// ── Any JSON value: the "json" node ─────────────────────────────────────────
+//
+// `Custom{ Custom{List<u8>, "utf8"}, "json" }` (C++ `psio::json_value`): in
+// PSSZ a UTF-8 string holding the compact text of one JSON value; in text
+// that value, inline.
+
+const NOT_JSON = 'the text of a json value is not JSON';
+
+// Reads one value of any shape and appends its compact text (C++
+// `capture_value`): no whitespace, strings re-escaped by the writer's rule,
+// a number as its token, members in order (a repeated key repeated).
+function captureValue(c: JsonCursor, out: string[]): void {
+  switch (c.kind()) {
+    case 'object': {
+      c.beginObject();
+      out.push('{');
+      for (let first = true; ; first = false) {
+        const key = c.nextField();
+        if (key === null) break;
+        if (!first) out.push(',');
+        writeString(out, key, false);
+        out.push(':');
+        captureValue(c, out);
+      }
+      out.push('}');
+      return;
+    }
+    case 'array':
+      c.beginArray();
+      out.push('[');
+      for (let first = true; c.nextElement(); first = false) {
+        if (!first) out.push(',');
+        captureValue(c, out);
+      }
+      out.push(']');
+      return;
+    case 'string': {
+      const s = c.string();
+      writeString(out, utf8Decode(s.bytes, s.start, s.end), false);
+      return;
+    }
+    case 'number':
+      out.push(c.number());
+      return;
+    case 'boolean':
+      out.push(c.boolean() ? 'true' : 'false');
+      return;
+    case 'null':
+      c.null();
+      out.push('null');
+      return;
+  }
+}
+
+// Reads one value of any shape as a plain JavaScript value: an object (a
+// repeated key keeps its last value, at the position of the first), an
+// array, a string, a boolean, null, and a number as a `number` — or, where
+// that would not be the number written, as a `bigint` (an integer beyond
+// 2^53) or a `PsszJsonText` holding the token (beyond the range of a double).
+function parseValue(c: JsonCursor): unknown {
+  switch (c.kind()) {
+    case 'object': {
+      c.beginObject();
+      const out: Record<string, unknown> = {};
+      while (true) {
+        const key = c.nextField();
+        if (key === null) break;
+        setField(out, key, parseValue(c));
+      }
+      return out;
+    }
+    case 'array': {
+      c.beginArray();
+      const out: unknown[] = [];
+      while (c.nextElement()) out.push(parseValue(c));
+      return out;
+    }
+    case 'string': {
+      const s = c.string();
+      return utf8Decode(s.bytes, s.start, s.end);
+    }
+    case 'number': {
+      const token = c.number();
+      const value = Number(token);
+      if (!Number.isFinite(value)) return new PsszJsonText(token);
+      if (!Number.isSafeInteger(value) && /^-?[0-9]+$/.test(token)) return BigInt(token);
+      return value;
+    }
+    case 'boolean':
+      return c.boolean();
+    case 'null':
+      c.null();
+      return null;
+  }
+}
+
+/**
+ * The value of a "json" node from the bytes of its string: one JSON value
+ * (any well-formed text; a writer stores the compact one). `asText`: the
+ * text itself, for the text walk. `fail` reports bytes that are not JSON.
+ */
+export function jsonTextValue(bytes: Uint8Array, asText: boolean, fail: (message: string) => never): unknown {
+  try {
+    const c = new JsonCursor(bytes, false);
+    if (asText) {
+      c.skip();
+      c.finish();
+      return new PsszJsonText(utf8Decode(bytes, 0, bytes.length));
+    }
+    const value = parseValue(c);
+    c.finish();
+    return value;
+  } catch (e) {
+    if (e instanceof PsszError && e.kind === 'json') return fail(`pssz IR: ${NOT_JSON}`);
+    throw e;
+  }
+}
+
+function compactText(text: string, nonchar: boolean, out: string[], fail: (message: string) => never): void {
+  if (!wellFormed(text)) fail(`json: ${NOT_JSON}`);
+  try {
+    const c = new JsonCursor(utf8Encode(text), nonchar);
+    captureValue(c, out);
+    c.finish();
+  } catch (e) {
+    if (e instanceof PsszError && e.kind === 'json') fail(`json: ${NOT_JSON}`);
+    throw e;
+  }
+}
+
+function emitValue(value: unknown, out: string[], depth: number, fail: (message: string) => never): boolean {
+  if (value === null) out.push('null');
+  else if (typeof value === 'boolean') out.push(value ? 'true' : 'false');
+  else if (typeof value === 'number') {
+    if (!Number.isFinite(value)) fail('json: a json_value number is not a JSON number');
+    out.push(formatFloat(value, false));
+  } else if (typeof value === 'bigint') out.push(value.toString());
+  else if (typeof value === 'string') {
+    if (!wellFormed(value)) fail('json: string is not valid UTF-8');
+    writeString(out, value, false);
+  } else if (value instanceof PsszJsonText) {
+    compactText(value.text, false, out, fail);
+    return true;
+  } else if (Array.isArray(value)) {
+    if (depth >= MAX_DEPTH) fail('json: max depth exceeded');
+    let text = false;
+    out.push('[');
+    for (let i = 0; i < value.length; ++i) {
+      if (i) out.push(',');
+      text = emitValue(value[i], out, depth + 1, fail) || text;
+    }
+    out.push(']');
+    return text;
+  } else if (typeof value === 'object') {
+    const proto = Object.getPrototypeOf(value);
+    if (proto !== Object.prototype && proto !== null) fail('json: a json value is null, a boolean, a number, a string, an array or a plain object');
+    if (depth >= MAX_DEPTH) fail('json: max depth exceeded');
+    let text = false;
+    let first = true;
+    out.push('{');
+    for (const key of Object.keys(value as object)) {
+      if (!first) out.push(',');
+      first = false;
+      if (!wellFormed(key)) fail('json: string is not valid UTF-8');
+      writeString(out, key, false);
+      out.push(':');
+      text = emitValue((value as Record<string, unknown>)[key], out, depth + 1, fail) || text;
+    }
+    out.push('}');
+    return text;
+  } else fail('json: a json value is null, a boolean, a number, a string, an array or a plain object');
+  return false;
+}
+
+/**
+ * The compact JSON text of the value of a "json" node: a plain JavaScript
+ * value (null, boolean, finite number, bigint, string, array, plain
+ * object), with a `PsszJsonText` wherever the exact text is given.
+ */
+export function jsonValueText(value: unknown, fail: (message: string) => never): string {
+  const out: string[] = [];
+  const embedded = emitValue(value, out, 0, fail);
+  const text = out.join('');
+  // Text given as text nests on its own: the whole is one readable value.
+  if (embedded && !(value instanceof PsszJsonText)) compactText(text, false, [], fail);
+  return text;
+}
+
+// ── Untagged variants ───────────────────────────────────────────────────────
+//
+// The kinds of JSON value a type may be written as, in either format (C++
+// `json_kinds_of`, docs/json.md "Untagged variants").
+
+const KIND_BIT: { [K in JsonKind]: number } = { null: 1, boolean: 2, number: 4, string: 8, array: 16, object: 32 };
+const KIND_ANY = 63;
+const UNTAGGED_AMBIGUOUS = 'json: the alternatives of an untagged variant are not told apart by the kind of JSON value';
+
+export function jsonKinds(node: Node, depth = 0): number {
+  if (depth > MAX_DEPTH) return KIND_ANY;
+  switch (node.kind) {
+    case 'int':
+      if (node.time) return node.time.point ? KIND_BIT.string : KIND_BIT.number | KIND_BIT.string;
+      if (node.enumerators) return KIND_BIT.string | KIND_BIT.number;
+      return node.bits >= 64 ? KIND_BIT.number | KIND_BIT.string : KIND_BIT.number;
+    case 'float':
+    case 'char':
+      return KIND_BIT.number;
+    case 'bool':
+      return KIND_BIT.boolean;
+    case 'string':
+      return node.json ? KIND_ANY : KIND_BIT.string;
+    case 'hex':
+      return KIND_BIT.array | KIND_BIT.string;
+    case 'option':
+      return KIND_BIT.null | jsonKinds(node.textChild, depth + 1);
+    case 'list':
+    case 'array':
+      return node.assoc === 'map' ? KIND_BIT.object | KIND_BIT.array : KIND_BIT.array;
+    case 'tuple':
+      return KIND_BIT.array;
+    case 'record':
+      return node.tuple ? KIND_BIT.object | KIND_BIT.array : KIND_BIT.object;
+    case 'variant': {
+      if (!node.untagged) return KIND_BIT.array | KIND_BIT.object;
+      let all = 0;
+      for (const member of node.members) all |= jsonKinds(member.text, depth + 1);
+      return all;
+    }
+    case 'nested':
+      return jsonKinds(node.textChild, depth + 1);
+    case 'custom':
+      // "box", or an id with no text handler: the inner type's.
+      if (!node.boxed && node.handler && (node.handler.toText || node.handler.fromText)) return KIND_BIT.string;
+      return jsonKinds(node.inner!, depth + 1);
+    default:
+      return KIND_ANY; // bit types have no text
+  }
+}
+
 class Reader {
   constructor(
     private readonly c: JsonCursor,
@@ -599,6 +841,9 @@ class Reader {
     // The codec of the values being read: the automatic one inside a
     // nested value.
     private codec: Codec,
+    // A "json" node is read as its compact text (a `PsszJsonText`): the
+    // text-to-bytes walk, which keeps every number as it was written.
+    private readonly jsonText = false,
   ) {}
 
   // An invariant refused the value read: the error is the type's own.
@@ -868,7 +1113,7 @@ class Reader {
     for (let i = 0; i < slots.length; ++i) {
       if (slots[i] === undefined) {
         // A missing Option member is empty; any other is an error.
-        if (node.members[i].node.kind !== 'option') c.fail('json: missing required member');
+        if (node.members[i].node.kind !== 'option') c.fail(`json: missing required member "${node.members[i].name}"`);
         slots[i] = null;
       }
       setField(out, node.members[i].name, slots[i]);
@@ -876,7 +1121,23 @@ class Reader {
     return out;
   }
 
+  // An untagged variant: the alternative whose values are written as the
+  // kind of value found.
+  private untagged(node: Node): VariantValue {
+    const c = this.c;
+    const bit = KIND_BIT[c.kind()];
+    let index = -1;
+    for (let i = 0; i < node.members.length; ++i) {
+      if (!(jsonKinds(node.members[i].text) & bit)) continue;
+      if (index >= 0) c.fail(UNTAGGED_AMBIGUOUS);
+      index = i;
+    }
+    if (index < 0) c.fail("json: the value is none of the untagged variant's alternatives");
+    return { type: node.members[index].name, value: this.read(node.members[index].text, 'natural', 0) };
+  }
+
   private variant(node: Node): VariantValue {
+    if (node.untagged) return this.untagged(node);
     const c = this.c;
     let index: number;
     let payload: unknown;
@@ -926,6 +1187,16 @@ class Reader {
       case 'bitlist':
         return c.fail('json: bit types have no JSON form');
       case 'string': {
+        if (node.json) {
+          // Any JSON value, inline.
+          if (!this.jsonText && !node.child.bounded) return parseValue(c);
+          const out: string[] = [];
+          captureValue(c, out);
+          const text = out.join('');
+          if (!bytesAdmit(node.child, utf8Length(text))) c.fail('json: string exceeds its bound');
+          if (this.jsonText) return new PsszJsonText(text);
+          return parseValue(new JsonCursor(utf8Encode(text), false));
+        }
         if (c.kind() !== 'string') c.fail('json: expected a string');
         const s = c.string();
         if (!bytesAdmit(node.child, s.end - s.start)) c.fail('json: string exceeds its bound');
@@ -1026,7 +1297,9 @@ class Reader {
 }
 
 /** Reads exactly one value of `node` from JSON / I-JSON text. */
-export function jsonToValue(codec: Codec, node: Node, format: JsonFormat, text: string | Uint8Array): unknown {
+export function jsonToValue(
+  codec: Codec, node: Node, format: JsonFormat, text: string | Uint8Array, jsonText = false,
+): unknown {
   let bytes: Uint8Array;
   if (typeof text === 'string') {
     if (!wellFormed(text)) throw new PsszError('json', 'json: text holds an unpaired surrogate', 0);
@@ -1034,7 +1307,7 @@ export function jsonToValue(codec: Codec, node: Node, format: JsonFormat, text: 
   } else bytes = text;
   const ijson = format === 'ijson';
   const cursor = new JsonCursor(bytes, ijson);
-  const value = new Reader(cursor, ijson, codec).read(node, 'natural', 0);
+  const value = new Reader(cursor, ijson, codec, jsonText).read(node, 'natural', 0);
   cursor.finish();
   return value;
 }
@@ -1240,6 +1513,12 @@ class Writer {
       case 'bitlist':
         return fail('json: bit types have no JSON form');
       case 'string':
+        if (node.json) {
+          // Any JSON value: the text the string holds, inline and compact.
+          const text = value instanceof PsszJsonText ? value.text : jsonValueText(value, fail);
+          if (node.child.bounded && !bytesAdmit(node.child, utf8Length(text))) fail('json: string exceeds its bound');
+          return compactText(text, this.ijson, out, fail);
+        }
         if (node.raw && value instanceof Uint8Array) {
           // A raw string holding bytes that are not UTF-8 has no JSON text.
           if (!bytesAdmit(node.child, value.length)) fail('json: string exceeds its bound');
@@ -1341,6 +1620,22 @@ class Writer {
         const index = node.byName!.get(v.type);
         if (index === undefined) return fail(`pssz IR: unknown variant alternative "${v.type}"`);
         const member = node.members[index];
+        if (node.untagged) {
+          // The bare value of the alternative. (Alternatives a reader
+          // could not tell apart are not written either.)
+          if (node.untaggedOk === undefined) {
+            let all = 0;
+            let ok = true;
+            for (const m of node.members) {
+              const kinds = jsonKinds(m.text);
+              if (kinds & all) ok = false;
+              all |= kinds;
+            }
+            node.untaggedOk = ok;
+          }
+          if (!node.untaggedOk) fail(UNTAGGED_AMBIGUOUS);
+          return this.write(member.text, v.value, 'natural', n + 1);
+        }
         if (this.ijson) {
           out.push('{');
           writeString(out, member.ijsonName, false);

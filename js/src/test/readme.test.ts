@@ -4,7 +4,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  bool, defineInterface, isCompressedName, isHashName, method, methodToNumber, numberToMethod, psszEvolvesFrom,
+  bool, defineInterface, f64, isCompressedName, isHashName, jsonValue, method, methodToNumber, numberToMethod, psszEquivalent, psszEvolvesFrom, PsszJsonText,
   PsszSchema, RecordView, argumentTuple, field, rawString, boundedList, boundedUtf8, bytes, custom, emitWit, fixedBytes, fromHex, generateSchema, i32,
   i64, keyPrefixUpperBound, lazy, list, nameToNumber, numberToName, optional, pjsonDecode, pjsonEncode, pjsonValidate,
   PjsonObject, PsszError, map, nested, pair, record, set, toHex, transparent, tuple, u16, u32, u64, u8, utf8, timePoint, variant,
@@ -438,7 +438,7 @@ test('README: maxFields', () => {
   const grown = record('Account', { id: u32, name: optional(utf8), email: optional(utf8) }, { maxFields: 3 });
   assert.deepEqual(psszEvolvesFrom(Account, grown), { ok: true });
   const raised = record('Account', { id: u32, name: optional(utf8) }, { maxFields: 8 });
-  assert.deepEqual(psszEvolvesFrom(Account, raised), { ok: false, reason: 'maxFields was raised (3 -> 8)', path: '(root)' });
+  assert.deepEqual(psszEvolvesFrom(Account, raised), { ok: false, code: 'max-fields', reason: 'maxFields was raised (3 -> 8)', path: '(root)' });
   // The schema: more members than its maxFields is malformed.
   const ir = JSON.parse(JSON.stringify(generateSchema({ Account }).ir));
   ir.types[0].type.value.value.attributes[0].value = '1';
@@ -483,7 +483,7 @@ test('README: interfaces', () => {
   const funcs = Token.schema.ir.interfaces[0].funcs;
   assert.deepEqual(funcs.map((f) => f.name), ['transfer', 'names', 'note', 'add', 'ping', 'batch']);
   assert.deepEqual(funcs[0].attributes, [{ name: 'maxFields', value: '8' }, { name: 'maxDynamicData', value: '256' }]);
-  assert.deepEqual(funcs[3].params.map((p) => p.name), ['', '']);
+  assert.deepEqual(funcs[3].params.map((p) => p.name), ['0', '1']);
   assert.ok(Token.schema.ir.types.some((m) => m.name === 'token.transfer'));
   const bare = defineInterface('token', { ping: method({}) }, { argumentLists: false, package: 'pkg', version: '1.0' });
   assert.deepEqual(bare.schema.ir.types, []);
@@ -521,17 +521,51 @@ test('README: compatibility checking', () => {
   assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, { note: optional(rawString) })), { ok: true });
   assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, {}, 4096)), { ok: true });
   assert.deepEqual(psszEvolvesFrom(V1, post(16, 16)),
-    { ok: false, reason: 'the length bound of the string was tightened ([0, 32] -> [0, 16])', path: '.owner' });
+    { ok: false, code: 'bound-tightened', reason: 'the length bound of the string was tightened ([0, 32] -> [0, 16])', path: '.owner' });
   const tags = psszEvolvesFrom(V1, post(32, 8));
   assert.ok(!tags.ok && tags.path === '.tags[]');
   assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, { count: u64 })),
-    { ok: false, reason: 'the appended field "count" is not optional', path: '(root)' });
+    { ok: false, code: 'appended-field-not-optional', reason: 'the appended field "count" is not optional (old data has no value for it)', path: '(root)' });
   assert.deepEqual(psszEvolvesFrom(V1, post(32, 16, {}, 100000)),
-    { ok: false, reason: 'the offset width of the record changed (2 -> 4)', path: '(root)' });
+    { ok: false, code: 'width-changed', reason: 'the offset width of the record differs (2 / 4)', path: '(root)' });
   const fetched = (def: typeof V1) => PsszSchema.decode(generateSchema({ Post: def }).encode()).type('Post');
   assert.equal(psszEvolvesFrom(fetched(V1), fetched(post(64, 16))).ok, true);
   assert.equal(psszEvolvesFrom(fetched(V1), fetched(post(16, 16))).ok, false);
   assert.equal(psszEvolvesFrom(V1, fetched(post(64, 16))).ok, true);
+
+  // Wire or contract; psszEquivalent.
+  const A = record('P', { id: u64, name: optional(rawString) });
+  const renamed = record('P', { id: u64, title: optional(rawString) });
+  assert.deepEqual(psszEvolvesFrom(A, renamed),
+    { ok: false, code: 'field-renamed', reason: 'field 1 was renamed or reordered ("name" -> "title")', path: '(root)' });
+  assert.deepEqual(psszEvolvesFrom(A, renamed, { compare: 'wire' }), { ok: true });
+  assert.deepEqual(psszEquivalent(V1, post(32, 16)), { ok: true });
+  const wider = psszEquivalent(V1, post(64, 16));
+  assert.ok(!wider.ok && wider.code === 'bound-changed' && wider.path === '.owner');
+  assert.deepEqual(psszEquivalent(A, renamed, { compare: 'wire' }), { ok: true });
+});
+
+test('README: untagged variants and any JSON value', () => {
+  const Extra = variant({ text: utf8, items: list(utf8) }, { untagged: true });
+  assert.equal(Extra.valueToJson({ type: 'items', value: ['a'] }), '["a"]');
+  assert.equal(variant({ text: utf8, items: list(utf8) }).valueToJson({ type: 'items', value: ['a'] }), '{"items":["a"]}');
+  assert.equal(Extra.valueToJson({ type: 'text', value: 's' }, 'json'), '"s"');
+  assert.deepEqual(Extra.jsonToValue('["a","b"]'), { type: 'items', value: ['a', 'b'] });
+  assert.throws(() => Extra.jsonToValue('7'),
+    (e: unknown) => e instanceof PsszError && e.message === "json: the value is none of the untagged variant's alternatives");
+  assert.throws(() => variant({ a: u32, b: f64 }, { untagged: true }).jsonToValue('1'),
+    (e: unknown) => e instanceof PsszError &&
+      e.message === 'json: the alternatives of an untagged variant are not told apart by the kind of JSON value');
+
+  const Action = record('Action', { service: utf8, data: jsonValue, more: optional(jsonValue) });
+  const bytes = Action.jsonToPssz('{"service":"tokens","data":{"amount":"5","memo":[1.50,null]}}');
+  assert.equal(Action.psszToJson(bytes), '{"service":"tokens","data":{"amount":"5","memo":[1.50,null]},"more":null}');
+  assert.deepEqual(Action.decode(bytes).data, { amount: '5', memo: [1.5, null] });
+  const Twin = record('Action', { service: utf8, data: utf8, more: optional(utf8) });
+  assert.deepEqual(Action.encode({ service: 's', data: [true, { k: 1 }], more: null }),
+    Twin.encode({ service: 's', data: '[true,{"k":1}]', more: null }));
+  assert.deepEqual(Action.encode({ service: 's', data: new PsszJsonText('{ "n": 1.50 }'), more: null }),
+    Twin.encode({ service: 's', data: '{"n":1.50}', more: null }));
 });
 
 test('README: names', () => {

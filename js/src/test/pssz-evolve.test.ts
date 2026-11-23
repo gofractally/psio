@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PsszError, PsszSchema, argumentTuple, array, boundedList, boundedUtf8, defineInterface, field, generateSchema, lazy, list, map,
-  fixedBytes, i32, method, nested, optional, psszEvolvesFrom, rawString, record, set, transparent, tuple, u16, u32, u64, u8, utf8, variant,
+  fixedBytes, i32, method, nested, optional, psszEquivalent, psszEvolvesFrom, enumeration, custom, timePoint, duration, box, alt, rawString, record, set, transparent, tuple, u16, u32, u64, u8, utf8, variant,
   type FieldOptions, type PsszCompatibility, type RecordOptions, type TypeDef,
 } from '../index.js';
 
@@ -69,15 +69,15 @@ test('psszEvolvesFrom: the C++ pssz_evolves_from cases (member annotations and c
   no(V1, WithMin, /tightened \(\[0, 32\] -> \[1, 32\]\)/, '.owner');   // a new lower bound refuses old values
   yes(WithMin, V1);
   // utf8 / raw and sorted are the member's type.
-  no(V1, Raw, /utf8 changed/, '.owner');
-  no(Raw, V1, /utf8 changed/, '.owner');
-  no(V1, ElemUtf8, /utf8 changed/, '.tags[]');
+  no(V1, Raw, /utf8 on one side only/, '.owner');
+  no(Raw, V1, /utf8 on one side only/, '.owner');
+  no(V1, ElemUtf8, /utf8 on one side only/, '.tags[]');
   no(V1, Sorted, /sorted \/ unique \/ uniqueKeys changed/, '.tags');
   no(Sorted, V1, /sorted \/ unique \/ uniqueKeys changed/, '.tags');
   // The cap may grow within its width class and may not shrink.
   yes(V1, CapWider);
   no(V1, CapTighter, /maxDynamicData was lowered \(1024 -> 512\)/, '(root)');
-  no(V1, CapOtherWidth, /offset width of the record changed \(2 -> 4\)/, '(root)');
+  no(V1, CapOtherWidth, /offset width of the record differs \(2 \/ 4\)/, '(root)');
   // Adding a cap: only one the old type's inferred bound fits.
   assert.ok(Open.inferredBound! <= 600n && Open.inferredBound! > 400n);
   yes(Open, OpenCapped);
@@ -86,7 +86,7 @@ test('psszEvolvesFrom: the C++ pssz_evolves_from cases (member annotations and c
   // Without a cap, a widened bound that moves a nested list's offset table
   // into another width class changes the bytes.
   assert.equal(Open.width, OpenWideList.width);
-  no(Open, OpenWideList, /offset width of the list changed \(1 -> 2\)/, '.tags');
+  no(Open, OpenWideList, /offset width of the list differs \(1 \/ 2\)/, '.tags');
   yes(Open, OpenWider);
 
   // What the check promises, on bytes: every record of V1 is a record of
@@ -134,16 +134,16 @@ test('psszEvolvesFrom: the rules of docs/pssz-spec.md 7.5 / 7.6', () => {
   no(A, record('A', { id: u32 }), /fields were removed/);
   no(A, record('A', { name: utf8, id: u32 }), /renamed or reordered/);
   no(A, record('A', { id: u32, title: utf8 }), /field 1 was renamed or reordered \("name" -> "title"\)/);
-  no(A, record('A', { id: u64, name: utf8 }), /integer type changed/, '.id');
-  no(A, record('A', { id: optional(u32), name: utf8 }), /type changed \(int -> option\)/, '.id');
-  no(A, record('A', { id: u32, name: utf8 }, { fixed: true }), /definitionWillNotChange was added or removed/);
+  no(A, record('A', { id: u64, name: utf8 }), /integer type differs/, '.id');
+  no(A, record('A', { id: optional(u32), name: utf8 }), /type differs \(integer \/ optional\)/, '.id');
+  no(A, record('A', { id: u32, name: utf8 }, { fixed: true }), /definitionWillNotChange on one side only/);
   const F = record('F', { a: utf8 }, { fixed: true });
   yes(F, record('F', { a: utf8 }, { fixed: true }));
   no(F, record('F', { a: utf8, b: optional(u32) }, { fixed: true }), /definitionWillNotChange record gained fields/);
   // An appended field that moves the inferred bound into the next width class changes every byte.
   const Small = record('S', { a: boundedUtf8(200) });
   assert.equal(Small.width, 1);
-  no(Small, record('S', { a: boundedUtf8(200), b: optional(boundedUtf8(200)) }), /offset width of the record changed \(1 -> 2\)/);
+  no(Small, record('S', { a: boundedUtf8(200), b: optional(boundedUtf8(200)) }), /offset width of the record differs \(1 \/ 2\)/);
   yes(record('S', { a: boundedUtf8(200) }, { maxDynamicData: 1000 }),
     record('S', { a: boundedUtf8(200), b: optional(boundedUtf8(200)) }, { maxDynamicData: 1000 }));
   no(record('S', { a: utf8 }), record('S', { a: utf8 }, { maxDynamicData: 1 << 20 }), /added to a record of unbounded size/);
@@ -152,7 +152,7 @@ test('psszEvolvesFrom: the rules of docs/pssz-spec.md 7.5 / 7.6', () => {
   yes(V, variant({ A: u32, B: utf8, C: u8 }));
   no(V, variant({ B: utf8, A: u32 }), /alternative 0 was renamed or reordered/);
   no(V, variant({ A: u32 }), /alternatives were removed/);
-  no(V, variant({ A: u32, B: rawString }), /utf8 changed/, '<B>');
+  no(V, variant({ A: u32, B: rawString }), /utf8 on one side only/, '<B>');
   // The inner type of a nested value, an optional, a list, a map evolves by the same rules.
   const grown = record('A', { id: u32, name: utf8, memo: optional(utf8) });
   yes(nested(A), nested(grown));
@@ -160,19 +160,19 @@ test('psszEvolvesFrom: the rules of docs/pssz-spec.md 7.5 / 7.6', () => {
   yes(list(A), list(grown));
   yes(optional(A), optional(grown));
   yes(map(u32, A), map(u32, grown));
-  no(map(u32, A), map(u64, A), /integer type changed/, '[].0');
-  no(map(u32, A), list(tuple(u32, A)), /a list, a map and a set are different types/);
-  no(set(u32), list(u32), /a list, a map and a set are different types/);
-  no(list(u32), array(u32, 4), /type changed \(list -> array\)/);
-  no(array(u32, 4), array(u32, 5), /tightened/);
+  no(map(u32, A), map(u64, A), /integer type differs/, '[].0');
+  no(map(u32, A), list(tuple(u32, A)), /the type differs/);
+  no(set(u32), list(u32), /the type differs/);
+  no(list(u32), array(u32, 4), /type differs \(list \/ array\)/);
+  no(array(u32, 4), array(u32, 5), /array length differs \(4 \/ 5\)/);
   yes(boundedList(u32, 4), list(u32));
   no(list(u32), boundedList(u32, 4), /tightened/);
   // A tuple gains optional trailing elements while its width stays.
   yes(tuple(u32, boundedUtf8(8)), tuple(u32, boundedUtf8(8), optional(u8)));
-  no(tuple(u32, boundedUtf8(8)), tuple(u32, boundedUtf8(8), u8), /appended element 2 is not optional/);
+  no(tuple(u32, boundedUtf8(8)), tuple(u32, boundedUtf8(8), u8), /appended field 2 is not optional/);
   // A transparent type is its member; a recursive type terminates.
   yes(transparent('Memo', boundedUtf8(80)), transparent('Memo', field(rawString, { utf8: true, max: 120 })));
-  no(transparent('Memo', field(rawString, { utf8: true, max: 80 })), transparent('Memo', field(rawString, { max: 80 })), /utf8 changed/);
+  no(transparent('Memo', field(rawString, { utf8: true, max: 80 })), transparent('Memo', field(rawString, { max: 80 })), /utf8 on one side only/);
   const tree = (extra: boolean): TypeDef<any, any> => {
     const self: TypeDef<any, any> = record('Tree', {
       children: list(lazy(() => self)), ...(extra ? { note: optional(utf8) } : {}),
@@ -186,12 +186,12 @@ test('psszEvolvesFrom: the rules of docs/pssz-spec.md 7.5 / 7.6', () => {
     { to: field(rawString, { utf8: true, max: 16 }), amount: u64, ...(extra ? { memo: optional(boundedUtf8(250)) } : {}) },
     cap === undefined ? {} : { maxDynamicData: cap });
   yes(args(false, 512), args(true, 512));
-  no(args(false), args(true), /offset width of the record changed \(1 -> 2\)/);   // no cap: the added parameter moves the width
+  no(args(false), args(true), /offset width of the record differs \(1 \/ 2\)/);   // no cap: the added parameter moves the width
   const api = (max: number) => defineInterface('api', { names: method({}, { returns: field(list(rawString), { max, element: { utf8: true, max: 16 } }) }) });
   assert.deepEqual(psszEvolvesFrom(api(4).methods.names.result, api(8).methods.names.result), { ok: true });
   assert.equal(psszEvolvesFrom(api(8).methods.names.result, api(4).methods.names.result).ok, false);
   const widened = psszEvolvesFrom(api(4).methods.names.result, api(64).methods.names.result);
-  assert.ok(!widened.ok && /offset width of the list changed \(1 -> 2\)/.test(widened.reason));
+  assert.ok(!widened.ok && /offset width of the list differs \(1 \/ 2\)/.test(widened.reason));
   // Not a type; not the automatic profile.
   assert.throws(() => psszEvolvesFrom({} as never, A), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
   assert.throws(() => psszEvolvesFrom(A.type({ width: 2 }), A), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
@@ -229,11 +229,11 @@ test('psszEvolvesFrom: a variant may gain alternatives at the end, unless an enc
   both(Var1, variant({ B: utf8, A: u32, C: u64 }), /alternative 0 was renamed or reordered/);
   both(Var1, variant({ A: u32, C: u64, B: utf8 }), /alternative 1 was renamed or reordered/);
   both(Var1, variant({ C: u64, A: u32, B: utf8 }), /alternative 0 was renamed or reordered/);
-  both(Var1, variant({ A: u64, B: utf8, C: u32 }), /the integer type changed/, '<A>');
-  both(Var1, variant({ A: i32, B: utf8, C: u64 }), /the integer type changed/, '<A>');
+  both(Var1, variant({ A: u64, B: utf8, C: u32 }), /the integer type differs/, '<A>');
+  both(Var1, variant({ A: i32, B: utf8, C: u64 }), /the integer type differs/, '<A>');
   // The same alternatives in the same places under other names, with other
   // types: an inserted alternative is seen by its type too.
-  both(Var1, variant({ A: u32, B: u64, C: utf8 }), /the type changed/, '<B>');
+  both(Var1, variant({ A: u32, B: u64, C: utf8 }), /the type differs/, '<B>');
   // An existing alternative evolves by the rules of its own type, with or
   // without new alternatives after it.
   both(variant({ A: u32, B: Alt0 }), variant({ A: u32, B: Alt1 }));
@@ -264,29 +264,29 @@ test('psszEvolvesFrom: a variant may gain alternatives at the end, unless an enc
   assert.deepEqual([tight(Larger).inferredBound, tight(Larger).width], [258n, 2]);
   assert.deepEqual([capped(Small).width, capped(Larger).width], [2, 2]);
   both(tight(Small), tight(Same));
-  both(tight(Small), tight(Larger), /offset width of the record changed \(1 -> 2\)/, '(root)');
+  both(tight(Small), tight(Larger), /offset width of the record differs \(1 \/ 2\)/, '(root)');
   // A cap reserves the room: the same change is compatible.
   both(capped(Small), capped(Larger));
   both(capped(Small), capped(Same));
   // A tuple and an array take their width from their own bound.
   both(tuple(Small, fixedBytes(249)), tuple(Same, fixedBytes(249)));
-  both(tuple(Small, fixedBytes(249)), tuple(Larger, fixedBytes(249)), /offset width of the tuple changed \(1 -> 2\)/);
+  both(tuple(Small, fixedBytes(249)), tuple(Larger, fixedBytes(249)), /offset width of the record differs \(1 \/ 2\)/);
   both(array(Small, 60), array(Same, 60));
-  both(array(Small, 60), array(Larger, 60), /offset width of the list changed \(1 -> 2\)/);
-  both(boundedList(Small, 60), boundedList(Larger, 60), /offset width of the list changed \(1 -> 2\)/);
+  both(array(Small, 60), array(Larger, 60), /offset width of the array differs \(1 \/ 2\)/);
+  both(boundedList(Small, 60), boundedList(Larger, 60), /offset width of the list differs \(1 \/ 2\)/);
   both(map(u8, Small, { max: 30 }), map(u8, Same, { max: 30 }));
-  both(map(u8, Small, { max: 30 }), map(u8, Larger, { max: 30 }), /offset width of the map changed \(1 -> 2\)/);
+  both(map(u8, Small, { max: 30 }), map(u8, Larger, { max: 30 }), /offset width of the map differs \(1 \/ 2\)/);
   // A bounded list inside a capped record: the record's width stays, the
   // list's table does not (60 x (1 + 3) = 240; 60 x (2 + 5) = 420).
   const listed = (v: TypeDef<any, any>) => record('Listed', { items: field(list(v), { max: 60 }) }, { maxDynamicData: 60000 });
   assert.deepEqual([listed(Small).width, listed(Larger).width], [2, 2]);
   assert.deepEqual([boundedList(Small, 60).width, boundedList(Larger, 60).width], [1, 2]);
   both(listed(Small), listed(Same));
-  both(listed(Small), listed(Larger), /offset width of the list changed \(1 -> 2\)/, '.items');
+  both(listed(Small), listed(Larger), /offset width of the list differs \(1 \/ 2\)/, '.items');
   // ... and one level further down: a tuple holding the variant, in a list.
   const rows = (v: TypeDef<any, any>) => record('Rows', { rows: field(list(tuple(v, fixedBytes(249))), { max: 2 }) }, { maxDynamicData: 60000 });
   both(rows(Small), rows(Same));
-  both(rows(Small), rows(Larger), /offset width of the (list|tuple) changed/);
+  both(rows(Small), rows(Larger), /offset width of the (list|record|map entry) differs/);
 
   // Bounds on the alternatives (C++ at<I>(...)).
   const ann = (alternatives: { [name: string]: TypeDef<any, any> }, at: { [name: string]: FieldOptions }) =>
@@ -325,4 +325,99 @@ test('psszEvolvesFrom: a variant may gain alternatives at the end, unless an enc
   assert.deepEqual(newRecord.v, { type: 'B', value: { a: 5, b: null } });
   assert.deepEqual(New.encode(newRecord), recordBytes);
   assert.equal(Old.validate(New.encode({ v: { type: 'C', value: 1n }, pad })).ok, false);
+});
+
+// The two things a comparison can be asked for, `psszEquivalent`, and the
+// sorts beyond two types: methods, interfaces, schemas (C++
+// `psio::pssz_ir::equivalent` / `evolves_from`; every code and path is
+// pinned by conformance/evolution-vectors.json — these are the typed
+// spellings of a few of its rows, and what only typed definitions have).
+test('psszEvolvesFrom / psszEquivalent: wire and contract, codes, methods, interfaces, schemas', () => {
+  const code = (r: PsszCompatibility) => (r.ok ? '' : `${r.code} @ ${r.path}`);
+  const A = record('A', { id: u32, name: optional(utf8) }, { maxDynamicData: 256 });
+  // Names are contract, not wire.
+  const renamed = record('A', { id: u32, title: optional(utf8) }, { maxDynamicData: 256 });
+  assert.equal(code(psszEvolvesFrom(A, renamed)), 'field-renamed @ (root)');
+  assert.equal(code(psszEvolvesFrom(A, renamed, { compare: 'contract' })), 'field-renamed @ (root)');
+  assert.deepEqual(psszEvolvesFrom(A, renamed, { compare: 'wire' }), { ok: true });
+  assert.deepEqual(psszEquivalent(A, renamed, { compare: 'wire' }), { ok: true });
+  assert.equal(code(psszEquivalent(A, renamed)), 'field-renamed @ (root)');
+  const V = variant({ A: u32, B: utf8 });
+  assert.equal(code(psszEvolvesFrom(V, variant({ A: u32, C: utf8 }))), 'alternative-renamed @ (root)');
+  assert.deepEqual(psszEvolvesFrom(V, variant({ A: u32, C: utf8 }), { compare: 'wire' }), { ok: true });
+  assert.equal(code(psszEquivalent(V, variant({ A: u32, B: alt(utf8, { ijsonName: 'b' }) }))), 'text-form-changed @ <B>');
+  // Custom ids and enums.
+  const Level = enumeration(u8, { low: 0, high: 1 });
+  const Level3 = enumeration(u8, { low: 0, high: 1, top: 2 });
+  assert.deepEqual(psszEvolvesFrom(Level, Level3), { ok: true });
+  assert.equal(code(psszEvolvesFrom(Level3, Level)), 'enum-changed @ (root)');
+  assert.equal(code(psszEquivalent(Level, Level3)), 'enum-changed @ (root)');
+  assert.equal(code(psszEvolvesFrom(Level, u8)), 'enum-changed @ (root)');
+  assert.deepEqual(psszEquivalent(Level3, u8, { compare: 'wire' }), { ok: true });
+  assert.equal(code(psszEvolvesFrom(custom('Id', u64), u64)), 'custom-id-changed @ (root)');
+  assert.equal(code(psszEvolvesFrom(custom('Id', u64), custom('Key', u64))), 'custom-id-changed @ (root)');
+  assert.deepEqual(psszEvolvesFrom(custom('Id', u64), custom('Key', u64), { compare: 'wire' }), { ok: true });
+  assert.equal(code(psszEquivalent(timePoint('seconds'), duration('seconds'))), 'custom-id-changed @ (root)');
+  assert.deepEqual(psszEquivalent(timePoint('seconds'), duration('seconds'), { compare: 'wire' }), { ok: true });
+  assert.equal(code(psszEquivalent(list(box(A)), list(A), { compare: 'wire' })), 'boxed-changed @ []');
+  // Equivalent: no difference in what either admits.
+  assert.deepEqual(psszEquivalent(V1, Same), { ok: true });
+  assert.equal(code(psszEquivalent(V1, Wider)), 'bound-changed @ .owner');
+  assert.equal(code(psszEvolvesFrom(Wider, V1)), 'bound-tightened @ .owner');
+  assert.equal(code(psszEquivalent(V1, CapWider)), 'max-dynamic-data @ (root)');
+  assert.equal(code(psszEquivalent(Fields3, Fields3Grown)), 'field-count-changed @ (root)');
+  assert.equal(code(psszEquivalent(Fields3, Fields3Lowered)), 'max-fields @ (root)');
+  assert.equal(code(psszEquivalent(V, variant({ A: u32, B: utf8, C: u8 }))), 'alternative-count-changed @ (root)');
+  assert.equal(code(psszEvolvesFrom(map(u32, A), map(u64, A))), 'key-type-changed @ [].0');
+  assert.equal(code(psszEvolvesFrom(set(boundedUtf8(4)), set(boundedUtf8(8)))), 'key-type-changed @ []');
+  assert.equal(code(psszEvolvesFrom(map(u32, boundedUtf8(4)), map(u32, boundedUtf8(8)))), '');
+  assert.equal(code(psszEvolvesFrom(list(u32), set(u32))), 'type-changed @ (root)');
+  // Typed-only order constraints have a code of their own, in both modes.
+  assert.equal(code(psszEvolvesFrom(V1, Sorted)), 'order-changed @ .tags');
+  assert.equal(code(psszEquivalent(V1, Sorted, { compare: 'wire' })), 'order-changed @ .tags');
+  assert.throws(() => psszEvolvesFrom(A, A, { compare: 'bytes' as never }), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
+
+  // Methods, interfaces, schemas.
+  const api = (extra: boolean, renamedParam = false, more = false) => defineInterface('api', {
+    transfer: method(
+      { to: field(rawString, { utf8: true, max: 16 }), [renamedParam ? 'value' : 'amount']: u64, ...(extra ? { memo: optional(boundedUtf8(80)) } : {}) },
+      { returns: u64, maxDynamicData: 256 }),
+    add: method([u32, u32], { returns: u64 }),
+    ping: method({}),
+    ...(more ? { extra: method({}) } : {}),
+  });
+  const v1 = api(false);
+  assert.deepEqual(psszEvolvesFrom(v1, api(false)), { ok: true });
+  assert.deepEqual(psszEquivalent(v1, api(false)), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(v1, api(true)), { ok: true });
+  assert.equal(code(psszEquivalent(v1, api(true))), 'field-count-changed @ transfer(args)');
+  assert.equal(code(psszEvolvesFrom(api(true), v1)), 'fields-removed @ transfer(args)');
+  assert.equal(code(psszEvolvesFrom(v1, api(false, true))), 'field-renamed @ transfer(args)');
+  assert.deepEqual(psszEvolvesFrom(v1, api(false, true), { compare: 'wire' }), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(v1, api(false, false, true)), { ok: true });
+  assert.equal(code(psszEquivalent(v1, api(false, false, true))), 'function-added @ extra');
+  assert.equal(code(psszEvolvesFrom(api(false, false, true), v1)), 'function-removed @ extra');
+  // Fetched: PsszInterface, PsszMethod, PsszSchema.
+  const s1 = PsszSchema.decode(v1.schema.encode());
+  const s2 = PsszSchema.decode(api(false, true).schema.encode());
+  assert.equal(code(psszEvolvesFrom(s1.interface('api'), s2.interface('api'))), 'field-renamed @ transfer(args)');
+  assert.equal(code(psszEvolvesFrom(s1.interface().method('transfer'), s2.interface().method('transfer'))), 'field-renamed @ (args)');
+  assert.equal(code(psszEvolvesFrom(s1, s2)), 'field-renamed @ api/transfer(args)');
+  assert.deepEqual(psszEvolvesFrom(s1, s2, { compare: 'wire' }), { ok: true });
+  assert.deepEqual(psszEvolvesFrom(v1, s1.interface('api')), { ok: true });
+  // A result on one side only; a positional list against a named one.
+  const noResult = defineInterface('api', { add: method([u32, u32]) });
+  const withResult = defineInterface('api', { add: method([u32, u32], { returns: u64 }) });
+  const namedAdd = defineInterface('api', { add: method({ a: u32, b: u32 }, { returns: u64 }) });
+  assert.equal(code(psszEvolvesFrom(noResult, withResult)), 'result-changed @ add(result)');
+  assert.equal(code(psszEvolvesFrom(withResult, namedAdd)), 'text-form-changed @ add(args)');
+  assert.deepEqual(psszEvolvesFrom(withResult, namedAdd, { compare: 'wire' }), { ok: true });
+  const other = defineInterface('other', { ping: method({}) });
+  assert.equal(code(psszEvolvesFrom(v1.schema, other.schema)), 'interface-removed @ api/');
+  const two = generateSchema({}, { interfaces: [v1, other] });
+  assert.deepEqual(psszEvolvesFrom(v1.schema, two), { ok: true });
+  assert.equal(code(psszEquivalent(v1.schema, two)), 'interface-added @ other/');
+  // Two different sorts are not compared.
+  assert.throws(() => psszEvolvesFrom(v1, v1.schema), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
+  assert.throws(() => psszEquivalent(A, s1 as never), (e: unknown) => e instanceof PsszError && e.kind === 'schema');
 });

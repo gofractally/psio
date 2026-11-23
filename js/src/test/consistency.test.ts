@@ -434,9 +434,9 @@ test('JSON: a missing required member is refused, a missing optional is null; a 
   for (const format of ['json', 'ijson'] as const) {
     assert.deepEqual(R.jsonToValue('{"id":1}', format), { id: 1, note: null, inner: null });
     assert.deepEqual(R.jsonToValue('{"id":1,"inner":{"a":2}}', format), { id: 1, note: null, inner: { a: 2, b: null } });
-    rejects(() => R.jsonToValue('{"note":"x"}', format), 'json', 'json: missing required member');
-    rejects(() => R.jsonToValue('{"id":1,"inner":{}}', format), 'json', 'json: missing required member');
-    rejects(() => R.jsonToPssz('{}', format), 'json', 'json: missing required member');
+    rejects(() => R.jsonToValue('{"note":"x"}', format), 'json', 'json: missing required member "id"');
+    rejects(() => R.jsonToValue('{"id":1,"inner":{}}', format), 'json', 'json: missing required member "a"');
+    rejects(() => R.jsonToPssz('{}', format), 'json', 'json: missing required member "id"');
   }
   // maxDynamicData caps the encoded PSSZ size, not the JSON text.
   const Capped = record('Capped', { a: u64, b: u64 }, { fixed: true, maxDynamicData: 16 });

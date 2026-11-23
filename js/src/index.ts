@@ -11,6 +11,7 @@ export {
   PsszError,
   PsszNaN,
   PsszNegativeZero,
+  PsszJsonText,
   PsszView,
   RecordView,
   TupleView,
@@ -66,7 +67,7 @@ export {
   u8, u16, u32, u64, u128, u256,
   i8, i16, i32, i64, i128,
   f32, f64,
-  utf8, boundedUtf8, rawString,
+  utf8, boundedUtf8, rawString, jsonValue,
   bytes, boundedBytes, fixedBytes,
   bitvector, bitlist,
   optional, list, boundedList, array, tuple, pair, map, set, nested, transparent,
@@ -89,6 +90,8 @@ export {
   type Bounded,
   type BoundedView,
   type AltOptions,
+  type VariantOptions,
+  type JsonValue,
   type RecordOptions,
   type LengthBoundOption,
   type IntText,
@@ -110,8 +113,13 @@ export {
   type TickType,
 } from './time.js';
 
-// The schema-upgrade check (the port of C++ psio::pssz_evolves_from)
-export { psszEvolvesFrom, type PsszCompatibility, type PsszTypeLike } from './pssz-evolve.js';
+// Schema comparison: may one type / method / interface / schema replace another, and are two
+// the same (the port of C++ psio::pssz_ir::evolves_from / equivalent)
+export {
+  psszEvolvesFrom, psszEquivalent,
+  type PsszCompatibility, type PsszCompatibilityCode, type PsszCompare, type PsszCompareOptions, type PsszComparable,
+  type PsszTypeLike,
+} from './pssz-evolve.js';
 
 export { toHex, fromHex } from './hex.js';
 

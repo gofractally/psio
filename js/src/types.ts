@@ -14,7 +14,7 @@
 // `pssz.ts` on that IR: one implementation of PSSZ, key, JSON and views.
 
 import {
-  IR_VERSION, PsszError, reservedCustomId, type BitsValue, type IrAnyType, type IrAttribute, type IrFunc, type IrInterface,
+  IR_VERSION, PsszError, PsszJsonText, reservedCustomId, type BitsValue, type IrAnyType, type IrAttribute, type IrFunc, type IrInterface,
   type IrMember, type IrSchema, type OrderTree, type PsszCustomHandler, type Some,
 } from './pssz-core.js';
 import type { JsonFormat } from './pssz-json.js';
@@ -89,7 +89,7 @@ type Shape =
   | { k: 'nested'; inner: AnyDef; deferred: boolean }
   // `position`: the bounds the type gives its member (it is then that bounded type).
   | { k: 'transparent'; name: string; inner: AnyDef; position?: Position }
-  | { k: 'variant'; alts: AltShape[] }
+  | { k: 'variant'; alts: AltShape[]; untagged?: boolean }
   | { k: 'record'; name: string; fields: FieldShape[]; options: RecordOptions }
   // A method's argument tuple; `uid`: its identity (C++: one type per method).
   // `named`: every parameter has a name (the fields are named "0", "1", ... otherwise).
@@ -181,6 +181,22 @@ export interface FieldOptions extends PositionOptions {
   ijsonInt?: IntText;
 }
 
+/** Options of `variant`. */
+export interface VariantOptions {
+  /**
+   * In text (JSON and I-JSON alike) the variant is the bare value of its
+   * alternative, and a reader picks the alternative by the kind of JSON
+   * value it finds (`docs/json.md` "Untagged variants"; C++
+   * `psio_is_untagged`, the Schema IR attribute `untagged`). The kinds two
+   * alternatives may be written as must not overlap — a variant of `u32`
+   * and `f64` (both numbers), of `u64` and `utf8` (a 64-bit integer may be
+   * a string) or of `utf8` and `bytes` is refused when a value is read or
+   * written. The bytes and the JavaScript value (`{ type, value }`) are
+   * those of any variant.
+   */
+  untagged?: boolean;
+}
+
 /** Options of a variant alternative (`alt`). */
 export interface AltOptions {
   /** The alternative's key in I-JSON (default: its name). */
@@ -260,7 +276,7 @@ function keyOf(def: AnyDef, depth = 0): string {
     case 'nested': out = `N${s.deferred ? 'D' : ''}(${k(s.inner)})`; break;
     case 'transparent': out = `W(${JSON.stringify(s.name)})`; break;
     case 'variant':
-      out = `V(${s.alts.map((a) => `${JSON.stringify([a.name, a.ijsonName ?? null])}${k(a.type)}`).join(',')})`;
+      out = `${s.untagged ? 'U' : ''}V(${s.alts.map((a) => `${JSON.stringify([a.name, a.ijsonName ?? null])}${k(a.type)}`).join(',')})`;
       break;
     case 'record': out = `R(${JSON.stringify(s.name)})`; break;
     case 'args': out = `G(${s.uid})`; break;
@@ -425,7 +441,7 @@ class Builder {
       case 'bounded': return ir('BoundedList', { type: this.insert(s.inner), maxCount: s.n });
       case 'array': return ir('Array', { type: this.insert(s.inner), len: s.n });
       case 'tuple': return ir('Tuple', { members: s.items.map((item) => this.insert(item)) });
-      case 'variant': return this.variant(s.alts, (alt) => this.insert(alt.type));
+      case 'variant': return this.variant(s.alts, (alt) => this.insert(alt.type), s.untagged);
       case 'record': {
         const members = s.fields.map((field) => this.member(field));
         this.keepOrders(s.fields, owner);
@@ -558,20 +574,20 @@ class Builder {
         return ir('Tuple', { members: s.items.map((item, i) => this.annotated(item, a.at!.get(String(i)))) });
       case 'variant':
         if (!a.at) return this.insert(def);
-        return this.variant(s.alts, (alt, i) => this.annotated(alt.type, a.at!.get(variantKey(s.alts, a.at!, i))));
+        return this.variant(s.alts, (alt, i) => this.annotated(alt.type, a.at!.get(variantKey(s.alts, a.at!, i))), s.untagged);
       default:
         return this.insert(def);
     }
   }
 
-  private variant(alts: AltShape[], type: (alt: AltShape, index: number) => IrAnyType): IrAnyType {
+  private variant(alts: AltShape[], type: (alt: AltShape, index: number) => IrAnyType, untagged = false): IrAnyType {
     return ir('Variant', {
       members: alts.map((alt, i): IrMember => ({
         name: alt.name,
         type: type(alt, i),
         attributes: alt.ijsonName === undefined ? [] : [attribute('ijsonName', alt.ijsonName)],
       })),
-      attributes: [],
+      attributes: untagged ? [attribute('untagged', '')] : [],
     });
   }
 
@@ -658,7 +674,7 @@ class Builder {
     const results = new Map<string, OrderTree>();
     const funcs = methods.map((m): IrFunc => {
       // `build_func`: the plain types of the parameters and of the result ...
-      const params = m.fields.map((f): IrMember => ({ name: m.named ? f.name : '', type: this.insert(f.type), attributes: [] }));
+      const params = m.fields.map((f, i): IrMember => ({ name: m.named ? f.name : String(i), type: this.insert(f.type), attributes: [] }));
       let result = m.result ? this.insert(m.result.type) : null;
       // ... then what the declaration says of them.
       m.fields.forEach((f, i) => {
@@ -882,6 +898,23 @@ const byteDef = <T>(id: 'utf8' | 'string' | 'hex', bound: 'list' | 'max' | 'exac
 
 /** Text: UTF-8 on the wire (validated), a `string` in JavaScript. C++ `utf8_string<>`, Rust `String`. */
 export const utf8 = byteDef<string>('utf8', 'list', 0n);
+/**
+ * Any JSON value (C++ `psio::json_value`): null, a boolean, a number, a
+ * string, an array, or an object. See `jsonValue`.
+ */
+export type JsonValue =
+  | null | boolean | number | bigint | string | PsszJsonText | JsonValue[] | { [key: string]: JsonValue };
+/**
+ * Any JSON value — a document whose shape is not known in advance (C++
+ * `psio::json_value`; Schema IR `Custom{ Custom{List<u8>, "utf8"}, "json" }`).
+ * In PSSZ it is a UTF-8 string holding the value's compact JSON text; in
+ * JSON / I-JSON it is that value, inline (not a string). In JavaScript it
+ * is the plain value: `decode` gives objects, arrays, strings, booleans,
+ * null and numbers (an integer beyond 2^53 as a `bigint`); `encode` takes
+ * the same, and a `PsszJsonText` where the exact text matters (`1.50`).
+ * `jsonToPssz` / `psszToJson` keep every number as it was written.
+ */
+export const jsonValue = new TypeDef<JsonValue>({ k: 'custom', id: 'json', inner: byteDef<string>('utf8', 'list', 0n) });
 /** Text of at most `max` UTF-8 bytes (C++ `utf8_string<N>`). */
 export const boundedUtf8 = (max: number) => byteDef<string>('utf8', 'max', count(max, 'a bound'));
 /**
@@ -913,7 +946,10 @@ function isDef(x: unknown, what: string): AnyDef {
  */
 export function optional<T, V>(
   inner: TypeDef<T, V>,
-): null extends T ? TypeDef<Some<T> | null, Some<V> | null> : TypeDef<T | null, V | null> {
+): null extends T
+  // (a JSON value is `null` or a value already: `optional(jsonValue)` reads `null` as empty)
+  ? (JsonValue extends T ? TypeDef<T, V> : TypeDef<Some<T> | null, Some<V> | null>)
+  : TypeDef<T | null, V | null> {
   return new TypeDef({ k: 'option', inner: isDef(inner, 'an optional payload') }) as never;
 }
 
@@ -1484,7 +1520,7 @@ export class Method<A, AV, R, RV> {
   constructor(
     private readonly owner: InterfaceDef<any>,
     readonly name: string,
-    /** The parameter names, in order (`""` for a parameter without one). */
+    /** The parameter names, in order; `"0"`, `"1"`, ... for a positional method (as in the Schema IR). */
     readonly params: readonly string[],
     /** Every parameter has a name: the arguments are an object. */
     readonly named: boolean,
@@ -1546,7 +1582,7 @@ export class InterfaceDef<M extends { [name: string]: MethodDef } = { [name: str
     const typed: { [name: string]: Method<any, any, any, any> } = {};
     for (const m of methods)
       setOwn(typed, m.name, new Method(
-        this, m.name, m.fields.map((f) => (m.named ? f.name : '')), m.named,
+        this, m.name, m.fields.map((f, i) => (m.named ? f.name : String(i))), m.named,
         m.maxDynamicData === undefined ? null : BigInt(m.maxDynamicData), m.maxFields ?? null, m.args,
       ));
     this.methods = typed as never;
@@ -1617,9 +1653,11 @@ export function defineInterface<M extends { [name: string]: MethodDef }>(
  * A tagged union: `{ type: 'Name', value }` in JavaScript. An alternative is
  * a definition, or `alt(definition, { ijsonName })`. For a C++
  * `std::variant` without labels the names are the indices: `{ 0: u32, 1: utf8 }`.
+ * `{ untagged: true }`: in text the bare value of the alternative
+ * (`VariantOptions`).
  */
 export function variant<C extends { [name: string]: TypeDef<any, any> | Alt<any, any> }>(
-  alternatives: C,
+  alternatives: C, options?: VariantOptions,
 ): TypeDef<
   { [K in keyof C]: { type: Name<K>; value: MemberValue<C[K]> } }[keyof C],
   { [K in keyof C]: VariantView<{ type: Name<K>; value: MemberValue<C[K]> }, Name<K>, MemberView<C[K]>> }[keyof C]
@@ -1636,7 +1674,11 @@ export function variant<C extends { [name: string]: TypeDef<any, any> | Alt<any,
     return { name, type: isDef(a, `alternative "${name}"`) };
   });
   if (alts.length === 0 || alts.length > 256) schemaError('typed schema: a variant has 1 to 256 alternatives');
-  return new TypeDef({ k: 'variant', alts });
+  if (options !== undefined && (typeof options !== 'object' || options === null))
+    schemaError('typed schema: variant options must be an object');
+  if (options?.untagged !== undefined && typeof options.untagged !== 'boolean')
+    schemaError('typed schema: untagged must be a boolean');
+  return new TypeDef(options?.untagged ? { k: 'variant', alts, untagged: true } : { k: 'variant', alts });
 }
 
 // ── Enums, time, custom types ───────────────────────────────────────────────

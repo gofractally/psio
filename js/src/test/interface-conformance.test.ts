@@ -93,7 +93,7 @@ test('interface-vectors.json: the typed declaration is the C++ Interface / Func 
   assert.deepEqual(attributes('transfer'), { maxFields: '8', maxDynamicData: '256' });
   assert.deepEqual(attributes('note'), { maxDynamicData: '64' });
   assert.deepEqual(attributes('names'), {});
-  assert.deepEqual(iface.funcs.find((f) => f.name === 'add')!.params.map((p) => p.name), ['', '']);
+  assert.deepEqual(iface.funcs.find((f) => f.name === 'add')!.params.map((p) => p.name), ['0', '1']);
   assert.equal(iface.funcs.find((f) => f.name === 'ping')!.result, null);
   // returns(max 4, element(utf8, max 16)) is the bounded type.
   assert.equal(iface.funcs.find((f) => f.name === 'names')!.result!.value.type, 'BoundedList');
@@ -119,7 +119,9 @@ test('interface-vectors.json: the methods manifest, typed and schema-driven', ()
     for (const [label, m] of [['typed', typed], ['schema', func]] as const) {
       const name = `${row.name} (${label})`;
       assert.equal(m.name, row.name, name);
-      assert.deepEqual(m.params.filter((p) => p !== ''), row.params, name);
+      // (`row.params`: the names the declaration lists; a positional method's are "0", "1", ...)
+      assert.deepEqual(m.params, row.named ? row.params : m.params.map((_, i) => String(i)), name);
+      if (!row.named) assert.deepEqual(row.params, [], name);
       assert.equal(m.named, row.named, name);
       assert.equal(m.maxDynamicData === null ? null : Number(m.maxDynamicData), row.max_dynamic_data, name);
       assert.equal(m.maxFields, row.max_fields, name);

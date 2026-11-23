@@ -8,6 +8,7 @@
 
 import { parseTimeSchemaId, reservedTimeId, timeFractionDigits, type TimeKind } from './time.js';
 import { encodeKey } from './pssz-key.js';
+import { jsonTextValue, jsonValueText } from './pssz-json.js';
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 
@@ -544,11 +545,30 @@ const WIRE_CUSTOM_IDS = new Set([
   'bool', 'char', 'string', 'utf8', 'hex', 'bitvector', 'bitlist', 'map', 'set', 'unknown',
 ]);
 /**
- * Ids a handler cannot be registered for: the binary-form ids, "box", and
- * the built-in presentations (the time ids of docs/time.md).
+ * Ids a handler cannot be registered for: the binary-form ids, "box",
+ * "json" (any JSON value, `jsonValue`) and the built-in presentations (the
+ * time ids of docs/time.md).
  */
 export function reservedCustomId(id: string): boolean {
-  return id === 'box' || WIRE_CUSTOM_IDS.has(id) || reservedTimeId(id);
+  return id === 'box' || id === 'json' || WIRE_CUSTOM_IDS.has(id) || reservedTimeId(id);
+}
+
+/**
+ * The exact text of a JSON value (C++ `psio::json_value` keeps a number as
+ * the token it was written as). A `json` node (`Custom{utf8, "json"}`,
+ * typed: `jsonValue`) decodes to a plain JavaScript value — `1.50` becomes
+ * `1.5`, an object's integer-like keys move to the front — which is the
+ * same JSON value but not always the same text. Where the text itself
+ * matters, encode a `PsszJsonText`: its text is checked to be one JSON
+ * value and stored compact (no whitespace, strings re-escaped, number
+ * tokens and member order unchanged). It may stand anywhere inside the
+ * value of a `json` node.
+ */
+export class PsszJsonText {
+  constructor(readonly text: string) {}
+  toString(): string {
+    return this.text;
+  }
 }
 
 // The node a reference is on the wire: wrappers ("box", text presentations)
@@ -566,6 +586,8 @@ function strip(ref: Node): { node: Node; boxed: boolean } {
 /** One member of a record / tuple / variant. */
 export class MemberInfo {
   private wire?: { node: Node; boxed: boolean };
+  /** Variant alternative: the schema states an `ijsonName` (it is not the default, the name). */
+  ijsonNameSet = false;
   constructor(
     readonly name: string,
     /** The member's type as written: wrappers included (the text walk). */
@@ -652,6 +674,15 @@ export class Node {
   }
   /** string: raw bytes (Custom "string"), not validated as UTF-8 ("utf8"). */
   raw = false;
+  /**
+   * string: a "json" node — the UTF-8 string holds the compact text of one
+   * JSON value, which is the node's JavaScript value and its text form.
+   */
+  json = false;
+  /** variant: the attribute `untagged` — in text the bare value of the alternative. */
+  untagged = false;
+  /** untagged variant: its alternatives are told apart by JSON kind (memo). */
+  untaggedOk?: boolean;
   /**
    * list: a map (`textChild` is the entry tuple [key, value]) or a set: the
    * entries are in strictly ascending order of the key bytes of the key.
@@ -798,6 +829,8 @@ export function checkAttributes(values: IrAttribute[], site: Site, caps: boolean
       continue;
     }
     if (site === 'variant_member' && name === 'ijsonName' && value !== null) continue;
+    // An untagged variant: the same bytes; in text the bare alternative.
+    if (site === 'variant' && name === 'untagged') continue;
     schemaError('pssz IR: unsupported schema constraint or annotation');
   }
 }
@@ -806,6 +839,8 @@ export function checkAttributes(values: IrAttribute[], site: Site, caps: boolean
 export interface DecodeContext {
   allowUnknown: boolean;
   hasUnknown: boolean;
+  /** A "json" node decodes to its stored text (a `PsszJsonText`), for the text walk. */
+  jsonText?: boolean;
 }
 
 function bytesError(message: string): never {
@@ -922,6 +957,14 @@ export function memberBoundAdmits(bound: LengthBound, node: Node, value: unknown
   // A nested member's bound counts the bytes of its encoding: checked where
   // the bytes exist (`nestedBoundAdmits`), not on the inner value.
   if (node.kind === 'nested') return true;
+  // A json value: the bytes of its text.
+  if (node.kind === 'string' && node.json) {
+    try {
+      return boundAdmits(bound, utf8Length(jsonValueText(value, valueError)));
+    } catch {
+      return true; // (not a JSON value: the encoder says so)
+    }
+  }
   if (typeof value === 'string') return boundAdmits(bound, utf8Length(value));
   if (value instanceof Uint8Array) return boundAdmits(bound, value.length);
   if (Array.isArray(value)) return boundAdmits(bound, value.length);
@@ -1236,15 +1279,18 @@ export class Codec {
           node.maxFields = maxFields;
           if (maxFields !== null && t.value.members.length > maxFields)
             schemaError('pssz IR: a record has more fields than its maxFields');
-        } else if (t.value.members.length === 0 || t.value.members.length > 256)
-          schemaError('pssz IR: invalid variant schema');
+        } else {
+          if (t.value.members.length === 0 || t.value.members.length > 256)
+            schemaError('pssz IR: invalid variant schema');
+          node.untagged = findAttribute(t.value.attributes, 'untagged') !== undefined;
+        }
         const seen = new Set<string>();
         for (const member of t.value.members) {
           if (seen.has(member.name)) schemaError('pssz IR: duplicate schema member');
           seen.add(member.name);
           checkAttributes(member.attributes, record ? 'record_member' : 'variant_member', this.automatic);
           const name = record ? undefined : findAttribute(member.attributes, 'ijsonName');
-          node.members.push(new MemberInfo(
+          const info = new MemberInfo(
             member.name,
             this.build(member.type, added, d),
             record ? parseLengthBound(member.attributes) : null,
@@ -1252,7 +1298,9 @@ export class Codec {
             record ? intForm(member.attributes, 'ijsonInt') : 'natural',
             name && name.value !== null ? name.value : member.name,
             orders?.get(member.name) ?? null,
-          ));
+          );
+          info.ijsonNameSet = !!name && name.value !== null;
+          node.members.push(info);
         }
         if (orders) for (const member of node.members) if (member.order) this.orderFits(member.text, member.order);
         node.byName = new Map(node.members.map((m, i) => [m.name, i]));
@@ -1275,6 +1323,7 @@ export class Codec {
           node.signed = ticks.value.isSigned;
           node.size = bits / 8;
           node.time = time;
+          node.id = id;
           node.timeDigits = time.point ? timeFractionDigits(time.num, time.den) : -1;
           break;
         }
@@ -1301,6 +1350,19 @@ export class Codec {
             node.countNum = node.count > BigInt(Number.MAX_SAFE_INTEGER) ? Infinity : Number(node.count);
           }
           node.textChild = this.build(list.value.type, added, d);
+          break;
+        }
+        if (id === 'json') {
+          // Any JSON value: a UTF-8 string holding its compact text. It
+          // sits directly on that string (named aliases only).
+          const text = this.resolve(t.value.type).value;
+          if (text.type !== 'Custom' || text.value.id !== 'utf8')
+            return schemaError('pssz IR: a json value must sit directly on a UTF-8 string');
+          const string = this.build(t.value.type, added, d);
+          node.kind = 'string';
+          node.json = true;
+          node.id = id;
+          node.textChild = string.textChild;
           break;
         }
         if (!WIRE_CUSTOM_IDS.has(id)) {
@@ -2257,7 +2319,8 @@ export class Codec {
       case 'string': {
         // A raw string is bytes; a JavaScript string stands for its UTF-8.
         let bytes: Uint8Array;
-        if (node.raw && value instanceof Uint8Array) bytes = new Uint8Array(value);
+        if (node.json) bytes = utf8Encode(jsonValueText(value, valueError));
+        else if (node.raw && value instanceof Uint8Array) bytes = new Uint8Array(value);
         else if (typeof value !== 'string')
           return valueError(node.raw ? 'pssz IR: raw string value (bytes or string) required' : 'pssz IR: string value required');
         else if (!wellFormed(value)) return valueError('pssz IR: string is not valid UTF-8');
@@ -2634,6 +2697,7 @@ export class Codec {
         this.boundBytes(node.child, size, bytesError);
         // "string" is raw bytes; "utf8" is validated.
         if (node.raw) return bytes.slice(start, end);
+        if (node.json) return jsonTextValue(bytes.subarray(start, end), ctx.jsonText === true, bytesError);
         if (!utf8Valid(bytes, start, end)) bytesError('pssz IR: string is not valid UTF-8');
         return utf8Decode(bytes, start, end);
       case 'hex':

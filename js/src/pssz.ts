@@ -16,6 +16,8 @@
 // tuple / pair -> array; map -> Map and set -> Set, in canonical (key) order
 // (any iterable of entries / elements is encoded); nested value -> the inner
 // value (its bytes, a Uint8Array, when nested bytes are opaque);
+// any JSON value (Custom "json" over a UTF-8 string) -> the plain JSON value
+// (PsszJsonText: its exact text);
 // variant -> { type, value }; optional -> null or the value
 // (an optional of an optional holds null or { some: inner }); bit types -> { bytes, bitCount }. A NaN
 // with a payload decodes to a PsszNaN so that it re-encodes bit for bit.
@@ -44,7 +46,7 @@ import { decodeKey, encodeKey, encodeKeyPrefix, keyPrefixUpperBound as upperBoun
 import { viewAt } from './pssz-view.js';
 
 export {
-  PsszError, PsszNaN, PsszNegativeZero, IR_VERSION,
+  PsszError, PsszNaN, PsszNegativeZero, PsszJsonText, IR_VERSION,
   type PsszErrorKind, type IrSchema, type IrAnyType, type IrMember, type IrAttribute, type IrTypeValue,
   type IrEnum, type IrEnumerator, type IrFunc, type IrResource, type IrInterface, type IrWorld, type IrUse,
   type CompactEnumerator, type PsszCustomHandler,
@@ -343,13 +345,18 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
-    return this.encode(this.jsonToValue(text, format));
+    // (a json value is carried as its text: every number as it was written)
+    return this.encode(guarded(() => this.admit(jsonToValue(this.codec, this.ref, format, text, true), 'json')) as T);
   }
 
   /** PSSZ bytes (fully validated) -> JSON / I-JSON text. */
   psszToJson(bytes: Uint8Array, format: JsonFormat = 'ijson', options?: PsszDecodeOptions): string {
     // The decode runs the handlers' checks; the writer need not repeat them.
-    return guarded(() => valueToJson(this.codec, this.ref, format, this.decode(bytes, options), false));
+    // A json value is carried as its text: every number as it was written.
+    return guarded(() => {
+      const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false, jsonText: true };
+      return valueToJson(this.codec, this.ref, format, this.read(asBytes(bytes), ctx), false);
+    });
   }
 }
 
@@ -362,7 +369,9 @@ function handlerMap(input: PsszCustomHandlers | undefined): Map<string, PsszCust
     if (reservedTimeId(id))
       throw new PsszError('schema', `pssz: custom id "${id}" is a built-in time presentation and takes no handler`);
     if (reservedCustomId(id))
-      throw new PsszError('schema', `pssz: custom id "${id}" is part of the binary form and takes no handler`);
+      throw new PsszError('schema', id === 'json'
+        ? 'pssz: custom id "json" is the built-in JSON value and takes no handler'
+        : `pssz: custom id "${id}" is part of the binary form and takes no handler`);
     if (typeof handler !== 'object' || handler === null)
       throw new PsszError('schema', `pssz: the handler of custom id "${id}" must be an object`);
     for (const member of ['toText', 'fromText', 'check'] as const)
@@ -431,6 +440,11 @@ export class PsszSchema {
       this.codecs.set(w, (codec = new Codec(this.ir, w, this.handlers, this.requireHandlers, options)));
     }
     return codec;
+  }
+
+  /** @internal The codec of the automatic profile (`psszEvolvesFrom`). */
+  get automatic(): Codec {
+    return this.codec(0);
   }
 
   /** From the PSSZ encoding of `psio::Schema` (how a schema travels). */
@@ -624,9 +638,14 @@ function checkFunc(codec: Codec, f: IrFunc): { maxFields: number | null; cap: bi
  */
 export class PsszMethod<A = unknown, R = unknown> {
   readonly name: string;
-  /** The parameter names, in order (`""` where the declaration gives none). */
+  /**
+   * The parameter names, in order, as the Schema IR has them: a function
+   * that does not name every parameter is positional and its parameters are
+   * named `"0"`, `"1"`, ... (a schema written before positional names
+   * existed has `""` there and is read the same).
+   */
   readonly params: readonly string[];
-  /** Every parameter has a name: the arguments are an object in text. */
+  /** Every parameter has a name of its own: the arguments are an object in text. */
   readonly named: boolean;
   /** The cap on the encoded arguments, or null. */
   readonly maxDynamicData: bigint | null;
@@ -644,7 +663,8 @@ export class PsszMethod<A = unknown, R = unknown> {
     const { maxFields, cap } = checkFunc(codec, func);
     this.name = func.name;
     this.params = func.params.map((p) => p.name);
-    this.named = func.params.every((p) => p.name !== '');
+    // (C++ `argument_list`: positional names are "0", "1", ...; no parameter is named so)
+    this.named = func.params.every((p, i) => p.name !== '' && p.name !== String(i));
     this.maxDynamicData = cap;
     this.maxFields = maxFields;
     const attributes: IrAttribute[] = [{ name: 'tuple', value: this.named ? 'named' : 'positional' }];
@@ -677,7 +697,10 @@ export class PsszInterface {
   private readonly byName: Map<string, PsszMethod>;
 
   /** @internal */
-  constructor(schema: PsszSchema, readonly ir: IrInterface, codec: Codec, results?: ReadonlyMap<string, OrderTree>) {
+  constructor(
+    /** @internal */ readonly schema: PsszSchema, readonly ir: IrInterface, /** @internal */ readonly codec: Codec,
+    results?: ReadonlyMap<string, OrderTree>,
+  ) {
     this.name = ir.name;
     this.methods = ir.funcs.map((f) => new PsszMethod(schema, f, codec, results?.get(f.name) ?? null));
     this.byName = new Map();

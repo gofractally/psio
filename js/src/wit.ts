@@ -129,7 +129,9 @@ class Emitter {
   }
 
   private func(fn: IrFunc): void {
-    const params = fn.params.map((p) => `${kebab(p.name)}: ${this.inline(p.type, 0)}`).join(', ');
+    // (C++ `schema_types::parameter_identifier`: a positional parameter "0" is `arg0`)
+    const identifier = (name: string) => (name === '' || (name[0] >= '0' && name[0] <= '9') ? `arg${name}` : name);
+    const params = fn.params.map((p) => `${kebab(identifier(p.name))}: ${this.inline(p.type, 0)}`).join(', ');
     this.line(`${kebab(fn.name)}: func(${params})${fn.result ? ` -> ${this.inline(fn.result, 0)}` : ''};`);
   }
 

@@ -11,6 +11,8 @@ import {
   type BitsValue, type Codec, type VariantValue,
 } from './pssz-core.js';
 
+import { jsonTextValue, jsonValueText } from './pssz-json.js';
+
 function valueError(message: string): never {
   throw new PsszError('value', message);
 }
@@ -161,7 +163,9 @@ function writeKey(codec: Codec, node: Node, value: unknown, out: Sink, n: number
     case 'string': {
       // A raw string is bytes; a JavaScript string stands for its UTF-8.
       let bytes: Uint8Array;
-      if (node.raw && value instanceof Uint8Array) bytes = value;
+      // (a json value: the key of its compact text)
+      if (node.json) bytes = utf8Encode(jsonValueText(value, valueError));
+      else if (node.raw && value instanceof Uint8Array) bytes = value;
       else if (typeof value !== 'string')
         return valueError(node.raw ? 'key: raw string value (bytes or string) required' : 'key: string value required');
       else if (!wellFormed(value)) return valueError('key: string is not valid UTF-8');
@@ -454,6 +458,7 @@ function readKey(codec: Codec, node: Node, src: Source, n: number): unknown {
       }
       // "string" is raw bytes; "utf8" is validated.
       if (node.raw) return bytes;
+      if (node.json) return jsonTextValue(bytes, false, bytesError);
       if (!utf8Valid(bytes, 0, bytes.length)) bytesError('key: string is not valid UTF-8');
       return utf8Decode(bytes, 0, bytes.length);
     }
