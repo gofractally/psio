@@ -14,7 +14,11 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Union
 
 from . import ir as _ir
-from ._core import MAX_TUPLE_ELEMENTS, TUPLE_SIZE, Binding, Codec, Ctx, Handler, Node, reserved_custom_id, strip
+from ._core import (
+    FUNC_FIELDS, FUNC_SIZE, MAX_TUPLE_ELEMENTS, MEMBER_BOUND, ROOT, Binding, Codec, Ctx, Handler, LengthBound, Node,
+    Order, Pos, _check_attributes, _parse_cap, _parse_length_bound, member_bound_admits, nested_member,
+    parse_max_fields, reserved_custom_id, strip,
+)
 from ._key import decode_key, encode_key, encode_key_prefix
 from ._time import reserved_time_id
 from .values import Variant
@@ -103,14 +107,16 @@ def _reading(run: Callable[[], Any], kind: Any = DecodeError) -> Any:
 class SchemaType:
     """One type of a schema under one width profile."""
 
-    __slots__ = ("_codec", "_ref", "_node", "_boxed", "_enc", "_dec", "python_type")
+    __slots__ = ("_codec", "_ref", "_node", "_boxed", "_enc", "_dec", "python_type", "_pos")
 
-    def __init__(self, codec: Codec, ref: Node, python_type: Any = None) -> None:
+    def __init__(self, codec: Codec, ref: Node, python_type: Any = None, pos: Pos = ROOT) -> None:
         self._codec = codec
         self._ref = ref
         self._node, self._boxed = strip(ref)
-        self._enc = codec.encoder(ref)
-        self._dec = codec.decoder(ref)
+        #: Where the value sits (spec 3.6): a root, unless a member-like bound gives a plain list its count.
+        self._pos = pos
+        self._enc = codec.encoder(ref, pos)
+        self._dec = codec.decoder(ref, pos)
         #: The Python type this codec reads and writes, when it came from the typed layer.
         self.python_type = python_type
 
@@ -119,7 +125,7 @@ class SchemaType:
         """The offset width of this type's own header / slots / offset table."""
         if self._boxed and self._codec.W == 0:
             return 4
-        return self._codec.width_of(self._node)
+        return self._codec.width_of(self._node, self._pos)
 
     @property
     def max_encoded_size(self) -> Optional[int]:
@@ -147,7 +153,7 @@ class SchemaType:
         if codec.W == 0 or node.cap is None:
             enc = self._enc
             return _writing(lambda: enc(value, 0))
-        return _writing(lambda: codec.encode_top(self._ref, value))
+        return _writing(lambda: codec.encode_top(self._ref, value, self._pos))
 
     def pssz_size(self, value: Any) -> int:
         """The size of the encoding of ``value``."""
@@ -158,10 +164,10 @@ class SchemaType:
         codec = self._codec
         if type(data) is trusted:
             raw = _as_bytes(data.data)
-            return codec.quietly(lambda: _reading(lambda: codec.decode_trusted(self._ref, raw)))
+            return codec.quietly(lambda: _reading(lambda: codec.decode_trusted(self._ref, raw, self._pos)))
         raw = _as_bytes(data)
         ctx = Ctx(not reject_unknown)
-        return _reading(lambda: codec.decode_top(self._ref, raw, ctx))
+        return _reading(lambda: self._decode_checked(raw, ctx))
 
     def from_pssz_trusted(self, data: Any) -> Any:
         return self.from_pssz(trusted(data))
@@ -174,10 +180,13 @@ class SchemaType:
         ctx = Ctx(not strict)
         try:
             raw = _as_bytes(data)
-            _reading(lambda: self._codec.decode_top(self._ref, raw, ctx))
+            _reading(lambda: self._decode_checked(raw, ctx))
         except PsioError as e:
             return Status(False, False, e)
         return Status(True, ctx.has_unknown)
+
+    def _decode_checked(self, raw: bytes, ctx: Ctx) -> Any:
+        return self._codec.decode_top(self._ref, raw, ctx, self._pos)
 
     def pssz_view(self, data: Any) -> Any:
         """Reads the value in place: see ``psio.view``."""
@@ -189,7 +198,7 @@ class SchemaType:
             def fail(m: str) -> Any:
                 raise DecodeError(m)
             codec.check_top_cap(self._node, len(raw), fail)
-            return view_at(codec, self._ref, raw, 0, len(raw), 0)
+            return view_at(codec, self._ref, raw, 0, len(raw), 0, self._pos)
         return _reading(run)
 
     # ── key ─────────────────────────────────────────────────────────────────
@@ -252,7 +261,7 @@ class SchemaType:
         """JSON / I-JSON text -> canonical PSSZ bytes."""
         from ._json import json_to_value
         value = _reading(lambda: json_to_value(self._codec, self._ref, format, text), JsonError)
-        return _writing(lambda: self._codec.encode_top(self._ref, value))
+        return _writing(lambda: self._codec.encode_top(self._ref, value, self._pos))
 
     def pssz_to_json(self, data: Any, format: str = "ijson", *, reject_unknown: bool = False) -> str:
         """PSSZ bytes (fully validated) -> JSON / I-JSON text."""
@@ -260,6 +269,81 @@ class SchemaType:
         value = self.from_pssz(data, reject_unknown=reject_unknown)
         # The decode ran the handlers' checks; the writer need not repeat them.
         return _writing(lambda: value_to_json(self._codec, self._ref, format, value, False))
+
+
+class ResultType(SchemaType):
+    """The codec of a method's result when ``returns`` says more than a type can: a length bound that is
+    an attribute (``exact`` / ``min``, the Func attribute ``result.lengthBound``) or an order constraint.
+
+    The bytes are those of the result's type; every writer and every checking
+    reader also checks the value, as they check a record member's.
+    """
+
+    __slots__ = ("_bound", "_order", "_nested")
+
+    def __init__(self, codec: Codec, ref: Node, bound: Optional[LengthBound], order: Optional[Order]) -> None:
+        limit = bound.limit if bound is not None and codec.automatic else None
+        super().__init__(codec, ref, None, (4, limit, False))
+        self._bound = bound
+        self._order = order
+        self._nested = bound is not None and nested_member(self._node)
+
+    def _verify(self, value: Any, fail: Callable[[str], Any], message: str = MEMBER_BOUND) -> None:
+        if self._bound is not None and not self._nested and not member_bound_admits(self._bound, self._node, value):
+            fail(message)
+        if self._order is not None:
+            self._codec._check_order(self._ref, value, self._order, fail)
+
+    def _bytes_admit(self, data: bytes, fail: Callable[[str], Any]) -> None:
+        # A nested value's bound counts the bytes of its encoding.
+        if self._nested and not self._codec.nested_bound_admits(self._bound, self._node, data, 0, len(data)):
+            fail(MEMBER_BOUND)
+
+    def to_pssz(self, value: Any) -> bytes:
+        def fail(message: str) -> Any:
+            raise EncodeError(message)
+        _writing(lambda: self._verify(value, fail))
+        out: bytes = super().to_pssz(value)
+        self._bytes_admit(out, fail)
+        return out
+
+    def _decode_checked(self, raw: bytes, ctx: Ctx) -> Any:
+        def fail(message: str) -> Any:
+            raise DecodeError(message)
+        value = super()._decode_checked(raw, ctx)
+        self._verify(value, fail)
+        self._bytes_admit(raw, fail)
+        return value
+
+    def to_key(self, value: Any) -> bytes:
+        def fail(message: str) -> Any:
+            raise EncodeError(message)
+        _writing(lambda: self._verify(value, fail, "key: member length bound violated"))
+        return super().to_key(value)
+
+    def from_key(self, data: Any) -> Any:
+        def fail(message: str) -> Any:
+            raise DecodeError(message)
+        value = super().from_key(data)
+        if type(data) is not trusted:
+            self._verify(value, fail, "key: member length bound violated")
+        return value
+
+    def to_json(self, value: Any, format: str = "json") -> str:
+        def fail(message: str) -> Any:
+            raise EncodeError(message)
+        _writing(lambda: self._verify(value, fail, "json: member length_bound violated"))
+        return super().to_json(value, format)
+
+    def from_json(self, text: Any, format: str = "json") -> Any:
+        def fail(message: str) -> Any:
+            raise JsonError(message)
+        value = super().from_json(text, format)
+        self._verify(value, fail, "json: member length_bound violated")
+        return value
+
+    def json_to_pssz(self, text: Any, format: str = "ijson") -> bytes:
+        return self.to_pssz(self.from_json(text, format))
 
 
 def _handler_map(handlers: Optional[Mapping[str, Any]]) -> Dict[str, Handler]:
@@ -354,23 +438,74 @@ class Schema:
     def method(self, interface: str, name: str, **options: Any) -> SchemaMethod:
         """A function of an interface of this schema (``interfaces[].funcs[]``), without Python classes.
 
-        The arguments are the extensible record of the parameters, with the
-        function's ``maxDynamicData`` cap: the bytes of the typed argument tuple.
+        The arguments are the argument list of the parameters (the bytes of
+        the typed argument tuple) with the function's ``maxDynamicData`` /
+        ``maxFields`` caps: named when every parameter has a name, else
+        positional (docs/json.md "Method arguments").  The result is encoded
+        as the type the function records for it.
         """
         for i in self.ir["interfaces"]:
             if i.get("name") != interface:
                 continue
             for f in i.get("funcs", ()):
-                if f.get("name") != name:
-                    continue
-                cap = [a for a in f.get("attributes", ()) if a.get("name") == "maxDynamicData"]
-                # The argument list is a tuple (docs/pssz-spec.md 8.4).
-                if len(f["params"]) > MAX_TUPLE_ELEMENTS:
-                    raise SchemaError(TUPLE_SIZE)
-                args = self.type({"Object": {"members": f["params"], "attributes": cap}}, **options)
-                result = None if f.get("result") is None else self.type(f["result"], **options)
-                return SchemaMethod(interface, name, [p["name"] for p in f["params"]], args, result)
+                if f.get("name") == name:
+                    return self._method(interface, f, options)
         raise SchemaError(f'pssz: schema has no function "{name}" of an interface "{interface}"')
+
+    def _method(self, interface: str, f: Mapping[str, Any], options: Mapping[str, Any],
+                result_order: Optional[Order] = None) -> SchemaMethod:
+        params = f["params"]
+        attributes = f.get("attributes", ())
+        # The argument list is a tuple (docs/pssz-spec.md 8.4, 16).
+        if len(params) > MAX_TUPLE_ELEMENTS:
+            raise SchemaError(FUNC_SIZE)
+        max_fields = parse_max_fields(attributes)
+        if max_fields is not None and len(params) > max_fields:
+            raise SchemaError(FUNC_FIELDS)
+        cap = _parse_cap(attributes)
+        names = [p["name"] for p in params]
+        named = all(names) and len(set(names)) == len(names)
+        own = [{"name": "tuple", "value": "named" if named else "positional"}]
+        own += [a for a in attributes if a.get("name") == "maxFields"]
+        own += [a for a in attributes if a.get("name") == "maxDynamicData"]
+        members = params if named else [{"name": str(k), "type": p["type"], "attributes": p["attributes"]}
+                                        for k, p in enumerate(params)]
+        args = self.type({"value": Variant("Object", {"members": members, "attributes": own})}, **options)
+        result = None
+        if f.get("result") is not None:
+            result = self._result(f["result"], attributes, result_order, **options)
+        return SchemaMethod(interface, f["name"], names if named else [], args, result, named, cap, max_fields)
+
+    def _result(self, type_ir: Any, attributes: Any, order: Optional[Order] = None, **options: Any) -> SchemaType:
+        """The codec of a function's result: its type, under the ``result.*`` attributes of the function."""
+        own = [{"name": a["name"][len("result."):], "value": a.get("value")} for a in attributes
+               if a.get("name", "").startswith("result.")]
+        plain = self.type(type_ir, **options)
+        if not own and order is None:
+            return plain
+        # (what a record member may carry: lengthBound, and the integer text forms)
+        _check_attributes(own, "record_member", True)
+        bound = _parse_length_bound(own)
+        if bound is None and order is None:
+            return plain
+        return ResultType(plain._codec, plain._ref, bound, order)
+
+    def validate(self) -> "Schema":
+        """Checks the whole schema, not only what one root reaches (C++ ``pssz_ir::validate_schema``).
+
+        Every named type, and every function of every interface: at most 255
+        parameters and no more than its ``maxFields``, well-formed parameter
+        and result types, well-formed caps.  Raises :class:`SchemaError`;
+        returns the schema.  A consumer that takes a schema from outside
+        calls this once before it dispatches through it.
+        """
+        _ir.check_ir_version(self.ir)
+        for name in self.names():
+            self.type(name)
+        for i in self.ir["interfaces"]:
+            for f in i.get("funcs", ()):
+                self._method(i.get("name", ""), f, {})
+        return self
 
     def type(self, root: Any, *, width: Width = "auto", handlers: Optional[Mapping[str, Any]] = None,
              require_handlers: Optional[bool] = None, nested_bytes: Optional[str] = None) -> SchemaType:
@@ -409,17 +544,26 @@ class Schema:
 class SchemaMethod:
     """A function of an interface recorded in a schema: the codecs of its arguments and of its result."""
 
-    __slots__ = ("interface", "name", "params", "args", "result")
+    __slots__ = ("interface", "name", "params", "args", "result", "named", "max_dynamic_data", "max_fields")
 
-    def __init__(self, interface: str, name: str, params: list, args: SchemaType,
-                 result: Optional[SchemaType]) -> None:
+    def __init__(self, interface: str, name: str, params: list, args: SchemaType, result: Optional[SchemaType],
+                 named: bool = True, max_dynamic_data: Optional[int] = None,
+                 max_fields: Optional[int] = None) -> None:
         self.interface = interface
         self.name = name
-        #: The parameter names, in order.
+        #: The parameter names, in order (empty when the function does not name every parameter).
         self.params = params
-        #: The argument tuple: a dict by parameter name in the dynamic model, an object in text.
+        #: Whether every parameter has a name: the arguments are then an object in text (a ``dict`` in
+        #: the dynamic model); otherwise the positional array (a ``tuple``).
+        self.named = named
+        #: The argument list.  Binary is always the positional tuple.
         self.args = args
+        #: The result, encoded as the type the function records for it; ``None`` when there is none.
         self.result = result
+        #: The cap of the encoded arguments (``maxDynamicData``), or None.
+        self.max_dynamic_data = max_dynamic_data
+        #: The most parameters the function will ever have (``maxFields``), or None.
+        self.max_fields = max_fields
 
 
 def key_prefix_upper_bound(prefix: Any) -> Optional[bytes]:

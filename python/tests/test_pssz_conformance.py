@@ -28,10 +28,10 @@ PSSZ_CLASSES = {
     "length-bound-overflow": 32, "box": 100, "bytes": 103, "zero-fixed": 100, "depth": 28, "nested": 252,
     "nested-unknown": 20, "nested-deferred": 24, "map-set": 266, "map-set-order": 352, "transparent": 160,
     "custom": 116, "invariant": 128, "annotated-bounds": 148, "method-args": 62, "list-width": 89,
-    "cap-implicit": 40,
+    "cap-implicit": 40, "transparent-bounds": 62,
 }
-TYPES = 357
-VECTORS = 6973
+TYPES = 360
+VECTORS = 7035
 NO_HANDLER = "pssz IR: no handler registered for a custom type"
 CAP = "pssz: encoded size exceeds maxDynamicData cap"
 KEY_BOUND = ("key: list exceeds its bound", "key: string exceeds its bound", "key: bytes exceed their bound")
@@ -109,11 +109,8 @@ class PsszFixture(unittest.TestCase):
                 self.assertEqual(t.width, row["auto_width"], f"auto width of {row['id']} ({label})")
             t = source.type(row["id"])
             self.assertEqual(t.max_dynamic_data, row["max_dynamic_data"], row["id"])
-            # (a method's argument tuple reports its cap as its size bound)
-            expected = row["max_dynamic_data"] if row["id"].startswith("tuple<") and "@cap=" in row["id"] \
-                else row["max_encoded_size"]
-            bound = t.max_dynamic_data if row["id"].startswith("tuple<") and "@cap=" in row["id"] else t.max_encoded_size
-            self.assertEqual(bound, expected, f"max_encoded_size of {row['id']}")
+            # (the inferred bound of spec 3.2: a cap, also an argument list's, is not part of it)
+            self.assertEqual(t.max_encoded_size, row["max_encoded_size"], f"max_encoded_size of {row['id']}")
             self.assertEqual(t.fixed_size is not None, row["fixed"], row["id"])
             self.assertEqual(t.fixed_size or 0, row["fixed_size"], row["id"])
             node = by_name[row["id"]]["value"]
@@ -466,7 +463,8 @@ class PsszFixture(unittest.TestCase):
         self.assertGreaterEqual(a["rawNonUtf8NoText"], 11)
         rejects = sum(1 for v in fx["vectors"] if v["expect"] == "reject" and v["class"] != "invariant")
         self.assertEqual(reasons_exact + reasons_family, rejects)
-        self.assertEqual(reasons_family, 140)
+        # (140, and the 16 length rejects of `transparent-bounds` whose bound is a member annotation in C++)
+        self.assertEqual(reasons_family, 156)
         self.assertEqual(len(fx["types"]), TYPES)
         self.assertEqual(len(fx["vectors"]), VECTORS)
 

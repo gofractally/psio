@@ -12,10 +12,10 @@ from test_pssz_conformance import sources
 import psio
 from psio import PsioError
 
-TYPES = 55
-VECTORS = 1147
-KINDS = {"value": 354, "key-order": 53, "text-accept": 56, "text-reject": 124, "key-reject": 141,
-         "key-prefix": 387, "key-order-bits": 5, "bound": 17, "key-invariant": 10}
+TYPES = 56
+VECTORS = 1164
+KINDS = {"value": 359, "key-order": 54, "text-accept": 56, "text-reject": 124, "key-reject": 148,
+         "key-prefix": 391, "key-order-bits": 5, "bound": 17, "key-invariant": 10}
 FORMATS = ("json", "ijson")
 
 

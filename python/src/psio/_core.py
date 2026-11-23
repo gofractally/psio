@@ -44,6 +44,12 @@ WIRE_CUSTOM_IDS = frozenset(("bool", "char", "string", "utf8", "hex", "bitvector
 #: A tuple (a pair, a method's argument list) has at most this many elements (spec 8.4).
 MAX_TUPLE_ELEMENTS = 255
 TUPLE_SIZE = "pssz IR: a tuple has more than 255 elements"
+#: A record has at most this many fields (spec 8.4); ``maxFields`` is at most this.
+MAX_RECORD_FIELDS = 255
+RECORD_SIZE = "pssz IR: a record has more than 255 fields"
+RECORD_FIELDS = "pssz IR: a record has more fields than its maxFields"
+FUNC_SIZE = "pssz IR: a function has more than 255 parameters"
+FUNC_FIELDS = "pssz IR: a function has more parameters than its maxFields"
 
 DEPTH = "pssz: max depth exceeded"
 CAP = "pssz: encoded size exceeds maxDynamicData cap"
@@ -167,7 +173,8 @@ class Node:
         "kind", "bits", "signed", "size", "text_child", "_wire_child", "raw", "assoc", "opaque", "key_nested",
         "inner", "id", "boxed", "handler", "count", "bounded", "exact", "members", "stable", "cap", "time",
         "time_digits", "enumerators", "by_name", "layout_memo", "empty_memo", "width", "bound_memo",
-        "fixed_payload_memo", "fields", "enc", "dec", "bind", "extra", "widths", "positions",
+        "fixed_payload_memo", "fields", "enc", "dec", "bind", "extra", "widths", "positions", "tuple", "max_fields",
+        "order",
     )
 
     def __init__(self) -> None:
@@ -194,6 +201,11 @@ class Node:
         self.members: List[Member] = []
         self.stable = False
         self.cap: Optional[int] = None
+        #: A record: its ``maxFields`` attribute, or None.
+        self.max_fields: Optional[int] = None
+        #: A record that is an argument list: "named" | "positional" (the ``tuple`` attribute); else None.
+        self.tuple: Optional[str] = None
+        self.order: Any = None
         self.time: Optional[TimeKind] = None
         self.time_digits = -1
         self.enumerators: Optional[List[Dict[str, Any]]] = None
@@ -251,10 +263,15 @@ class Binding:
     ``assoc`` builds a map / set from its entries in canonical order.
     """
 
-    __slots__ = ("pre", "post", "get", "make", "split", "join", "assoc", "deferred", "cls")
+    __slots__ = ("pre", "post", "get", "make", "split", "join", "assoc", "deferred", "cls", "order")
 
     def __init__(self, pre: Any = None, post: Any = None, get: Any = None, make: Any = None, split: Any = None,
-                 join: Any = None, assoc: Any = None, deferred: bool = False, cls: Any = None) -> None:
+                 join: Any = None, assoc: Any = None, deferred: bool = False, cls: Any = None,
+                 order: Any = None) -> None:
+        #: A record: per member index, the order constraints (``psio.sorted`` / ``unique`` /
+        #: ``unique_keys``) of the member and of the positions below it (``Order``).  They are the
+        #: typed declaration's: the Schema IR does not record them.
+        self.order = order
         self.pre = pre
         self.post = post
         self.get = get
@@ -264,6 +281,40 @@ class Binding:
         self.assoc = assoc
         self.deferred = deferred
         self.cls = cls
+
+
+class Order:
+    """The order constraints of one position (spec 3.5 "Order constraints"), and of the positions below it.
+
+    ``sorted``: ``None`` or ``(unique, ascending)``.  ``at`` is keyed by the
+    index of a tuple element / a variant alternative.
+    """
+
+    __slots__ = ("sorted", "unique_keys", "element", "keys", "values", "at")
+
+    def __init__(self) -> None:
+        self.sorted: Optional[Tuple[bool, bool]] = None
+        self.unique_keys = False
+        self.element: Optional[Order] = None
+        self.keys: Optional[Order] = None
+        self.values: Optional[Order] = None
+        self.at: Optional[Dict[int, Order]] = None
+
+    def same(self, other: Optional["Order"]) -> bool:
+        if other is None:
+            return False
+        if self.sorted != other.sorted or self.unique_keys != other.unique_keys:
+            return False
+        for a, b in ((self.element, other.element), (self.keys, other.keys), (self.values, other.values)):
+            if (a is None) != (b is None) or (a is not None and not a.same(b)):
+                return False
+        mine, theirs = self.at or {}, other.at or {}
+        return mine.keys() == theirs.keys() and all(mine[k].same(theirs[k]) for k in mine)
+
+
+SORTED = "sorted: elements are not in order"
+SORTED_UNIQUE = "sorted: elements are not in strictly ascending order"
+UNIQUE_KEYS = "unique_keys: two elements have the same key"
 
 
 def _find_attribute(attributes: Sequence[Mapping[str, Any]], name: str) -> Optional[Mapping[str, Any]]:
@@ -306,6 +357,17 @@ def _parse_cap(attributes: Sequence[Mapping[str, Any]]) -> Optional[int]:
     return n
 
 
+def parse_max_fields(attributes: Sequence[Mapping[str, Any]]) -> Optional[int]:
+    """``maxFields = "N"``: the most fields a record (parameters a function) will ever have; N <= 255 (spec 8.4, 16)."""
+    attribute = _find_attribute(attributes, "maxFields")
+    if attribute is None:
+        return None
+    n = None if attribute["value"] is None else _parse_u64(attribute["value"])
+    if n is None or n > MAX_RECORD_FIELDS:
+        _schema("pssz IR: malformed maxFields attribute")
+    return n
+
+
 def _int_form(attributes: Sequence[Mapping[str, Any]], name: str) -> str:
     a = _find_attribute(attributes, name)
     if a is not None and a["value"] is not None:
@@ -321,6 +383,11 @@ def _check_attributes(values: Sequence[Mapping[str, Any]], site: str, caps: bool
         if site == "record" and name == "definitionWillNotChange":
             continue
         if site == "record" and (name == "maxDynamicData" or (caps and name == "maxFields")):
+            continue
+        if site == "record" and name == "tuple":
+            # An argument list: the bytes of any record; its text form is _json's business.
+            if value not in ("named", "positional"):
+                _schema("pssz IR: malformed tuple attribute")
             continue
         if site == "record_member" and name in ("lengthBound", "jsonInt", "ijsonInt"):
             if name != "lengthBound" and value not in ("number", "string"):
@@ -730,6 +797,13 @@ class Codec:
             if record:
                 node.stable = kind == "Struct" or any(a["name"] == "definitionWillNotChange" for a in v["attributes"])
                 node.cap = _parse_cap(v["attributes"])
+                if len(v["members"]) > MAX_RECORD_FIELDS:
+                    _schema(RECORD_SIZE)
+                node.max_fields = parse_max_fields(v["attributes"])
+                if node.max_fields is not None and len(v["members"]) > node.max_fields:
+                    _schema(RECORD_FIELDS)
+                form = _find_attribute(v["attributes"], "tuple")
+                node.tuple = form["value"] if form is not None else None
             elif not v["members"] or len(v["members"]) > 256:
                 _schema("pssz IR: invalid variant schema")
             seen = set()
@@ -1145,16 +1219,16 @@ class Codec:
         if not self.automatic and root.cap is not None and size > root.cap:
             fail(CAP)
 
-    def encode_top(self, root: Node, value: Any) -> bytes:
-        out = self.encoder(root)(value, 0)
+    def encode_top(self, root: Node, value: Any, pos: Pos = ROOT) -> bytes:
+        out = self.encoder(root, pos)(value, 0)
         self.check_top_cap(strip(root)[0], len(out), _value)
         return out
 
-    def decode_top(self, root: Node, data: bytes, ctx: Ctx) -> Any:
+    def decode_top(self, root: Node, data: bytes, ctx: Ctx, pos: Pos = ROOT) -> Any:
         self.check_top_cap(strip(root)[0], len(data), _bytes)
-        return self.decoder(root)(data, 0, len(data), 0, ctx)
+        return self.decoder(root, pos)(data, 0, len(data), 0, ctx)
 
-    def decode_trusted(self, root: Node, data: bytes) -> Any:
+    def decode_trusted(self, root: Node, data: bytes, pos: Pos = ROOT) -> Any:
         """Reads bytes the caller states are a valid encoding (``psio.trusted``).
 
         What that statement makes unnecessary is not done: the length bounds
@@ -1163,7 +1237,7 @@ class Codec:
         are parsed as always, so nothing outside ``data`` is read, and bytes
         that cannot be parsed are still an error.
         """
-        return self.decoder(root, TRUSTED)(data, 0, len(data), 0, Ctx(True))
+        return self.decoder(root, (pos[0], pos[1], True))(data, 0, len(data), 0, Ctx(True))
 
     # ── Custom types: handlers on the binary entry points ────────────────────
 
@@ -1207,6 +1281,102 @@ class Codec:
             if e.kind == kind:
                 raise
             raise error_of(kind, e.reason, invariant=e.invariant) from None
+
+    # ── Order constraints (typed declarations only) ──────────────────────────
+
+    def check_order(self, node: Node, values: Sequence[Any], fail: Callable[[str], Any]) -> None:
+        """``psio.sorted`` / ``unique`` / ``unique_keys`` of a record's members against its member values."""
+        bind = node.bind
+        if bind is None or bind.order is None:
+            return
+        for index, order in bind.order:
+            self._check_order(node.members[index].text, values[index], order, fail)
+
+    def _plain(self, ref: Node, value: Any) -> Tuple[Node, Any, bool]:
+        """The wire node of ``ref`` and the value as the plain codec takes it, through wrappers and Option.
+
+        The last element is false for an absent optional.
+        """
+        node = ref
+        for _ in range(4096):
+            bind = node.bind
+            if bind is not None and bind.pre is not None:
+                value = bind.pre(value)
+            if node.kind == "custom":
+                node = node.inner
+            elif node.kind == "option":
+                if value is None:
+                    return node, None, False
+                if node.child.kind == "option":
+                    if type(value) is not Some:
+                        return node, None, False
+                    value = value.value
+                node = node.text_child
+            else:
+                break
+        return node, value, True
+
+    def _check_order(self, ref: Node, value: Any, order: Order, fail: Callable[[str], Any]) -> None:
+        from ._key import encode_key
+        node, value, present = self._plain(ref, value)
+        if not present:
+            return
+        k = node.kind
+        if k in ("list", "array") and not node.assoc:
+            if not isinstance(value, (list, tuple)):
+                return  # not a value of the type: the writer says so
+            child = node.text_child
+            if order.sorted is not None and len(value) > 1:
+                unique, ascending = order.sorted
+                previous = None
+                for item in value:
+                    key = encode_key(self, child, item)
+                    if previous is not None:
+                        wrong = (previous > key) if ascending else (previous < key)
+                        if wrong or (unique and previous == key):
+                            fail(SORTED_UNIQUE if unique else SORTED)
+                    previous = key
+            if order.unique_keys and len(value) > 1:
+                seen = set()
+                for item in value:
+                    element, plain, there = self._plain(child, item)
+                    if there and element.kind == "tuple" and element.members and isinstance(plain, (tuple, list)) \
+                            and len(plain) == len(element.members):
+                        key = encode_key(self, element.members[0].text, plain[0])
+                    else:
+                        key = encode_key(self, child, item)
+                    if key in seen:
+                        fail(UNIQUE_KEYS)
+                    seen.add(key)
+            if order.element is not None:
+                for item in value:
+                    self._check_order(child, item, order.element, fail)
+        elif k == "list":
+            items = assoc_items(value)
+            if items is None:
+                return
+            if node.assoc == "set":
+                if order.element is not None:
+                    for item in items:
+                        self._check_order(node.key_ref, item, order.element, fail)
+            else:
+                for entry in items:
+                    if not isinstance(entry, (tuple, list)) or len(entry) != 2:
+                        return
+                    if order.keys is not None:
+                        self._check_order(node.key_ref, entry[0], order.keys, fail)
+                    if order.values is not None:
+                        self._check_order(node.value_ref, entry[1], order.values, fail)
+        elif k == "tuple" and order.at:
+            if not isinstance(value, (tuple, list)) or len(value) != len(node.members):
+                return
+            for index, below in order.at.items():
+                self._check_order(node.members[index].text, value[index], below, fail)
+        elif k == "variant" and order.at:
+            index, payload = self.variant_splitter(node)(value)
+            below = order.at.get(index)
+            if below is not None:
+                self._check_order(node.members[index].text, payload, below, fail)
 
     # ── Maps and sets ────────────────────────────────────────────────────────
 
@@ -1515,8 +1685,16 @@ class Codec:
         by_name = node.by_name
         pairs = list(zip(names, optional))
 
+        arguments = node.tuple is not None
+        total = len(names)
+
         def get(value: Any) -> Sequence[Any]:
             if not isinstance(value, Mapping):
+                # An argument list is also the tuple of its arguments (trailing optional ones may be left out).
+                if arguments and isinstance(value, (tuple, list)):
+                    if len(value) > total or not all(optional[len(value):]):
+                        _value("pssz: argument count mismatch")
+                    return list(value) + [None] * (total - len(value))
                 _value("pssz: record value (a dict) required")
             out = []
             found = 0
@@ -1554,11 +1732,15 @@ class Codec:
         plan = list(zip(encs, fixed))
         all_fixed = all(fixed)
         nested_bound_admits = self.nested_bound_admits
+        ordered = node.bind is not None and node.bind.order is not None
+        check_order = self.check_order
 
         def enc(value: Any, n: int) -> bytes:
             if n > MAX_DEPTH:
                 _value(DEPTH)
             values = get(value)
+            if ordered:
+                check_order(node, values, _value)
             keep = count
             if not stable:
                 while keep and optional[keep - 1] and values[keep - 1] is None:
@@ -1847,6 +2029,8 @@ class Codec:
         bounds = [(i, m.bound, m.node, nested_member(m.node)) for i, m in enumerate(members) if m.bound is not None]
         record_spans = self.record_spans
         nested_bound_admits = self.nested_bound_admits
+        ordered = node.kind == "record" and node.bind is not None and node.bind.order is not None
+        check_order = self.check_order
 
         def read_trusted(data: bytes, start: int, end: int, n: int, ctx: Ctx) -> List[Any]:
             # The frame is parsed as always (every span lies inside this
@@ -1884,6 +2068,8 @@ class Codec:
                 # A nested member's bound counts its encoded bytes.
                 if nested and present[i] and not nested_bound_admits(bound, mnode, data, begins[i], ends[i]):
                     _bytes(MEMBER_BOUND)
+            if ordered:
+                check_order(node, values, _bytes)
             return values
         return read
 
@@ -2080,6 +2266,8 @@ class Codec:
         bind = node.bind
         make = bind.make if bind is not None and bind.make is not None else None
         names = [m.name for m in node.members]
+        # A positional argument list has no names: its value is the tuple.
+        positional = node.tuple == "positional"
 
         info = self.layout(node)
         zero = info[0] and info[1] == 0
@@ -2094,6 +2282,8 @@ class Codec:
             values = read(data, start, end, n, ctx)
             if make is not None:
                 return make(values)
+            if positional:
+                return tuple(values)
             return dict(zip(names, values))
         return dec
 
@@ -2289,7 +2479,7 @@ def _compose(chain: Sequence[Binding]) -> Binding:
             return value
         out.post = post if len(posts) > 1 else posts[0]
     for b in chain:
-        for name in ("get", "make", "split", "join", "assoc", "cls"):
+        for name in ("get", "make", "split", "join", "assoc", "cls", "order"):
             if getattr(b, name) is not None:
                 setattr(out, name, getattr(b, name))
         out.deferred = out.deferred or b.deferred

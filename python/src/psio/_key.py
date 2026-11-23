@@ -193,6 +193,7 @@ def write_key(codec: Codec, node: Node, value: Any, out: List[bytes], n: int) ->
             write_key(codec, m.text, item, out, n + 1)
     elif k == "record":
         values = codec.record_getter(node)(value)
+        codec.check_order(node, values, _value)
         for m, item in zip(node.members, values):
             _write_member(codec, m, item, out, n)
     elif k == "variant":
@@ -463,9 +464,12 @@ def _read_key(codec: Codec, node: Node, src: _Source, n: int) -> Any:
             if m.bound is not None and not member_bound_admits(m.bound, m.node, v):
                 _bytes("key: member length bound violated")
             values.append(v)
+        codec.check_order(node, values, _bytes)
         bind = node.bind
         if bind is not None and bind.make is not None:
             return bind.make(values)
+        if node.tuple == "positional":
+            return tuple(values)
         return dict(zip([m.name for m in node.members], values))
     if k == "variant":
         index = src.byte()

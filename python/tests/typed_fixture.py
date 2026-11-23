@@ -168,6 +168,21 @@ class TypedFixture:
             assoc = t.type == "Custom" and t.value["id"] in ("map", "set")
             if two_tuple or assoc:
                 groups.setdefault(spelling(m["type"]), []).append(name)
+        # A transparent type that bounds its member by annotation has a bounded
+        # type of its own (spec 5.10); one that holds a wrapper type shares
+        # that wrapper's node.  Two transparent types whose targets have one
+        # spelling are therefore one of each: all but the last are declared
+        # with member annotations (pssz fixture: Memo, then WrapMemo).
+        self.annotated: set = set()
+        targets: Dict[str, List[str]] = {}
+        for name in types_:
+            n = name["name"]
+            if n in self.transparents:
+                target = name["type"]["value"].value["type"]
+                if target.startswith("@") and spelling(self.by_name[target]["type"]):
+                    targets.setdefault(spelling(self.by_name[target]["type"]), []).append(n)
+        for same in targets.values():
+            self.annotated.update(same[:-1])
         for names in groups.values():
             # The entry of a map is the tuple; otherwise the first is.
             plain = next((n for n in names if n in map_entries), names[0])
@@ -234,6 +249,11 @@ class TypedFixture:
         k, b = v.type, v.value
         if k == "Type":
             # A transparent type: a named alias of its member's type.
+            if slot is not None and slot in self.annotated:
+                plain, specs = self.bounded(self.by_name[b["type"]]["type"])  # type: ignore[misc]
+                cls = dataclasses.make_dataclass(
+                    self.class_name(slot), [("text", Annotated[tuple([plain] + list(specs or []))])], frozen=True)
+                return psio.record(self.publish(slot, cls), name=slot, transparent=True)
             if slot is not None and slot in self.transparents:
                 return NewType(slot, self.hint(b["type"]))
             return self.hint(b["type"])
@@ -443,14 +463,28 @@ class TypedFixture:
         return psio.record(self.publish(slot, cls), **options)
 
     def argument_tuple(self, members: List[Any], attributes: List[Any]) -> Any:
-        cap = None
+        cap = max_fields = None
+        named = None
         for a in attributes:
-            if a["name"] != "maxDynamicData":
+            if a["name"] == "maxDynamicData":
+                cap = int(a["value"])
+            elif a["name"] == "maxFields":
+                max_fields = int(a["value"])
+            elif a["name"] == "tuple":
+                named = a["value"] == "named"
+            else:
                 raise Unsupported(f"argument tuple attribute {a['name']}")
-            cap = int(a["value"])
+        if named is None:
+            raise Unsupported("an interned Object that is not an argument list")
         if any(m["attributes"] for m in members):
             raise Unsupported("argument tuple member attributes")
-        return psio.arguments({attr: hint for attr, hint in self.members(members)}, max_dynamic_data=cap)
+        if not named:
+            if [m["name"] for m in members] != [str(i) for i in range(len(members))]:
+                raise Unsupported("a positional argument list whose members are not 0, 1, ...")
+            return psio.arguments([hint for _, hint in self.members(members)], max_dynamic_data=cap,
+                                  max_fields=max_fields)
+        return psio.arguments({attr: hint for attr, hint in self.members(members)}, max_dynamic_data=cap,
+                              max_fields=max_fields)
 
     def members(self, members: List[Any]) -> List[Tuple[str, Any]]:
         fields = []

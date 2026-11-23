@@ -34,7 +34,7 @@ from typing import (
 
 from . import annotations as A
 from . import ir as _ir
-from ._core import MAX_TUPLE_ELEMENTS, Binding, Handler, reserved_custom_id
+from ._core import MAX_RECORD_FIELDS, MAX_TUPLE_ELEMENTS, Binding, Handler, Order, reserved_custom_id
 from ._time import TimeKind, schema_id, unit_period
 from .errors import DecodeError, EncodeError, PsioError, SchemaError
 from .schema import Schema, SchemaType
@@ -89,11 +89,14 @@ class Shape:
 class Position:
     """The bounds of one position, as written."""
 
-    __slots__ = ("max", "utf8", "element", "keys", "values", "at")
+    __slots__ = ("max", "utf8", "element", "keys", "values", "at", "sorted", "unique_keys")
 
     def __init__(self) -> None:
         self.max: Optional[int] = None
         self.utf8 = False
+        #: Order constraints: checked on values, no part of the type (``empty`` does not count them).
+        self.sorted: Optional[A.SortedSpec] = None
+        self.unique_keys = False
         self.element: Optional[Position] = None
         self.keys: Optional[Position] = None
         self.values: Optional[Position] = None
@@ -103,11 +106,34 @@ class Position:
         return self.max is None and not self.utf8 and self.element is None and self.keys is None \
             and self.values is None and self.at is None
 
+    def below(self) -> List["Position"]:
+        return [p for p in (self.element, self.keys, self.values) if p is not None] + list((self.at or {}).values())
+
+    def ordered(self) -> bool:
+        """Whether an order constraint is written here or below."""
+        return self.sorted is not None or self.unique_keys or any(p.ordered() for p in self.below())
+
+    def bounds(self) -> Optional["Position"]:
+        """The bounds alone: this position without its order constraints, or None when nothing is left."""
+        out = Position()
+        out.max, out.utf8 = self.max, self.utf8
+        for name in ("element", "keys", "values"):
+            child = getattr(self, name)
+            if child is not None:
+                setattr(out, name, child.bounds())
+        if self.at is not None:
+            at = {key: child.bounds() for key, child in self.at.items()}
+            at = {key: child for key, child in at.items() if child is not None}
+            out.at = at or None
+        return None if out.empty() else out
+
 
 class FieldShape:
-    __slots__ = ("name", "attr", "type", "length_bound", "position", "json_int", "ijson_int")
+    __slots__ = ("name", "attr", "type", "length_bound", "position", "json_int", "ijson_int", "order")
 
     def __init__(self, name: str, attr: str, type: Shape) -> None:
+        #: ``psio.sorted`` / ``unique`` / ``unique_keys`` of the member and below it, or None.
+        self.order: Optional[Order] = None
         self.name = name
         self.attr = attr
         self.type = type
@@ -166,6 +192,8 @@ def key_of(shape: Shape, depth: int = 0) -> str:
         out = f"N{'D' if s.deferred else ''}({key_of(s.inner, d)})"
     elif k == "transparent":
         out = f"W({_json_text(s.name)})"
+    elif k == "annotated":
+        out = f"Y({_json_text(s.owner)})"
     elif k == "variant":
         out = "V(" + ",".join(f"{_json_text(a.name)}{_json_text(a.ijson_name or '')}{key_of(a.type, d)}"
                               for a in s.alts) + ")"
@@ -363,6 +391,10 @@ def _position(specs: Sequence[Any], where: str) -> Tuple[Position, List[Any]]:
             p.max = s.max
         elif isinstance(s, A.Utf8Spec):
             p.utf8 = True
+        elif isinstance(s, A.SortedSpec):
+            p.sorted = s
+        elif isinstance(s, A.UniqueKeysSpec):
+            p.unique_keys = True
         elif isinstance(s, A.PositionSpec):
             child, other = _position(s.specs, where)
             if other:
@@ -396,7 +428,7 @@ def shape_of(hint: Any) -> Shape:
     """
     base, meta = _split(hint)
     modifiers = [m for m in meta if not _is_wrapper(m) and not isinstance(
-        m, _IGNORED + (A.LengthSpec, A.BoundedSpec, A.PositionSpec, A.Utf8Spec))]
+        m, _IGNORED + (A.LengthSpec, A.BoundedSpec, A.PositionSpec, A.Utf8Spec, A.SortedSpec, A.UniqueKeysSpec))]
     shape = _core(base, modifiers, hint)
     pending: List[Any] = []
 
@@ -406,6 +438,10 @@ def shape_of(hint: Any) -> Shape:
         position, _ = _position([A.LengthSpec(max=m.max) if isinstance(m, A.BoundedSpec) else m for m in pending],
                                 repr(hint))
         pending.clear()
+        if position.ordered():
+            # (spec 5.10: an order constraint is not something a type can say)
+            _fail(f"psio: {hint!r}: sorted / unique / unique_keys belong to a record member or a method "
+                  "parameter (or a position below one), not to a type")
         return shape if position.empty() else _own(shape, position, repr(hint))
 
     for m in meta:
@@ -925,8 +961,23 @@ def _fields_of(shape: Shape) -> List[FieldShape]:
         out.append(_field(attr, hints[attr], shape.extra.get(attr, ()), f"{cls.__name__}.{attr}"))
     if len({f.name for f in out}) != len(out):
         _fail(f"psio: {cls.__name__}: two members have the same name")
+    _check_field_count(f"record {shape.name}", "fields", len(out), shape.options.max_fields)
     setattr(shape, "fields", out)
+    if shape.bind is not None:
+        shape.bind.order = _orders(out)
     return out
+
+
+def _check_field_count(what: str, noun: str, count: int, max_fields: Optional[int]) -> None:
+    """``max_fields`` and the 255-field limit (spec 8.4, 16): the declaration is where they are enforced."""
+    if count > MAX_RECORD_FIELDS:
+        _fail(f"psio: {what} has more than 255 {noun}")
+    if max_fields is None:
+        return
+    if type(max_fields) is not int or not 0 <= max_fields <= MAX_RECORD_FIELDS:
+        _fail(f"psio: {what}: max_fields is at most 255, the most {noun} it can have")
+    if count > max_fields:
+        _fail(f"psio: {what} has more {noun} than its max_fields ({count} > {max_fields})")
 
 
 def _field(attr: str, hint: Any, extra: Sequence[Any], where: str) -> FieldShape:
@@ -939,7 +990,8 @@ def _field(attr: str, hint: Any, extra: Sequence[Any], where: str) -> FieldShape
     for m in meta:
         if isinstance(m, A.NameSpec):
             name = m.name
-        elif isinstance(m, (A.LengthSpec, A.Utf8Spec, A.PositionSpec, A.IntFormSpec)):
+        elif isinstance(m, (A.LengthSpec, A.Utf8Spec, A.PositionSpec, A.IntFormSpec, A.SortedSpec,
+                            A.UniqueKeysSpec)):
             member_specs.append(m)
         else:
             type_specs.append(m)
@@ -966,9 +1018,58 @@ def _field(attr: str, hint: Any, extra: Sequence[Any], where: str) -> FieldShape
         field.length_bound = A.LengthSpec(attribute=any(isinstance(m, A.LengthSpec) and m.attribute
                                                         for m in member_specs), **bound)
     position, _ = _position(rest, where)
+    if position.ordered():
+        field.order = _order_of(field.type, position, where)
+        position = position.bounds() or Position()
     if not position.empty():
         field.position = position
     return field
+
+
+def _order_of(shape: Shape, a: Position, where: str) -> Optional[Order]:
+    """The order constraints of a position and below it, checked against the type they are written on."""
+    s = shape
+    while s.k == "option":
+        s = s.inner
+    k = s.k
+    out = Order()
+    if a.sorted is not None or a.unique_keys:
+        if k not in ("list", "bounded", "array"):
+            _fail(f"psio: {where}: sorted / unique / unique_keys constrain the elements of a list or an array; "
+                  "this position is neither (a map or a set is ordered by its type)")
+        if a.sorted is not None:
+            out.sorted = (a.sorted.unique, a.sorted.ascending)
+        out.unique_keys = a.unique_keys
+    if a.element is not None and a.element.ordered():
+        if k in ("list", "bounded", "array"):
+            out.element = _order_of(s.inner, a.element, f"{where}, element")
+        elif k == "assoc" and s.id == "set":
+            out.element = _order_of(s.entry, a.element, f"{where}, element")
+    if k == "assoc" and s.id == "map":
+        key, value = s.entry.items
+        if a.keys is not None and a.keys.ordered():
+            out.keys = _order_of(key, a.keys, f"{where}, keys")
+        if a.values is not None and a.values.ordered():
+            out.values = _order_of(value, a.values, f"{where}, values")
+    for name, child in (a.at or {}).items():
+        if not child.ordered():
+            continue
+        if k == "tuple" and name.isdigit() and int(name) < len(s.items):
+            index, below = int(name), s.items[int(name)]
+        elif k == "variant":
+            index = _alt_index(s.alts, name, where)
+            below = s.alts[index].type
+        else:
+            continue  # (`_check_position` names the misuse)
+        if out.at is None:
+            out.at = {}
+        out.at[index] = _order_of(below, child, f"{where}, at {name}")
+    return out
+
+
+def _orders(fields: Sequence[FieldShape]) -> Optional[List[Tuple[int, Order]]]:
+    out = [(i, f.order) for i, f in enumerate(fields) if f.order is not None]
+    return out or None
 
 
 def _inner_of(shape: Shape) -> Shape:
@@ -980,10 +1081,37 @@ def _inner_of(shape: Shape) -> Shape:
         extra = tuple(m for f in field for m in f.metadata.get("psio", ()))
         if extra:
             hint = Annotated[tuple([hint] + list(extra))]
-        setattr(shape, "inner", shape_of(hint))
-        if shape_of(hint).k == "option":
+        where = f"{shape.name}.{shape.attr}"
+        member = _field(shape.attr, hint, (), where)
+        bound = member.length_bound
+        if member.json_int or member.ijson_int or member.order is not None or (
+                bound is not None and (bound.min is not None or bound.exact is not None or bound.attribute)):
+            # (spec 5.10: what a type cannot say is the type's invariant)
+            _fail(f"psio: the member of transparent type {shape.name} takes utf8, max and position bounds; "
+                  "exact / min, sorted / unique and an integer text form are not a type's (state an invariant)")
+        if member.type.k == "option":
             _fail(f"psio: the member of transparent type {shape.name} is not an Optional "
                   "(hold an Optional of the wrapper)")
+        position = member.position
+        if bound is not None:
+            if position is None:
+                position = Position()
+            position.max = bound.max
+        if position is None:
+            setattr(shape, "inner", member.type)
+        else:
+            # Bounds on the member (spec 5.10): the wrapper is that bounded
+            # type, a type of its own that the alias refers to
+            # (schema_builder.hpp `transparent_member_of`).
+            target = member.type
+            if position.max is not None and not (
+                    (target.k == "bytes" and target.bound == "list") or target.k == "list"
+                    or (target.k == "assoc" and target.max is None)):
+                _fail(f"psio: {where}: max bounds a string, bytes, a list, a map or a set that has no bound "
+                      "of its own")
+            _check_position(target, position, True, f'member "{shape.attr}" of transparent type {shape.name}')
+            setattr(shape, "inner", Shape("annotated", inner=target, position=position, owner=shape.name,
+                                          py=target.py))
     return shape.inner
 
 
@@ -1204,10 +1332,19 @@ class Builder:
         if k == "args":
             # A Tuple node has no attributes, so the argument tuple is written
             # as the extensible record it is on the wire, which can carry the cap.
-            return _node("Object", {
-                "members": [self._parameter(f) for f in s.fields],
-                "attributes": [] if s.max_dynamic_data is None
-                else [_attribute("maxDynamicData", str(s.max_dynamic_data))]})
+            # Its `tuple` attribute says what it is in text (docs/json.md "Method
+            # arguments"): "named" (an object; the array is read too) or
+            # "positional" (the members are "0", "1", ...; the array only).
+            attributes = [_attribute("tuple", "named" if s.named else "positional")]
+            if s.max_fields is not None:
+                attributes.append(_attribute("maxFields", str(s.max_fields)))
+            if s.max_dynamic_data is not None:
+                attributes.append(_attribute("maxDynamicData", str(s.max_dynamic_data)))
+            members = [self._parameter(f) for f in s.fields]
+            if not s.named:
+                for i, m in enumerate(members):
+                    m["name"] = str(i)
+            return _node("Object", {"members": members, "attributes": attributes})
         if k == "enum":
             return _node("Enum", {"type": self._build(s.under),
                                   "members": [{"name": n, "value": v & 0xFFFFFFFFFFFFFFFF} for n, v in s.members]})
@@ -1231,6 +1368,12 @@ class Builder:
         if k == "transparent":
             # A named alias of the member's type.
             return self.insert(_inner_of(s))
+        if k == "annotated":
+            # The member of a transparent type under its bounds: the node the annotations describe.
+            out = self._annotated_node(s.inner, s.position, True)
+            if out["value"].type != "Type" and s.inner.bind is not None and name is not None:
+                self.bindings[name] = s.inner.bind
+            return out
         if k == "custom":
             self._bind_handler(s.id, s.handler)
             wire = s.inner
@@ -1463,28 +1606,53 @@ def _check_position(shape: Shape, a: Position, top: bool, where: str) -> None:
 _ARGS = iter(range(1, 1 << 62))
 
 
-def arguments(params: Any, *, max_dynamic_data: Optional[int] = None) -> Shape:
-    """The argument tuple of a method: the positional extensible record of its parameters (spec 16).
+def arguments(params: Any, *, max_dynamic_data: Optional[int] = None, max_fields: Optional[int] = None,
+              named: Optional[bool] = None) -> Shape:
+    """The argument list of a method: the positional extensible record of its parameters (spec 16).
 
     ``params`` maps each parameter name to its type hint, annotated like a
-    record member.  ``max_dynamic_data`` is the cap of the encoded arguments
-    and fixes the tuple's offset width for the method's lifetime.  A value is
-    the tuple of the arguments (a ``dict`` by parameter name is accepted);
-    its JSON is an object keyed by parameter name.
+    record member; a sequence of hints declares a list without names
+    (``psio.arguments([u32, u32])``; ``named=False`` says the same of a
+    mapping).  ``max_dynamic_data`` is the cap of the encoded arguments and
+    fixes the list's offset width for the method's lifetime; ``max_fields``
+    is the most parameters the method will ever have (at most 255).
+
+    A value is the tuple of the arguments (a ``dict`` by parameter name is
+    accepted for a named list).  Binary is always the positional tuple.  In
+    text (docs/json.md "Method arguments") a named list is written as an
+    object keyed by parameter name and read from that object or from the
+    positional array; a list without names is the array only.
     """
     def run() -> Shape:
-        fields = [_field(attr, hint, (), f'parameter "{attr}"') for attr, hint in dict(params).items()]
+        if isinstance(params, typing.Mapping):
+            items = list(params.items())
+            is_named = True if named is None else bool(named)
+        else:
+            items = [(f"p{i}", hint) for i, hint in enumerate(params)]
+            if named:
+                _fail("psio: a named argument list maps each parameter name to its type")
+            is_named = False
+        fields = [_field(attr, hint, (), f'parameter "{attr}"') for attr, hint in items]
+        if not is_named:
+            for i, f in enumerate(fields):
+                f.name = str(i)
         names = [f.name for f in fields]
         if len(set(names)) != len(names):
             _fail("psio: two parameters have the same name")
         # A method's argument list is a tuple (docs/pssz-spec.md 8.4).
         if len(fields) > MAX_TUPLE_ELEMENTS:
             _fail("psio: a method has more than 255 parameters")
+        _check_field_count("a method", "parameters", len(fields), max_fields)
+        if max_dynamic_data is not None and (type(max_dynamic_data) is not int or max_dynamic_data < 0):
+            _fail("psio: max_dynamic_data is a non-negative integer")
         count = len(fields)
-        out = Shape("args", uid=next(_ARGS), fields=fields, max_dynamic_data=max_dynamic_data, py=tuple)
+        out = Shape("args", uid=next(_ARGS), fields=fields, max_dynamic_data=max_dynamic_data,
+                    max_fields=max_fields, named=is_named, py=tuple)
 
         def get(value: Any) -> Any:
             if isinstance(value, dict):
+                if not is_named:
+                    raise EncodeError("pssz: the arguments of a method without parameter names are a tuple")
                 if len(value) > count or any(k not in names for k in value):
                     raise EncodeError("pssz: unknown argument name")
                 return [value.get(n) for n in names]
@@ -1492,7 +1660,7 @@ def arguments(params: Any, *, max_dynamic_data: Optional[int] = None) -> Shape:
                 raise EncodeError("pssz: the arguments are a tuple of at most the declared parameters")
             # Trailing optional parameters may be left out.
             return list(value) + [None] * (count - len(value)) if len(value) < count else value
-        out.bind = Binding(get=get, make=tuple)
+        out.bind = Binding(get=get, make=tuple, order=_orders(fields))
         return out
     return _declared(run)
 
@@ -1553,6 +1721,10 @@ def schema_of(*types: Any, names: Optional[Dict[str, Any]] = None, **options: An
             builder.insert_named(name, tp if isinstance(tp, Shape) else shape_of(tp))
         return builder.schema(**options)
     if len(types) == 1 and not names and not options:
+        declared = types[0].__dict__.get("__psio_interface__") if isinstance(types[0], type) else None
+        if declared is not None:
+            # A class declared with @psio.interface: the Interface / Func nodes and what they reach.
+            return cast(Schema, declared.schema())
         return _root(types[0])[0]
     return _declared(run)
 

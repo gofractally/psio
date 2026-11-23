@@ -787,8 +787,37 @@ class Reader:
         if exact and limit is not None and count != limit:
             c.fail("json: array has too few elements")
 
+    def _arguments(self, node: Node) -> Any:
+        """An argument list written as the positional array: exactly one element per parameter."""
+        c = self.c
+        members = node.members
+        ijson = self.ijson
+        values: List[Any] = []
+
+        def item() -> None:
+            m = members[len(values)]
+            value = self.read(m.text, m.ijson_int if ijson else m.json_int, 0)
+            if m.bound is not None and not member_bound_admits(m.bound, m.node, value):
+                c.fail("json: member length_bound violated")
+            values.append(value)
+        self._array_items(len(members), True, item)
+        return self._made(node, values)
+
+    def _made(self, node: Node, slots: List[Any]) -> Any:
+        self.codec.check_order(node, slots, self.c.fail)
+        bind = node.bind
+        if bind is not None and bind.make is not None:
+            return bind.make(slots)
+        if node.tuple == "positional":
+            return tuple(slots)
+        return dict(zip([m.name for m in node.members], slots))
+
     def _record(self, node: Node) -> Any:
         c = self.c
+        # An argument list (docs/json.md "Method arguments"): the object when
+        # every parameter has a name, and the positional array always.
+        if node.tuple is not None and (node.tuple == "positional" or c.kind() == "array"):
+            return self._arguments(node)
         c.begin_object()
         # One slot per member, filled as keys arrive; a repeated key overwrites
         # its slot (last one wins).
@@ -818,10 +847,7 @@ class Reader:
                 if members[i].node.kind != "option":
                     c.fail("json: missing required member")
                 slots[i] = None
-        bind = node.bind
-        if bind is not None and bind.make is not None:
-            return bind.make(slots)
-        return dict(zip([m.name for m in members], slots))
+        return self._made(node, slots)
 
     def _variant(self, node: Node) -> Any:
         c = self.c
@@ -1183,16 +1209,19 @@ class Writer:
             return _fail("pssz IR: string value required")
         if k == "record":
             values = self.codec.record_getter(node)(value)
-            out.append("{")
+            self.codec.check_order(node, values, _fail)
+            # A positional argument list is the array of its arguments.
+            named = node.tuple != "positional"
+            out.append("{" if named else "[")
             first = True
             ijson = self.ijson
             for m, field in zip(node.members, values):
                 if m.bound is not None and not member_bound_admits(m.bound, m.node, field):
                     _fail("json: member length_bound violated")
-                out.append(("" if first else ",") + quote(m.name, False) + ":")
+                out.append(("" if first else ",") + (quote(m.name, False) + ":" if named else ""))
                 first = False
                 self.write(m.text, field, m.ijson_int if ijson else m.json_int, n + 1)
-            out.append("}")
+            out.append("}" if named else "]")
             return
         if k in ("list", "array"):
             if node.assoc:

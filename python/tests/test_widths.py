@@ -345,7 +345,7 @@ class Widths(unittest.TestCase):
             self.assertEqual(t.to_pssz(walked(t.pssz_view(data))).hex(), row["hex"], row["name"])
             walks += 1
         print(f"pssz-vectors.json views walked element by element: {walks}")
-        self.assertEqual(walks, 4694)
+        self.assertEqual(walks, 4724)
 
     def test_position_cap(self) -> None:
         """Spec 3.6: the cap of the nearest enclosing record selects the widths beneath it, and nothing else."""
@@ -503,7 +503,9 @@ class Widths(unittest.TestCase):
         funcs = psio.Schema.from_pssz(psio.Schema(wide).to_pssz())
         with self.assertRaises(psio.SchemaError) as raised:
             funcs.method("i", "f")
-        self.assertEqual(raised.exception.reason, reason)
+        self.assertEqual(raised.exception.reason, "pssz IR: a function has more than 255 parameters")
+        with self.assertRaises(psio.SchemaError):
+            funcs.validate()
         self.assertEqual(len(funcs.method("i", "g").args.to_pssz({f"p{i}": i for i in range(255)})), 2 + 255)
         # A variant keeps its own limit: 256 alternatives.
         self.assertEqual(psio.Schema({"V": {"Variant": {f"a{i}": ir.U8 for i in range(256)}}}).type("V").width, 1)

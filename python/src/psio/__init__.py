@@ -18,7 +18,7 @@
     schema = psio.schema_of(Account)                 # the Schema IR C++ / Rust / JS agree on
 
 See ``python/README.md``.  (Import the names you use: ``from psio import *`` would shadow the builtins
-``max`` and ``min``.)
+``max``, ``min`` and ``sorted``.)
 """
 
 from . import ir
@@ -26,7 +26,8 @@ from .annotations import (  # noqa: F401
     Annotated, DurationMs, DurationNs, DurationSec, DurationUs, RawString, TimePointMs, TimePointNs,
     TimePointSec, TimePointUs, alt, array, at, bitlist, bitvector, bounded, boxed, char, custom, duration, element,
     exact, f32, f64, i8, i16, i32, i64, i128, identity, ijson_number, ijson_string, json_number, json_string,
-    keys, length, max, min, monotonic, name, nested, time_point, u8, u16, u32, u64, u128, u256, utf8, values,
+    keys, length, max, min, monotonic, name, nested, sorted, time_point, u8, u16, u32, u64, u128, u256, unique,
+    unique_keys, utf8, values,
 )
 from .api import (  # noqa: F401
     from_ijson, from_json, from_key, from_pssz, from_pssz_trusted, json_to_pssz, key_prefix, key_size,
@@ -36,6 +37,7 @@ from .api import (  # noqa: F401
 from .errors import DecodeError, EncodeError, InternalError, JsonError, PsioError, SchemaError  # noqa: F401
 from .interface import Interface, Method, interface, interface_of, method  # noqa: F401
 from .ir import IR_VERSION  # noqa: F401
+from ._names import is_hash_name, method_to_number, name_to_number, number_to_method, number_to_name  # noqa: F401
 from .schema import Handler, Schema, SchemaMethod, SchemaType, Status, key_prefix_upper_bound, trusted  # noqa: F401
 from ._time import time_point_from_iso, time_point_to_iso  # noqa: F401
 from .typed import arguments, codec, from_text, invariant, record, schema_of, to_text, transparent  # noqa: F401
@@ -58,4 +60,6 @@ __all__ = [
     "pssz_size", "pssz_to_json", "pssz_view", "record", "schema_of", "time_point", "time_point_from_iso",
     "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
     "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
+    "sorted", "unique", "unique_keys", "is_hash_name", "method_to_number", "name_to_number", "number_to_method",
+    "number_to_name",
 ]

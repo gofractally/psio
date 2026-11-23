@@ -32,7 +32,7 @@ __all__ = [
     "RawString", "length", "exact", "element", "keys", "values", "at", "utf8", "bounded", "array", "bitvector",
     "bitlist", "nested", "boxed", "identity", "name", "alt", "custom", "json_number", "json_string", "ijson_number",
     "ijson_string", "time_point", "duration", "monotonic", "TimePointSec", "TimePointMs", "TimePointUs",
-    "TimePointNs", "DurationSec", "DurationMs", "DurationUs", "DurationNs",
+    "TimePointNs", "DurationSec", "DurationMs", "DurationUs", "DurationNs", "sorted", "unique", "unique_keys",
 ]
 
 
@@ -153,6 +153,36 @@ class Utf8Spec(Spec):
 
 #: On a :data:`RawString` member: it is UTF-8 text (C++ ``attr(f, utf8)``).  In Python write ``str``.
 utf8 = Utf8Spec()
+
+
+@dataclass(frozen=True)
+class SortedSpec(Spec):
+    """The elements of a list or an array are in order (spec 3.5 "Order constraints")."""
+
+    unique: bool = False
+    ascending: bool = True
+
+    def __call__(self, *, descending: bool = False) -> "SortedSpec":
+        """``psio.sorted(descending=True)``: the same order, descending."""
+        return SortedSpec(self.unique, not descending)
+
+
+@dataclass(frozen=True)
+class UniqueKeysSpec(Spec):
+    pass
+
+
+#: The elements of the list / array are in non-descending order: ``Annotated[list[u32], psio.sorted]``.
+#: Order and equality are those of maps and sets: bytewise comparison of the elements' ``key``
+#: encodings.  Every writer refuses a value that is not in order and every checking reader rejects
+#: its bytes or text.  No byte, width or bound changes, and the Schema IR does not record it (a
+#: schema-driven reader does not know it).  On a record member, a method parameter or a position
+#: below one (``psio.element(psio.sorted)``).
+sorted = SortedSpec()  # noqa: A001 - the vocabulary's name
+#: The elements are in strictly ascending order (no two are equal).
+unique = SortedSpec(unique=True)
+#: No two elements have the same key: the element itself, or element 0 of a tuple element.  No order is required.
+unique_keys = UniqueKeysSpec()
 
 
 @dataclass(frozen=True)
