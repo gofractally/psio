@@ -282,3 +282,35 @@ target_link_libraries(psio_bench_graphql PRIVATE psio)
 target_include_directories(psio_bench_graphql PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_features(psio_bench_graphql PRIVATE cxx_std_23)
 target_compile_options(psio_bench_graphql PRIVATE -O3 -DNDEBUG)
+
+# View frames head to head: the first-generation library's pointer-based
+# view<T, Fmt> (and its Cap'n Proto / FlatBuffers views) against this
+# library's span-based view<T, Fmt, Store> and against the official libcapnp
+# / flatbuffers readers, on the same shapes and operations. Built only when
+# the first generation's include root is given; nothing else depends on it.
+#   -DPSIO_BENCH_GEN1_INCLUDE=<psio1 checkout>/cpp/include
+set(PSIO_BENCH_GEN1_INCLUDE ""
+   CACHE PATH "Include root of the first-generation library (psio1/view.hpp); empty: not built")
+if(PSIO_BENCH_GEN1_INCLUDE AND EXISTS "${PSIO_BENCH_GEN1_INCLUDE}/psio1/view.hpp")
+   add_executable(psio_bench_view_generations bench_view_generations.cpp)
+   target_link_libraries(psio_bench_view_generations PRIVATE psio)
+   # After psio's own include directories, and as a system directory: the
+   # old headers are read-only and are not held to this tree's warnings.
+   target_include_directories(psio_bench_view_generations SYSTEM PRIVATE
+      ${PSIO_BENCH_GEN1_INCLUDE})
+   target_include_directories(psio_bench_view_generations PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}/adapters)
+   target_compile_features(psio_bench_view_generations PRIVATE cxx_std_23)
+   target_compile_options(psio_bench_view_generations PRIVATE -O3 -DNDEBUG)
+   if(CapnProto_FOUND)
+      target_sources(psio_bench_view_generations PRIVATE ${CP_GEN_CC})
+      target_link_libraries(psio_bench_view_generations PRIVATE CapnProto::capnp)
+      target_compile_definitions(psio_bench_view_generations PRIVATE PSIO_HAVE_CAPNP=1)
+   endif()
+   if(flatbuffers_FOUND)
+      add_dependencies(psio_bench_view_generations psio_bench_fb_gen)
+      target_link_libraries(psio_bench_view_generations PRIVATE flatbuffers::flatbuffers)
+      target_compile_definitions(psio_bench_view_generations PRIVATE PSIO_HAVE_FLATBUF=1)
+   endif()
+   message(STATUS "psio_bench_view_generations: first generation found — enabled")
+endif()
