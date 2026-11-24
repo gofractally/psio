@@ -173,6 +173,29 @@ languages can represent.
 5. Run the new independent checks on Linux/x86_64 and supported toolchain/runtime
    versions; only local macOS/ARM64 results have been observed so far. Add sustained
    sanitizer/fuzz jobs across all formats before accepting untrusted inputs.
+   Toolchain notes from the first Linux pass (x86-64, clang 20.1.8, libstdc++ 15,
+   glibc 2.42), each with a check in `cpp/tests`:
+   - The standard integer types are named by width: `long`, `long long`,
+     `std::size_t`, `std::ptrdiff_t` are `int64` / `uint64` on a 64-bit platform
+     whichever of them `std::int64_t` is there (`long` on LP64 Linux, `long long`
+     on macOS). `psio_integer_alias_tests` pins names, variant labels, schemas and
+     bytes for every spelling. Still keyed on the fixed-width typedefs alone, so
+     that the leftover type is not supported there (`wit.hpp` refuses it at
+     compile time): `wit.hpp` / `wit_abi.hpp` / `wit_constexpr.hpp`, pjson typed
+     arrays, `dynamic_value.hpp`, `schema.hpp`.
+   - clang up to 20 with libstdc++ 15 cannot order two
+     `std::optional<std::tuple<...>>` (a hard error inside the library's
+     `operator<=>`), so `<=>` on a view of one is not usable there; `==` is.
+   - With libstdc++, PSIO needs the GNU dialect (`-std=gnu++23`, CMake's default)
+     wherever a 128-bit integer goes through JSON text: under `-std=c++23`
+     libstdc++ has no `std::to_chars` / `std::from_chars` for `__int128`.
+   - `conformance/time-key-vectors.json` is generated with `std::sort` over
+     values that include both zeros of a float; which of two equal elements comes
+     first is the library's choice, and the fixture records libc++'s. The
+     regeneration check (`psio_time_key_conformance_regen`) therefore fails with
+     libstdc++ on one row (`key-order/tuple<f32,f64>/mixed`), although every
+     consumer of the fixture passes. Making the emitter deterministic changes
+     that row and is pending a decision to regenerate the fixture.
 6. Supply the intended first-party license/notice files (manifests currently say
    MIT), review third-party notices, freeze versions and publish immutable tags.
    No artifacts have been published by this work.
