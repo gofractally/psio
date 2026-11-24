@@ -5,6 +5,7 @@
 // bindings on tuple / pair views, and the conversions that borrow.
 
 #include <psio/pssz.hpp>
+#include <psio/mutable_view.hpp>
 #include <psio/pssz_view.hpp>
 
 #include <catch.hpp>
@@ -64,7 +65,35 @@ namespace surf
       { a == b } -> std::same_as<bool>;
    };
 
+   template <typename A, typename B>
+   concept orders_with = requires(const A& a, const B& b) { a <=> b; };
+   template <typename A, typename B>
+   concept less_than = requires(const A& a, const B& b) { a < b; };
+
+   // A type nothing compares with, and one that takes any right-hand side
+   // of `<=` (as a test framework's expression decomposer does): `x <= view`
+   // has the rewritten candidate `view <=> x`.
+   struct Unrelated
+   {
+   };
+   struct TakesAnything
+   {
+      template <typename T>
+      int operator<=(const T&) const
+      {
+         return 1;
+      }
+   };
+
    using Args = std::tuple<std::int32_t, std::vector<char>, std::uint32_t>;
+   using Wide = std::tuple<std::int64_t, std::vector<char>, std::uint64_t>;
+   struct TupleRow
+   {
+      std::optional<std::tuple<std::int32_t, std::uint32_t>> pair;
+      std::tuple<std::int32_t, std::uint32_t>                both;
+      std::string                                            name;
+   };
+   PSIO_REFLECT(TupleRow, pair, both, name)
    using Var  = std::variant<std::uint32_t, std::string, Act>;
    struct Row
    {
@@ -256,6 +285,68 @@ TEST_CASE("comparison: a view with a value and with another view (probe g2b)",
    STATIC_REQUIRE(compares_with<psio::pssz_view<Act>, Act>);
    STATIC_REQUIRE_FALSE(std::equality_comparable<psio::pssz_view<Opaque>>);
    STATIC_REQUIRE_FALSE(compares_with<psio::pssz_view<Opaque>, Opaque>);
+
+   // A view of a tuple against a type a tuple does not compare with is a
+   // "no", not an error: the comparison is not formed. (libstdc++ 15's
+   // tuple-like `<=>` names std::tuple_size<U> in a default template
+   // argument, a hard error under clang 20 for a U that is no tuple.)
+   {
+      using TV = psio::pssz_view<Args>;
+      using OV = decltype(std::declval<psio::pssz_view<TupleRow>>().pair());
+      using SV = decltype(std::declval<psio::pssz_view<TupleRow>>().name());
+      STATIC_REQUIRE_FALSE(compares_with<TV, Unrelated>);
+      STATIC_REQUIRE_FALSE(compares_with<Unrelated, TV>);
+      STATIC_REQUIRE_FALSE(orders_with<TV, Unrelated>);
+      STATIC_REQUIRE_FALSE(orders_with<Unrelated, TV>);
+      STATIC_REQUIRE_FALSE(less_than<TV, Unrelated>);
+      STATIC_REQUIRE_FALSE(orders_with<TV, TakesAnything>);
+      STATIC_REQUIRE_FALSE(orders_with<TV, int>);
+      STATIC_REQUIRE_FALSE(orders_with<TV, std::string>);
+      STATIC_REQUIRE_FALSE(compares_with<TV, std::string_view>);
+      // (an optional of a tuple, and a tuple view against another view)
+      STATIC_REQUIRE_FALSE(compares_with<OV, Unrelated>);
+      STATIC_REQUIRE_FALSE(orders_with<OV, Unrelated>);
+      STATIC_REQUIRE_FALSE(orders_with<OV, int>);
+      STATIC_REQUIRE_FALSE(orders_with<TV, SV>);
+      STATIC_REQUIRE_FALSE(orders_with<SV, TV>);
+      STATIC_REQUIRE_FALSE(compares_with<TV, SV>);
+      STATIC_REQUIRE_FALSE(compares_with<psio::mutable_view<Args, psio::pssz>, Unrelated>);
+      // What a tuple does compare with still compares.
+      STATIC_REQUIRE(compares_with<TV, Args>);
+      STATIC_REQUIRE(compares_with<Args, TV>);
+      STATIC_REQUIRE(orders_with<TV, Args>);
+      STATIC_REQUIRE(orders_with<TV, TV>);
+      STATIC_REQUIRE(compares_with<TV, Wide>);
+      STATIC_REQUIRE(orders_with<TV, Wide>);
+      STATIC_REQUIRE(orders_with<TV, psio::pssz_view<Wide>>);
+      STATIC_REQUIRE(compares_with<OV, std::nullopt_t>);
+      STATIC_REQUIRE(compares_with<OV, std::tuple<std::int32_t, std::uint32_t>>);
+      STATIC_REQUIRE(compares_with<OV, OV>);
+      STATIC_REQUIRE(compares_with<TV, std::optional<Args>>);
+#if !(defined(__GLIBCXX__) && defined(__clang__) && __clang_major__ < 21)
+      // (clang 20 with libstdc++ 15 cannot order two std::optional<std::tuple>
+      // at all — the error above, inside the library's own optional `<=>`.)
+      STATIC_REQUIRE(orders_with<OV, std::optional<std::tuple<std::int32_t, std::uint32_t>>>);
+      STATIC_REQUIRE(orders_with<OV, OV>);
+#endif
+      // `x <= view` for an x that takes anything resolves to x's operator.
+      STATIC_REQUIRE(requires(const TakesAnything& x, const TV& t) {
+         { x <= t } -> std::same_as<int>;
+      });
+
+      auto            tb = psio::to_pssz(Args{1, {'a'}, 2});
+      TV              tv{tb};
+      // (parenthesised: `decomposed-lhs < std::tuple` is itself the
+      // tuple-against-unrelated-type comparison, in the test framework)
+      REQUIRE((tv < Args{1, {'b'}, 0}));
+      REQUIRE((tv <= Wide{1, {'a'}, 2}));
+      REQUIRE(std::is_eq(tv <=> tv));
+      auto rowb = psio::to_pssz(TupleRow{std::tuple{std::int32_t{1}, std::uint32_t{2}}, {3, 4}, "n"});
+      psio::pssz_view<TupleRow> row{rowb};
+      REQUIRE(row.pair() == std::tuple{std::int32_t{1}, std::uint32_t{2}});
+      REQUIRE(row.pair() != std::nullopt);
+      REQUIRE((row.both() < std::tuple{std::int32_t{3}, std::uint32_t{5}}));
+   }
 
    // The const spelling compares too, and with the plain one.
    psio::view<const Act, psio::pssz> cv{b};

@@ -80,6 +80,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -1448,8 +1449,75 @@ namespace psio {
    // and strings are compared in place; anything else through unpack(),
    // which allocates what the value type allocates. `<=>` exists where the
    // value type has it.
+   //
+   // The operand is constrained before `value == u` / `value <=> u` is ever
+   // formed. std::tuple compares with a tuple or a tuple-like type and with
+   // nothing else, and asking a standard library whether it compares with
+   // an unrelated type is not always a clean "no": libstdc++ 15 names
+   // std::tuple_size<U> in a default template argument of its tuple-like
+   // `<=>`, which a compiler that substitutes it before checking the
+   // constraints (clang up to 20) reports as an error, not as a failed
+   // requirement. So an unrelated operand must be turned away here: every
+   // `x <= view` with a rewritten `<=>` candidate reaches these operators
+   // (a test framework's `REQUIRE(a <= b)` decomposer is such an x).
+   namespace detail {
+      template <typename U>
+      concept has_tuple_size = requires { std::tuple_size<U>::value; };
+
+      template <typename T>
+      inline constexpr bool cmp_is_tuple_v = false;
+      template <typename... Ts>
+      inline constexpr bool cmp_is_tuple_v<std::tuple<Ts...>> = true;
+      template <typename T>
+      struct cmp_optional_value
+      {
+      };
+      template <typename T>
+      struct cmp_optional_value<std::optional<T>>
+      {
+         using type = T;
+      };
+      template <typename T>
+      concept cmp_optional = requires { typename cmp_optional_value<T>::type; };
+
+      // Whether a value of type R may be compared with a U: false where
+      // one of the two is a std::tuple and the other is neither a tuple
+      // nor tuple-like (a std::optional counting as what it holds); true
+      // for every other pair, for which the comparison itself is the test.
+      template <typename R, typename U>
+      consteval bool comparison_operand() noexcept
+      {
+         if constexpr (cmp_optional<R>)
+         {
+            using X = typename cmp_optional_value<R>::type;
+            if constexpr (std::same_as<U, std::nullopt_t>)
+               return true;
+            else if constexpr (cmp_optional<U>)
+               return comparison_operand<X, typename cmp_optional_value<U>::type>();
+            else
+               return comparison_operand<X, U>();
+         }
+         else if constexpr (cmp_optional<U>)
+            return comparison_operand<R, typename cmp_optional_value<U>::type>();
+         else if constexpr (cmp_is_tuple_v<R>)
+            return has_tuple_size<U>;
+         else if constexpr (cmp_is_tuple_v<U>)
+            return has_tuple_size<R>;
+         else
+            return true;
+      }
+
+      // What view_read returns for V, without references.
+      template <typename V>
+      using view_read_t = std::remove_cvref_t<decltype(view_read(std::declval<const V&>()))>;
+
+      template <typename V, typename U>
+      concept view_comparison_operand =
+         comparison_operand<view_read_t<V>, std::remove_cvref_t<U>>();
+   }  // namespace detail
+
    template <detail::read_view V, typename U>
-      requires (!detail::read_view<U> &&
+      requires (!detail::read_view<U> && detail::view_comparison_operand<V, U> &&
                 requires(const V& v, const U& u) {
                    { detail::view_read(v) == u } -> std::convertible_to<bool>;
                 })
@@ -1458,24 +1526,26 @@ namespace psio {
       return detail::view_read(v) == u;
    }
    template <detail::read_view A, detail::read_view B>
-      requires requires(const A& a, const B& b) {
-         { detail::view_read(a) == detail::view_read(b) } -> std::convertible_to<bool>;
-      }
+      requires (detail::view_comparison_operand<A, detail::view_read_t<B>> &&
+                requires(const A& a, const B& b) {
+                   { detail::view_read(a) == detail::view_read(b) } -> std::convertible_to<bool>;
+                })
    [[nodiscard]] bool operator==(const A& a, const B& b)
    {
       return detail::view_read(a) == detail::view_read(b);
    }
    template <detail::read_view V, typename U>
-      requires (!detail::read_view<U> &&
+      requires (!detail::read_view<U> && detail::view_comparison_operand<V, U> &&
                 requires(const V& v, const U& u) { detail::view_read(v) <=> u; })
    [[nodiscard]] auto operator<=>(const V& v, const U& u)
    {
       return detail::view_read(v) <=> u;
    }
    template <detail::read_view A, detail::read_view B>
-      requires requires(const A& a, const B& b) {
-         detail::view_read(a) <=> detail::view_read(b);
-      }
+      requires (detail::view_comparison_operand<A, detail::view_read_t<B>> &&
+                requires(const A& a, const B& b) {
+                   detail::view_read(a) <=> detail::view_read(b);
+                })
    [[nodiscard]] auto operator<=>(const A& a, const B& b)
    {
       return detail::view_read(a) <=> detail::view_read(b);
