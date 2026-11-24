@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package shared;
+
+message Stamp {
+  int64 seconds = 1;
+  int32 nanos = 2;
+}
+
+enum Unit {
+  UNIT_UNSPECIFIED = 0;
+  UNIT_METRE = 1;
+}

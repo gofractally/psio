@@ -30,8 +30,12 @@
 #include <string_view>
 #include <vector>
 
+#include <psio/emit_protobuf.hpp>
+#include <psio/protobuf_parser.hpp>
+
 #include "capnp_shapes.hpp"
 #include "flatbuf_schema_shapes.hpp"
+#include "protobuf_shapes.hpp"
 
 namespace
 {
@@ -57,6 +61,14 @@ namespace
       static psio::Schema parse(std::string_view text) { return psio::parse_capnp(text); }
       static std::string  emit(const psio::Schema& s) { return psio::emit_capnp(s); }
       static void         layout(const psio::Schema& s) { (void)psio::capnp_layout(s); }
+   };
+
+   struct proto
+   {
+      using error = psio::protobuf_parse_error;
+      static psio::Schema parse(std::string_view text) { return psio::parse_protobuf(text); }
+      static std::string  emit(const psio::Schema& s) { return psio::emit_protobuf(s); }
+      static void         layout(const psio::Schema&) {}
    };
 
    struct tally
@@ -378,4 +390,56 @@ TEST_CASE("capnp text: nothing recurses or grows without a bound", "[capnp][fuzz
       CHECK_FALSE(refused<capnp>(text + "struct T { a @0 :A19999; }"));
       CHECK(refused<capnp>("using A = B; using B = A; struct T { a @0 :A; }"));
    }
+}
+
+TEST_CASE("proto text: mutated schemas", "[protobuf][fuzz]")
+{
+   const std::string dir = PSIO_PROTOBUF_SCHEMA_DIR;
+   const std::vector<std::string> seeds{
+      read_file(dir + "/sample3.proto"), read_file(dir + "/sample2.proto"),
+      read_file(dir + "/common.proto"), read_file(dir + "/nosyntax.proto"),
+      psio::emit_protobuf(protobuf_shapes_schema())};
+   const std::vector<std::string_view> words{
+      "message", "enum", "oneof", "map<", ">", "service", "rpc", "returns", "stream", "option",
+      "reserved", "extensions", "import", "package", "syntax", "optional", "repeated", "required",
+      "= 1", "[deprecated = true]", "[default = 1]", "[packed = false]", "{", "}", "sint32",
+      "fixed64", "string", "bytes", ".", "to max", "group", "extend", "public"};
+   const tally t = mutate<proto>(seeds, words, 0x9b0f0f5, 4, 60000, 20000);
+   CHECK(t.texts > 100000);
+   CHECK(t.refused > 1000);
+   CHECK(t.written > 1000);
+   WARN("proto: " << t.texts << " texts, " << t.refused << " refused, " << t.parsed << " parsed, "
+                  << t.written << " written back and read again");
+}
+
+TEST_CASE("proto text: nothing recurses or grows without a bound", "[protobuf][fuzz]")
+{
+   const std::string head = "syntax = \"proto3\";\n";
+   // Nesting is counted, not recursed into without a limit.
+   CHECK(refused<proto>(head + repeat("message M { ", 200000)));
+   CHECK(refused<proto>(head + "message M { " + repeat("oneof o { ", 200000)));
+   CHECK(refused<proto>(head + "option x = " + repeat("{ a: ", 500000)));
+   CHECK(refused<proto>(head + "option x = " + repeat("[", 500000)));
+   CHECK(refused<proto>(head + "message M { int32 a = 1 " + repeat("[", 500000)));
+   CHECK(refused<proto>(head + "enum E {" + repeat(" ", 2000000)));
+   CHECK(refused<proto>(head + "enum E { A = 0; " + repeat("B ", 500000)));
+   CHECK(refused<proto>(head + "message M { " + repeat("map<", 300000)));
+   CHECK(refused<proto>(head + "message M { " + repeat("a.", 500000)));
+   CHECK(refused<proto>(head + "service S { rpc A (" + repeat("stream ", 300000)));
+   CHECK(refused<proto>(head + repeat("/* ", 500000)));
+   CHECK(refused<proto>(head + "import " + repeat("public ", 300000)));
+   // Long and valid: linear.
+   std::string fields = head + "message M {\n";
+   for (int i = 1; i <= 200000; ++i)
+      fields += "  int32 f" + std::to_string(i) + " = " + std::to_string(i < 19000 ? i : i + 1000) + ";\n";
+   CHECK(!refused<proto>(fields + "}\n"));
+   std::string values = head + "enum E {\n  Z = 0;\n";
+   for (int i = 1; i <= 200000; ++i)
+      values += "  V" + std::to_string(i) + " = " + std::to_string(i) + ";\n";
+   CHECK(!refused<proto>(values + "}\n"));
+   std::string messages = head;
+   for (int i = 0; i < 100000; ++i)
+      messages += "message M" + std::to_string(i) + " { M" + std::to_string(i / 2) + " up = 1; }\n";
+   CHECK(!refused<proto>(messages));
+   CHECK(!refused<proto>(head + "option x = \"" + repeat("y", 4000000) + "\";\n"));
 }

@@ -399,7 +399,7 @@ def _check_attributes(values: Sequence[Mapping[str, Any]], site: str, caps: bool
             continue
         # What the numbered formats (protobuf, Cap'n Proto, FlatBuffers) read of a member: its field
         # number, a scalar's default, that it is retired.  None of them is in a PSSZ byte or in the text.
-        if site == "record_member" and name in ("field", "default", "deprecated"):
+        if site == "record_member" and name in ("field", "default", "deprecated", "protobuf"):
             continue
         # An untagged variant: the same bytes as any variant; in text the bare value of the alternative.
         if site == "variant" and name == "untagged":

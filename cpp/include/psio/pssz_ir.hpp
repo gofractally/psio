@@ -315,7 +315,7 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
       // capnp_layout.hpp): the member's field number, a retired member, a
       // scalar's default. None of them is in a PSSZ byte or in the text.
       if (site == attribute_site::record_member &&
-          (name == "field" || name == "default" || name == "deprecated"))
+          (name == "field" || name == "default" || name == "deprecated" || name == "protobuf"))
          continue;
       // An untagged variant (untagged.hpp): the same bytes as any variant;
       // in text the bare value of the alternative (pssz_ir_json.hpp).

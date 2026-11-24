@@ -1235,6 +1235,11 @@ namespace psio::schema_types
             member.attributes.push_back(Attribute{
                 "deprecated",
                 std::string{std::get<::psio::deprecated_spec>(eff::value).version}});
+         // How protobuf writes the member's integers (annotate.hpp).
+         if constexpr (::psio::has_spec_v<::psio::pb_fixed_spec, eff_t>)
+            member.attributes.push_back(Attribute{"protobuf", "fixed"});
+         else if constexpr (::psio::has_spec_v<::psio::pb_sint_spec, eff_t>)
+            member.attributes.push_back(Attribute{"protobuf", "sint"});
          using V = std::remove_cvref_t<F>;
          if constexpr ((std::is_arithmetic_v<V> || std::is_enum_v<V>) && sizeof(V) <= 8 &&
                        requires { U{}; })

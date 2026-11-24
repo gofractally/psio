@@ -1156,8 +1156,19 @@ other format reads it:
 @@SEC ref-field-number@@
 
 (test `reference: protobuf field numbers`: `Message{1, "x"}` is
-`18 01 3a 01 78`). protobuf also reads `pb_fixed` and `pb_sint`
-(`psio/protobuf.hpp`).
+`18 01 3a 01 78`). A `std::variant` member is a protobuf `oneof` and takes
+one number per alternative, counting up from its own; the numbers of a
+message are checked at compile time ([protobuf.md](protobuf.md), "Field
+numbers").
+
+protobuf also reads `pb_fixed` and `pb_sint` (`psio/annotate.hpp`) on an
+integer member, or on an optional / list / set of integers:
+`attr(hash, pb_fixed)` is `fixed32` / `sfixed32` / `fixed64` / `sfixed64` by
+the member's width and sign, `attr(delta, pb_sint)` is `sint32` / `sint64`
+(signed members only). No other format reads them. In the Schema IR they are
+the member attribute `protobuf` = `"fixed"` / `"sint"`, which
+`emit_protobuf` writes as the field's type and the schema-driven PSSZ / JSON
+codecs of the four languages accept and do not read.
 
 ### 5.13 `sorted`, `unique`, `unique_keys`
 

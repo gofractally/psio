@@ -80,7 +80,12 @@ def attributes_of(cls: Any, name: str) -> Dict[str, List[Any]]:
 
 class SchemaDriven(unittest.TestCase):
     def test_a_record_member_with_them_is_the_same_type(self) -> None:
-        numbered = [ir.attribute("field", "7"), ir.attribute("deprecated", ""), ir.attribute("default", "-1")]
+        numbered = [
+            ir.attribute("field", "7"),
+            ir.attribute("deprecated", ""),
+            ir.attribute("default", "-1"),
+            ir.attribute("protobuf", "sint"),
+        ]
         bound = ir.attribute("lengthBound", "max=9")
         stated = row(numbered, [bound, ir.attribute("field", "2"), ir.attribute("deprecated", "v2")])
         bounded = row([], [bound])
@@ -107,7 +112,7 @@ class SchemaDriven(unittest.TestCase):
 
     def test_they_belong_to_record_members_only(self) -> None:
         unit = {"Object": {"members": [], "attributes": []}}
-        for name in ("field", "default", "deprecated"):
+        for name in ("field", "default", "deprecated", "protobuf"):
             stated = [ir.attribute(name, "1")]
             cases = {
                 "record": {"Object": {"members": [], "attributes": stated}},

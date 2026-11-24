@@ -152,10 +152,13 @@ builder records everything those depend on:
   not recorded: both forms produce the same node.
 
 - **What the numbered formats need of a member** (protobuf, Cap'n Proto,
-  FlatBuffers; `docs/flatbuffers.md` and `docs/capnp.md`, "Schema"): the
+  FlatBuffers; `docs/protobuf.md`, `docs/flatbuffers.md` and `docs/capnp.md`,
+  "Schema"): the
   member attributes `field` = `"N"` when `attr(member, field<N>)` states the
   field number (absent: the 1-based position), `deprecated` = the version
-  of `deprecated_spec`, and `default` = the member initialiser of a `bool`,
+  of `deprecated_spec`, `protobuf` = `"fixed"` / `"sint"` for `pb_fixed` /
+  `pb_sint` (how protobuf writes the member's integers:
+  `docs/protobuf.md`), and `default` = the member initialiser of a `bool`,
   integer, float or enum member when it is not zero (`"true"`, a decimal
   integer — an enum's value —, the shortest decimal float, `nan`, `inf`,
   `-inf`, `-0`). No PSSZ byte, key or text depends on them: the

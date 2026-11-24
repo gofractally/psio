@@ -971,12 +971,14 @@ endif()
 psio_add_test(psio_schema_text_fuzz_tests schema_text_fuzz_tests.cpp)
 target_compile_definitions(psio_schema_text_fuzz_tests PRIVATE
    PSIO_FLATBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf"
-   PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp")
+   PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp"
+   PSIO_PROTOBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protobuf")
 if(PSIO_HAVE_ASAN_UBSAN)
    psio_add_test(psio_schema_text_fuzz_tests_sanitized schema_text_fuzz_tests.cpp)
    target_compile_definitions(psio_schema_text_fuzz_tests_sanitized PRIVATE
       PSIO_FLATBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf"
-      PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp")
+      PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp"
+      PSIO_PROTOBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protobuf")
    target_compile_options(psio_schema_text_fuzz_tests_sanitized PRIVATE
       -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
    target_link_options(psio_schema_text_fuzz_tests_sanitized PRIVATE -fsanitize=address,undefined)
@@ -1056,6 +1058,76 @@ psio_add_test(psio_msgpack_tests msgpack_tests.cpp)
 
 # Protobuf codec (protobuf.hpp) — schema-driven encode/decode/validate.
 psio_add_test(psio_protobuf_tests protobuf_tests.cpp)
+
+# The same reader on arbitrary bytes: truncations, replaced bytes, random
+# corruptions, random bytes; and inputs built to exhaust it. Again with the
+# sanitizers.
+psio_add_test(psio_protobuf_fuzz_tests protobuf_fuzz_tests.cpp)
+if(PSIO_HAVE_ASAN_UBSAN)
+   psio_add_test(psio_protobuf_fuzz_tests_sanitized protobuf_fuzz_tests.cpp)
+   target_compile_options(psio_protobuf_fuzz_tests_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_protobuf_fuzz_tests_sanitized PRIVATE -fsanitize=address,undefined)
+endif()
+
+# Shared cross-language protobuf fixture (conformance/protobuf-vectors.json):
+# messages of known values, messages of other writers, and bytes a reader
+# must refuse.
+set(PSIO_PROTOBUF_VECTORS ${CMAKE_SOURCE_DIR}/conformance/protobuf-vectors.json)
+add_executable(psio_protobuf_conformance_emit protobuf_conformance_emit.cpp)
+target_link_libraries(psio_protobuf_conformance_emit PRIVATE psio)
+target_compile_features(psio_protobuf_conformance_emit PRIVATE cxx_std_23)
+add_test(NAME psio_protobuf_conformance_regen
+         COMMAND psio_protobuf_conformance_emit --check ${PSIO_PROTOBUF_VECTORS})
+
+# The same against the official implementation, where it is installed: the
+# schema psio emits for tests/protobuf_shapes.hpp is compiled by `protoc`,
+# and bytes are exchanged with the generated code (both directions, byte
+# identity, a differential fuzz of the two readers).
+find_package(Protobuf QUIET CONFIG)
+if(Protobuf_FOUND AND TARGET protobuf::protoc)
+   set(PSIO_PROTOBUF_INTEROP_DIR ${CMAKE_CURRENT_BINARY_DIR}/protobuf)
+   add_executable(psio_protobuf_schema_emit protobuf_schema_emit.cpp)
+   target_link_libraries(psio_protobuf_schema_emit PRIVATE psio)
+   target_compile_features(psio_protobuf_schema_emit PRIVATE cxx_std_23)
+   add_custom_command(
+      OUTPUT ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.proto
+             ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.pb.cc
+             ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.pb.h
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${PSIO_PROTOBUF_INTEROP_DIR}
+      COMMAND psio_protobuf_schema_emit ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.proto
+      COMMAND protobuf::protoc --cpp_out=${PSIO_PROTOBUF_INTEROP_DIR}
+              -I ${PSIO_PROTOBUF_INTEROP_DIR} ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.proto
+      DEPENDS psio_protobuf_schema_emit
+      COMMENT "protoc on psio::emit_protobuf of tests/protobuf_shapes.hpp")
+   psio_add_test(psio_protobuf_interop_tests protobuf_interop_tests.cpp
+      ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.pb.cc)
+   target_include_directories(psio_protobuf_interop_tests PRIVATE ${PSIO_PROTOBUF_INTEROP_DIR})
+   target_link_libraries(psio_protobuf_interop_tests PRIVATE protobuf::libprotobuf)
+
+   # `.proto` text against protoc at run time: hand-written files, the
+   # reflected shapes and generated schemas keep their descriptor through
+   # parse_protobuf → emit_protobuf.
+   psio_add_test(psio_protobuf_schema_tests protobuf_schema_tests.cpp)
+   target_compile_definitions(psio_protobuf_schema_tests PRIVATE
+      PSIO_PROTOC="$<TARGET_FILE:protobuf::protoc>"
+      PSIO_PROTOBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/protobuf"
+      PSIO_PROTOBUF_WORK_DIR="${CMAKE_CURRENT_BINARY_DIR}/protobuf_schema_work")
+
+   # psio::protobuf against the official library on the same messages
+   # (not a test; run by hand: docs/protobuf.md "Performance").
+   if(PSIO_ENABLE_BENCHMARKS)
+      add_executable(psio_bench_protobuf ${CMAKE_CURRENT_SOURCE_DIR}/../benchmarks/bench_protobuf.cpp
+         ${PSIO_PROTOBUF_INTEROP_DIR}/emitted.pb.cc)
+      target_link_libraries(psio_bench_protobuf PRIVATE psio protobuf::libprotobuf)
+      target_include_directories(psio_bench_protobuf PRIVATE
+         ${PSIO_PROTOBUF_INTEROP_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+      target_compile_features(psio_bench_protobuf PRIVATE cxx_std_23)
+      target_compile_options(psio_bench_protobuf PRIVATE -O3 -DNDEBUG)
+   endif()
+else()
+   message(STATUS "psio_protobuf_interop_tests: protobuf / protoc not found — skipping")
+endif()
 
 # emit_protobuf (emit_protobuf.hpp) — Schema IR → .proto3 schema text.
 psio_add_test(psio_emit_protobuf_tests emit_protobuf_tests.cpp)

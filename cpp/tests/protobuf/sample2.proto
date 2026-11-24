@@ -1,0 +1,23 @@
+syntax = "proto2";
+
+package legacy;
+
+message Old {
+  required int32 id = 1;
+  optional string name = 2 [default = "an;on"];
+  repeated int32 xs = 3 [packed = true];
+  repeated sint64 ys = 9;
+  optional Mode mode = 4 [default = FAST];
+  enum Mode { SLOW = 1; FAST = 2; }
+  optional double ratio = 5 [default = -1.5e3];
+  optional bool on = 6 [default = true, deprecated = true];
+  optional bytes raw = 7 [default = "\001\"x"];
+  required Old next = 8;
+  oneof pick { int32 p = 10; Old q = 11; }
+  map<int32, Zeroed> modes = 12;
+  enum Zeroed { Z_NONE = 0; Z_ONE = 1; }
+  extensions 1000 to max;
+  reserved 50, 60 to 70;
+}
+
+enum Top { T_A = 3; T_B = -1; }

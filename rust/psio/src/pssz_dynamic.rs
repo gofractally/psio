@@ -491,7 +491,7 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
             // What the numbered formats read (the schema builder writes
             // them): the member's field number, a scalar's default, a
             // retired member. None of them is in a PSSZ byte or in the text.
-            "field" | "default" | "deprecated" if site == Site::RecordMember => (),
+            "field" | "default" | "deprecated" | "protobuf" if site == Site::RecordMember => (),
             // An untagged variant: the same bytes as any variant; in text
             // the bare value of the alternative (`json` submodule).
             "untagged" if site == Site::Variant => (),

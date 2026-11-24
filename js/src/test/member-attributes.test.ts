@@ -34,7 +34,7 @@ const row = (id: Attributes, name: Attributes): PsszTypeInput => ({
 test('schema-driven codec: field / default / deprecated on a record member change nothing', () => {
   const schema = new PsszSchema({});
   const stated = row(
-    [{ name: 'field', value: '7' }, { name: 'deprecated', value: '' }, { name: 'default', value: '-1' }],
+    [{ name: 'field', value: '7' }, { name: 'deprecated', value: '' }, { name: 'default', value: '-1' }, { name: 'protobuf', value: 'sint' }],
     [{ name: 'lengthBound', value: 'max=9' }, { name: 'field', value: '2' }, { name: 'deprecated', value: 'v2' }],
   );
   const bounded = row([], [{ name: 'lengthBound', value: 'max=9' }]);
@@ -67,7 +67,7 @@ test('schema-driven codec: field / default / deprecated on a record member chang
 test('schema-driven codec: field / default / deprecated belong to record members only', () => {
   const schema = new PsszSchema({});
   const unit: PsszTypeInput = { Object: { members: [], attributes: [] } };
-  for (const name of ['field', 'default', 'deprecated']) {
+  for (const name of ['field', 'default', 'deprecated', 'protobuf']) {
     const stated = [{ name, value: '1' }];
     const cases: [string, PsszTypeInput][] = [
       ['record', { Object: { members: [], attributes: stated } }],

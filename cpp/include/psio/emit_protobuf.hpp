@@ -1,60 +1,63 @@
 #pragma once
 //
-// psio/emit_protobuf.hpp — Schema IR → Protocol Buffers `.proto` text.
+// psio/emit_protobuf.hpp — Schema IR → `.proto` text.
 //
-// Walks a `psio::Schema` and produces `.proto3` schema source.  The
-// inverse (`.proto` → Schema) lives in psio/protobuf_parser.hpp (TBD).
+// `psio::emit_protobuf(schema)` writes the file `protoc` compiles to the
+// messages psio::protobuf (protobuf.hpp) reads and writes for the types the
+// schema was built from, and writes back what `psio::parse_protobuf` read.
+// User documentation: docs/protobuf.md.
 //
-// IR ↔ proto3 mapping:
+// How the Schema IR is read as protobuf
+// -------------------------------------
 //
-//   Object              → message  (extensible record)
-//   Struct              → message  (proto3 has no fixed-size record;
-//                                   structs degrade to messages, with
-//                                   a `// @psio:struct` comment so the
-//                                   round-trip parser can recover it)
-//   Variant of empty cases  → enum
-//   Variant with payload(s) → message wrapping a `oneof` (proto3 has
-//                                   no top-level oneof)
-//   Resource            → message with `// @psio:resource` comment;
-//                                   methods aren't proto3-emittable
-//                                   and are omitted
-//   Int{N,signed}       → int32/int64/uint32/uint64 by default;
-//                                   sint32/sint64 when the field has
-//                                   `pb_sint` in its attributes;
-//                                   sfixed32/fixed32/sfixed64/fixed64
-//                                   when `pb_fixed`.  (8/16-bit Int
-//                                   widens to 32-bit on the wire — the
-//                                   smallest sizes proto3 supports.)
-//   Float{8,23}         → float
-//   Float{11,52}        → double
-//   Custom{u8, "bool"}  → bool
-//   Custom{List<u8>, "string"} → string
-//   Custom{List<u8>, "hex"}    → bytes
-//   List<u8>            → bytes  (well-known proto3 alias)
-//   List<T>             → `repeated T`
-//   Option<T>           → `optional T`  (proto3 syntax, since v3.15)
-//   Tuple{}             → omitted with `// @psio:unit` (no proto3
-//                                   void/unit type)
-//   Type{name}          → bare identifier
+//   Object / Struct (named)        message; `A.B` is nested in the message `A`
+//   member                         field; its number is the `field`
+//                                  attribute, else its 1-based position
+//     Int 8/16/32 signed           int32   (`protobuf` = sint: sint32, fixed: sfixed32)
+//     Int 8/16/32 unsigned, char   uint32  (fixed: fixed32)
+//     Int 64                       int64 / uint64 (sint64, sfixed64 / fixed64)
+//     Float{8,24} / Float{11,53}   float / double
+//     Custom bool                  bool
+//     Custom string / utf8         string
+//     Custom hex, Nested           bytes
+//     Enum                         enum (its values as int32)
+//     Type                         the message / enum it names
+//     Option{X}                    optional X  (proto2: optional)
+//     List / BoundedList / set     repeated X
+//     Custom map over List<(K,V)>  map<K, V>
+//     Variant                      oneof; alternative j has the number
+//                                  (member's number + j), or its own
+//                                  `field` attribute; a leading Tuple{}
+//                                  alternative (std::monostate) is "none set"
+//     Variant of Tuple{} only      enum, values 0, 1, …
+//   attributes
+//     deprecated                   [deprecated = true]
+//     default                      proto2: [default = …]; proto3 has none
+//                                  (an absent field is zero: not written)
+//     required                     proto2: required
+//     proto_option                 `name = value`, as an option of the file /
+//                                  message / field / enum / service / method
+//     proto_reserved, proto_extensions   the statement's text
+//     proto_option.NAME (named enum)     options of the enum value NAME
+//   package attributes             proto_syntax (proto3 when absent),
+//                                  proto_import
+//   Interface                      service; a Func of one message parameter
+//                                  and a message result is an rpc
+//                                  (proto_client_streaming, proto_server_streaming)
 //
-// Field numbers come from the canonical `field` attribute on each
-// Member (the same channel `attr(member, field<N>)` writes through);
-// when absent, sequential 1..N matches proto3's positional default.
-//
-// Per-field encoding hints carried as attribute names:
-//   `pb_fixed`  — emit fixed/sfixed instead of varint
-//   `pb_sint`   — emit zigzag (sint32/sint64) for signed integers
-//
-// Output ends with a trailing newline and a `syntax = "proto3";`
-// header.  Package is derived from `Package.name` (proto3 uses dot-
-// separated namespaces; `wasi:io` → `wasi.io`).
+// What protobuf does not have is an error (std::runtime_error): a list of
+// lists, an optional list, a list of optionals or variants, a tuple, a
+// fixed array that is not bytes, an integer wider than 64 bits, a function
+// that is not message → message, a field number protobuf refuses.
 
+#include <psio/fbs_layout.hpp>
 #include <psio/schema_ir.hpp>
 
-#include <cctype>
+#include <algorithm>
 #include <cstdint>
-#include <optional>
-#include <sstream>
+#include <map>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -62,455 +65,630 @@
 
 namespace psio::schema_types
 {
-
    namespace emit_protobuf_detail
    {
-      // proto3 conventionally PascalCase's message / enum names and
-      // snake_case's fields.  Field names already come from C++
-      // identifiers (snake_case-friendly); leave them alone.
-      inline std::string to_pascal(std::string_view name)
+      namespace d = fbs_layout_detail;
+
+      [[noreturn]] inline void fail(const std::string& what)
       {
-         std::string out;
-         out.reserve(name.size());
-         bool boundary = true;
+         throw std::runtime_error("emit_protobuf: " + what);
+      }
+
+      inline bool ident_char(char c) noexcept
+      {
+         return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == '_';
+      }
+      inline bool is_identifier(std::string_view name) noexcept
+      {
+         if (name.empty() || (name.front() >= '0' && name.front() <= '9'))
+            return false;
          for (char c : name)
-         {
-            if (c == '_' || c == '-')
-            {
-               boundary = true;
-               continue;
-            }
-            if (boundary)
-            {
-               out += static_cast<char>(
-                  std::toupper(static_cast<unsigned char>(c)));
-               boundary = false;
-            }
-            else
-               out += c;
-         }
-         return out;
+            if (!ident_char(c))
+               return false;
+         return true;
       }
-
-      inline std::string proto_package(std::string_view pkg)
+      inline std::string identifier(std::string_view name)
       {
          std::string out;
-         out.reserve(pkg.size());
-         for (char c : pkg)
-            out += (c == ':' ? '.' : c);
+         for (char c : name)
+            out += ident_char(c) ? c : '_';
+         if (out.empty() || (out.front() >= '0' && out.front() <= '9'))
+            out.insert(out.begin(), '_');
          return out;
       }
-
-      inline bool has_attr(const std::vector<Attribute>& attrs,
-                           std::string_view              name)
+      inline bool valid_number(std::uint64_t n) noexcept
       {
-         for (const auto& a : attrs)
-            if (a.name == name)
-               return true;
-         return false;
-      }
-
-      inline std::optional<std::string> attr_lookup(
-         const std::vector<Attribute>& attrs, std::string_view name)
-      {
-         for (const auto& a : attrs)
-            if (a.name == name && a.value)
-               return *a.value;
-         return std::nullopt;
-      }
-
-      inline bool variant_is_enum_shape(const Variant& v)
-      {
-         for (const auto& m : v.members)
-         {
-            auto* tup = std::get_if<Tuple>(&m.type->value);
-            if (!(tup && tup->members.empty()))
-               return false;
-         }
-         return !v.members.empty();
-      }
-
-      // Detect "List<u8>" — proto3's bytes alias.
-      inline bool is_byte_list(const AnyType& t)
-      {
-         if (auto* lst = std::get_if<List>(&t.value))
-            if (auto* inner = std::get_if<Int>(&lst->type->value))
-               return inner->bits == 8 && !inner->isSigned;
-         return false;
+         return n >= 1 && n <= 536870911 && !(n >= 19000 && n <= 19999);
       }
 
       class Emitter
       {
        public:
-         explicit Emitter(const Schema& s) : _s{s} {}
+         explicit Emitter(const Schema& s) : _s{s}, _types{s}
+         {
+            for (char c : s.package.name)
+               _package += c == ':' || c == '/' ? '.' : ident_char(c) || c == '.' ? c : '_';
+            if (const std::string* syntax = d::attribute(s.package.attributes, "proto_syntax"))
+               _proto2 = *syntax == "proto2";
+         }
 
          std::string run()
          {
-            _out << "syntax = \"proto3\";\n\n";
-            if (!_s.package.name.empty())
-               _out << "package " << proto_package(_s.package.name)
-                    << ";\n\n";
-            for (const auto& m : _s.types)
-               emit_decl(m.name, *m.type);
-            return _out.str();
+            // The declarations the schema names, and where each one is.
+            for (const auto& entry : _s.types)
+               if (declarable(*entry.type) && !entry.name.starts_with('@'))
+                  _by_ir_name.emplace(entry.name, entry.type.get());
+            for (const auto& entry : _s.types)
+               if (declarable(*entry.type) && !entry.name.starts_with('@') &&
+                   _by_ir_name.at(entry.name) == entry.type.get())
+                  place(entry);
+            std::string services;
+            for (const auto& iface : _s.interfaces)
+               services += service(iface);
+            std::string body;
+            for (std::size_t i = 0; i < _top.size(); ++i)  // grows as members are read
+               body += declaration(*_top[i], 0);
+            body += services;
+
+            std::string head = _proto2 ? "syntax = \"proto2\";\n" : "syntax = \"proto3\";\n";
+            if (!_package.empty())
+               head += "\npackage " + _package + ";\n";
+            bool any = false;
+            for (const auto& a : _s.package.attributes)
+               if (a.name == "proto_import" && a.value)
+               {
+                  head += std::string{any ? "" : "\n"} + "import " + *a.value + ";\n";
+                  any = true;
+               }
+            any = false;
+            for (const auto& a : _s.package.attributes)
+               if (a.name == "proto_option" && a.value)
+               {
+                  head += std::string{any ? "" : "\n"} + "option " + *a.value + ";\n";
+                  any = true;
+               }
+            return head + "\n" + body;
          }
 
        private:
-         const Schema&      _s;
-         std::ostringstream _out;
-         int                _indent = 0;
-
-         void indent()
+         struct decl
          {
-            for (int i = 0; i < _indent; ++i)
-               _out << "  ";
+            const AnyType*              node = nullptr;
+            const Member*               entry = nullptr;  // the schema's entry, if it has one
+            std::string                 name;             // in its scope
+            std::string                 full;             // from the package
+            std::vector<const AnyType*> children;
+         };
+
+         const Schema& _s;
+         d::model      _types;
+         std::string   _package;
+         bool          _proto2 = false;
+         bool          _nested = false;
+         std::map<std::string, const AnyType*, std::less<>> _by_ir_name;
+         std::map<const AnyType*, decl>                     _decls;
+         std::vector<const AnyType*>                        _top;
+         std::set<std::string>                              _taken;  // scope + "." + name
+         unsigned                                           _depth = 0;
+
+         static bool declarable(const AnyType& node)
+         {
+            return std::holds_alternative<Object>(node.value) ||
+                   std::holds_alternative<Struct>(node.value) ||
+                   std::holds_alternative<Enum>(node.value);
+         }
+         static bool is_message(const AnyType& node)
+         {
+            return std::holds_alternative<Object>(node.value) ||
+                   std::holds_alternative<Struct>(node.value);
          }
 
-         void emit_decl(const std::string& name, const AnyType& t)
+         std::string unique(const std::string& scope, const std::string& name)
          {
-            std::visit(
-               [&]<typename T>(const T& v) { emit_decl_impl(name, v); },
-               t.value);
+            std::string candidate = name;
+            for (unsigned n = 2; !_taken.insert(scope + "." + candidate).second; ++n)
+               candidate = name + "_" + std::to_string(n);
+            return candidate;
          }
 
-         void emit_decl_impl(const std::string& name, const Object& o)
+         // Puts a named entry in its scope: inside the message its name is
+         // prefixed with, else at the top.
+         decl& place(const Member& entry)
          {
-            emit_type_attribute_comments(o.attributes);
-            emit_message(name, o.members);
-         }
-         void emit_decl_impl(const std::string& name, const Struct& s)
-         {
-            emit_type_attribute_comments(s.attributes);
-            emit_message(name, s.members,
-                         "// @psio:struct  (proto3 has no fixed-size record)");
+            if (auto at = _decls.find(entry.type.get()); at != _decls.end())
+               return at->second;
+            decl out;
+            out.node  = entry.type.get();
+            out.entry = &entry;
+            const auto dot = entry.name.rfind('.');
+            if (dot != std::string::npos && is_identifier(std::string_view{entry.name}.substr(dot + 1)))
+               if (auto parent = _by_ir_name.find(std::string_view{entry.name}.substr(0, dot));
+                   parent != _by_ir_name.end() && is_message(*parent->second) &&
+                   parent->second != entry.type.get())
+               {
+                  const Member* parent_entry = _types.entry_of(*parent->second);
+                  decl&         p            = place(*parent_entry);
+                  out.name = unique(p.full, entry.name.substr(dot + 1));
+                  out.full = p.full + "." + out.name;
+                  p.children.push_back(out.node);
+                  _nested = true;
+                  return _decls.emplace(out.node, std::move(out)).first->second;
+               }
+            out.name = unique("", identifier(entry.name));
+            out.full = out.name;
+            _top.push_back(out.node);
+            return _decls.emplace(out.node, std::move(out)).first->second;
          }
 
-         // Protobuf has no native type-level attribute syntax for psio
-         // caps; emit them as preceding-line comments so `protoc`-style
-         // tools can carry the metadata, even if it's not enforced
-         // wire-side.
-         void emit_type_attribute_comments(
-            const std::vector<Attribute>& attrs)
+         // A declaration without a name of its own: named after its first user.
+         decl& place_anonymous(const AnyType& node, const std::string& owner,
+                               std::string_view member)
+         {
+            if (auto at = _decls.find(&node); at != _decls.end())
+               return at->second;
+            if (const Member* entry = _types.entry_of(node); entry && !entry->name.starts_with('@'))
+               return place(*entry);
+            decl out;
+            out.node  = &node;
+            out.entry = _types.entry_of(node);
+            out.name  = unique("", identifier(owner + "_" + std::string{member}));
+            out.full  = out.name;
+            _top.push_back(out.node);
+            return _decls.emplace(out.node, std::move(out)).first->second;
+         }
+
+         std::string reference(const decl& to) const
+         {
+            if (!_nested)
+               return to.full;
+            return "." + (_package.empty() ? std::string{} : _package + ".") + to.full;
+         }
+
+         // ── Types ───────────────────────────────────────────────────
+         struct single
+         {
+            std::string text;
+            bool        integer   = false;  // may be a map key
+            bool        is_signed = false;
+            bool        is_string = false;
+            bool        is_bool   = false;
+         };
+
+         static std::string where(const std::string& owner, std::string_view member)
+         {
+            return "member '" + std::string{member} + "' of '" + owner + "': ";
+         }
+
+         single integer(const Int& i, std::string_view enc, const std::string& at)
+         {
+            if (i.bits != 8 && i.bits != 16 && i.bits != 32 && i.bits != 64)
+               fail(at + "an integer of " + std::to_string(i.bits) + " bits has no protobuf type");
+            const char* w = i.bits == 64 ? "64" : "32";
+            single      out;
+            out.integer   = true;
+            out.is_signed = i.isSigned;
+            if (enc == "fixed")
+               out.text = std::string{i.isSigned ? "sfixed" : "fixed"} + w;
+            else if (enc == "sint")
+            {
+               if (!i.isSigned)
+                  fail(at + "sint is for signed integers");
+               out.text = std::string{"sint"} + w;
+            }
+            else if (enc.empty())
+               out.text = std::string{i.isSigned ? "int" : "uint"} + w;
+            else
+               fail(at + "the 'protobuf' attribute is 'fixed' or 'sint'");
+            return out;
+         }
+
+         // A type of an imported file: a reference the schema does not
+         // declare, written as it is.
+         bool foreign(const AnyType& written) const
+         {
+            const auto* ref = std::get_if<Type>(&written.value);
+            return ref && !_types.find(ref->type) &&
+                   d::has_attribute(_s.package.attributes, "proto_import");
+         }
+
+         // A value with one wire form. `enc` is consumed by an integer.
+         single one(const AnyType& written, std::string_view enc, const std::string& owner,
+                    std::string_view member, unsigned depth = 0)
+         {
+            const std::string at = where(owner, member);
+            if (depth > 64)
+               fail(at + "types nested too deeply");
+            single out;
+            if (foreign(written))
+            {
+               if (!enc.empty())
+                  fail(at + "the 'protobuf' attribute is for integers");
+               out.text = std::get<Type>(written.value).type;
+               return out;
+            }
+            const AnyType& type = _types.resolve(written);
+            if (const auto* i = std::get_if<Int>(&type.value))
+               return integer(*i, enc, at);
+            if (!enc.empty())
+            {
+               const auto* c = std::get_if<Custom>(&type.value);
+               if (!c || c->id == "bool" || c->id == "string" || c->id == "utf8" ||
+                   c->id == "hex" || c->id == "map" || c->id == "set")
+                  fail(at + "the 'protobuf' attribute is for integers");
+            }
+            if (const auto* f = std::get_if<Float>(&type.value))
+            {
+               if (f->exp != 8 && f->exp != 11)
+                  fail(at + "a float that is not 32 or 64 bits has no protobuf type");
+               out.text = f->exp == 8 ? "float" : "double";
+            }
+            else if (const auto* c = std::get_if<Custom>(&type.value))
+            {
+               if (c->id == "bool")
+               {
+                  out.text    = "bool";
+                  out.integer = out.is_bool = true;
+               }
+               else if (c->id == "char")
+                  return integer(Int{32, false}, enc, at);
+               else if (c->id == "string" || c->id == "utf8")
+               {
+                  out.text      = "string";
+                  out.is_string = true;
+               }
+               else if (c->id == "hex")
+                  out.text = "bytes";
+               else if (c->id == "map" || c->id == "set")
+                  fail(at + "a list of lists has no protobuf type");
+               else
+                  return one(*c->type, enc, owner, member, depth + 1);
+            }
+            else if (std::holds_alternative<Nested>(type.value))
+               out.text = "bytes";
+            else if (declarable(type))
+               out.text = reference(place_anonymous(type, owner, member));
+            else if (const auto* v = std::get_if<Variant>(&type.value); v && _types.enum_shaped(*v))
+               out.text = reference(place_anonymous(type, owner, member));
+            else if (std::holds_alternative<List>(type.value) ||
+                     std::holds_alternative<BoundedList>(type.value))
+               fail(at + "a list of lists has no protobuf type");
+            else if (std::holds_alternative<Option>(type.value))
+               fail(at + "an optional here has no protobuf type");
+            else if (std::holds_alternative<Variant>(type.value))
+               fail(at + "a variant here has no protobuf type (a oneof is a member of a message)");
+            else if (std::holds_alternative<Array>(type.value))
+               fail(at + "a fixed array that is not bytes has no protobuf type");
+            else if (std::holds_alternative<Tuple>(type.value))
+               fail(at + "a tuple has no protobuf type");
+            else
+               fail(at + "this type has no protobuf form");
+            return out;
+         }
+
+         // The element of a list / set, or null.
+         const AnyType* list_element(const AnyType& type) const
+         {
+            const AnyType* node = &type;
+            if (const auto* c = std::get_if<Custom>(&node->value); c && c->id == "set")
+               node = &_types.resolve(*c->type);
+            else if (c)
+               return nullptr;
+            if (const auto* l = std::get_if<List>(&node->value))
+               return l->type.get();
+            if (const auto* b = std::get_if<BoundedList>(&node->value))
+               return b->type.get();
+            return nullptr;
+         }
+
+         // ── Declarations ────────────────────────────────────────────
+         static std::string pad(unsigned indent) { return std::string(indent * 2, ' '); }
+
+         static void statements(std::string& out, const std::vector<Attribute>& attrs,
+                                unsigned indent)
          {
             for (const auto& a : attrs)
             {
-               if (a.name == "definitionWillNotChange" ||
-                   a.name == "maxFields" ||
-                   a.name == "maxDynamicData")
-               {
-                  indent();
-                  _out << "// @" << a.name;
-                  if (a.value.has_value() && !a.value->empty())
-                     _out << "(" << *a.value << ")";
-                  _out << "\n";
-               }
+               if (!a.value)
+                  continue;
+               if (a.name == "proto_option")
+                  out += pad(indent) + "option " + *a.value + ";\n";
+               else if (a.name == "proto_reserved")
+                  out += pad(indent) + "reserved " + *a.value + ";\n";
+               else if (a.name == "proto_extensions")
+                  out += pad(indent) + "extensions " + *a.value + ";\n";
             }
          }
-         void emit_decl_impl(const std::string& name, const Variant& v)
+
+         static std::string bracket(const std::vector<std::string>& options)
          {
-            if (variant_is_enum_shape(v))
-               emit_enum(name, v.members);
+            if (options.empty())
+               return {};
+            std::string out = " [";
+            for (std::size_t i = 0; i < options.size(); ++i)
+               out += (i ? ", " : "") + options[i];
+            return out + "]";
+         }
+
+         std::vector<std::string> field_options(const std::vector<Attribute>& attrs) const
+         {
+            std::vector<std::string> out;
+            for (const auto& a : attrs)
+            {
+               if (a.name == "deprecated")
+                  out.push_back("deprecated = true");
+               else if (a.name == "default" && a.value && _proto2)
+                  out.push_back("default = " + *a.value);
+               else if (a.name == "proto_option" && a.value)
+                  out.push_back(*a.value);
+            }
+            return out;
+         }
+
+         std::string declaration(const AnyType& node, unsigned indent)
+         {
+            if (++_depth > 64)
+               fail("declarations nested too deeply");
+            // Copied: reading the members may add declarations.
+            const decl  self = _decls.at(&node);
+            std::string out;
+            if (const auto* e = std::get_if<Enum>(&node.value))
+               out = enumeration(self, *e, indent);
+            else if (const auto* v = std::get_if<Variant>(&node.value))
+               out = unit_enumeration(self, *v, indent);
             else
-               emit_oneof_message(name, v.members);
-         }
-         void emit_decl_impl(const std::string& name, const Resource& r)
-         {
-            indent();
-            _out << "// @psio:resource " << to_pascal(r.name.empty()
-                                                         ? name
-                                                         : r.name)
-                 << " (methods omitted — see WIT/capnp for the surface)\n";
-            std::vector<Member> empty;
-            emit_message(r.name.empty() ? name : r.name, empty);
-         }
-         template <typename T>
-         void emit_decl_impl(const std::string& name, const T& t)
-         {
-            indent();
-            _out << "// alias " << to_pascal(name) << " = "
-                 << inline_any_default(t) << ";\n\n";
-            (void)t;
+               out = message(self, indent);
+            --_depth;
+            return out;
          }
 
-         void emit_message(const std::string&         name,
-                           const std::vector<Member>& members,
-                           std::string_view           leading = "")
+         std::string scope_of(const decl& self) const
          {
-            indent();
-            if (!leading.empty())
-            {
-               _out << leading << "\n";
-               indent();
-            }
-            _out << "message " << to_pascal(name) << " {\n";
-            ++_indent;
-            std::uint32_t auto_id = 1;
-            for (const auto& m : members)
-            {
-               indent();
-               emit_member_line(m, auto_id);
-               ++auto_id;
-            }
-            --_indent;
-            indent();
-            _out << "}\n\n";
+            const auto dot = self.full.rfind('.');
+            return dot == std::string::npos ? std::string{} : self.full.substr(0, dot);
          }
 
-         void emit_enum(const std::string&         name,
-                        const std::vector<Member>& members)
+         std::string enumeration(const decl& self, const Enum& e, unsigned indent)
          {
-            indent();
-            _out << "enum " << to_pascal(name) << " {\n";
-            ++_indent;
-            //  proto3 enums must have a zero value; the first listed
-            //  member fills that slot.
+            const AnyType& under = _types.resolve(*e.type);
+            std::uint32_t  bits  = 32;
+            bool           sign  = true;
+            if (const auto* i = std::get_if<Int>(&under.value))
+            {
+               bits = i->bits;
+               sign = i->isSigned;
+            }
+            else if (const auto* c = std::get_if<Custom>(&under.value); !c || c->id != "bool")
+               fail("enum '" + self.full + "' is not over an integer");
+            std::vector<std::pair<std::string, std::int64_t>> values;
+            bool                                              alias = false;
+            std::set<std::int64_t>                            seen;
+            for (const auto& m : e.members)
+            {
+               std::int64_t v = static_cast<std::int64_t>(m.value);
+               if (bits < 64)
+               {
+                  const std::uint64_t mask = (std::uint64_t{1} << bits) - 1;
+                  std::uint64_t       u    = m.value & mask;
+                  if ((sign || bits == 32) && (u >> (bits - 1)))
+                     u |= ~mask;
+                  v = static_cast<std::int64_t>(u);
+               }
+               if (v < INT32_MIN || v > INT32_MAX)
+                  fail("enum '" + self.full + "': the value of '" + m.name +
+                       "' is not an int32");
+               alias |= !seen.insert(v).second;
+               values.emplace_back(m.name, v);
+            }
+            return enum_text(self, std::move(values), alias, indent);
+         }
+
+         std::string unit_enumeration(const decl& self, const Variant& v, unsigned indent)
+         {
+            std::vector<std::pair<std::string, std::int64_t>> values;
+            for (std::size_t i = 0; i < v.members.size(); ++i)
+               values.emplace_back(v.members[i].name, static_cast<std::int64_t>(i));
+            return enum_text(self, std::move(values), false, indent);
+         }
+
+         std::string enum_text(const decl& self, std::vector<std::pair<std::string, std::int64_t>> values,
+                               bool alias, unsigned indent)
+         {
+            const std::string scope = scope_of(self);
+            static const std::vector<Attribute> none;
+            const auto& attrs = self.entry ? self.entry->attributes : none;
+            std::string out   = pad(indent) + "enum " + self.name + " {\n";
+            bool        stated = false;
+            for (const auto& a : attrs)
+               if (a.name == "proto_option" && a.value && a.value->starts_with("allow_alias"))
+                  stated = true;
+            if (alias && !stated)
+               out += pad(indent + 1) + "option allow_alias = true;\n";
+            statements(out, attrs, indent + 1);
+            if (!_proto2)
+            {
+               // proto3: the first value is zero (what an absent field reads as).
+               std::size_t zero = values.size();
+               for (std::size_t i = 0; i < values.size() && zero == values.size(); ++i)
+                  if (values[i].second == 0)
+                     zero = i;
+               if (zero == values.size())
+                  values.insert(values.begin(), {self.name + "_UNSPECIFIED", 0});
+               else if (zero)
+                  std::rotate(values.begin(), values.begin() + zero, values.begin() + zero + 1);
+            }
+            else if (values.empty())
+               fail("enum '" + self.full + "' has no values");
+            for (const auto& [name, value] : values)
+            {
+               // Enum values are names of the enclosing scope.
+               std::string id = identifier(name);
+               if (!_taken.insert(scope + "." + id).second)
+                  id = unique(scope, self.name + "_" + id);
+               std::vector<std::string> options;
+               for (const auto& a : attrs)
+                  if (a.value && a.name == "proto_option." + name)
+                     options.push_back(*a.value);
+               out += pad(indent + 1) + id + " = " + std::to_string(value) + bracket(options) + ";\n";
+            }
+            return out + pad(indent) + "}\n\n";
+         }
+
+         std::string message(const decl& self, unsigned indent)
+         {
+            const auto* o       = std::get_if<Object>(&self.node->value);
+            const auto& members = o ? o->members : std::get<Struct>(self.node->value).members;
+            const auto& attrs   = o ? o->attributes : std::get<Struct>(self.node->value).attributes;
+
+            std::string             fields;
+            std::set<std::uint64_t> numbers;
+            // Field names are unique in a message, a oneof's among them.
+            std::set<std::string> names;
+            const auto            name_field = [&](std::string id, const std::string& fallback) {
+               if (names.count(id) && !fallback.empty())
+                  id = fallback;
+               const std::string base = id;
+               for (unsigned n = 2; !names.insert(id).second; ++n)
+                  id = base + "_" + std::to_string(n);
+               return id;
+            };
+            const auto              take = [&](std::uint64_t n, std::string_view member) {
+               if (!valid_number(n))
+                  fail(where(self.full, member) + "the field number " + std::to_string(n) +
+                       " is not one protobuf allows");
+               if (!numbers.insert(n).second)
+                  fail(where(self.full, member) + "the field number " + std::to_string(n) +
+                       " is used twice (a variant takes one number per alternative)");
+            };
+            const auto number_of = [&](const std::vector<Attribute>& a, std::uint64_t otherwise,
+                                       std::string_view member) {
+               bool present = false;
+               const std::string* text = d::attribute(a, "field", &present);
+               if (!present)
+                  return otherwise;
+               const auto n = text ? d::parse_unsigned(*text) : std::nullopt;
+               if (!n)
+                  fail(where(self.full, member) + "the 'field' attribute is not a number");
+               return *n;
+            };
+
             for (std::size_t i = 0; i < members.size(); ++i)
             {
-               indent();
-               _out << members[i].name << " = " << i << ";\n";
-            }
-            --_indent;
-            indent();
-            _out << "}\n\n";
-         }
+               const Member&       m      = members[i];
+               const std::string   id     = name_field(identifier(m.name), {});
+               const std::string   at     = where(self.full, m.name);
+               const std::uint64_t number = number_of(m.attributes, i + 1, m.name);
+               const std::string*  enc_at = d::attribute(m.attributes, "protobuf");
+               const std::string_view enc = enc_at ? std::string_view{*enc_at} : std::string_view{};
+               auto                options = field_options(m.attributes);
+               const AnyType&      type    = foreign(*m.type) ? *m.type : _types.resolve(*m.type);
+               const std::string   in      = pad(indent + 1);
+               const auto          enc_of  = [&](const std::vector<Attribute>& a, const char* name) {
+                  const std::string* e = d::attribute(a, name);
+                  return e ? std::string_view{*e} : std::string_view{};
+               };
 
-         void emit_oneof_message(const std::string&         name,
-                                 const std::vector<Member>& members)
-         {
-            indent();
-            _out << "message " << to_pascal(name) << " {\n";
-            ++_indent;
-            indent();
-            _out << "oneof value {\n";
-            ++_indent;
-            std::uint32_t auto_id = 1;
-            for (const auto& m : members)
-            {
-               indent();
-               //  oneof bodies disallow `repeated` and `optional`,
-               //  but the type-printer never emits those for variant
-               //  cases since the oneof itself is the discriminant.
-               auto* tup = std::get_if<Tuple>(&m.type->value);
-               if (tup && tup->members.empty())
-                  _out << "// @psio:bare-case " << m.name << " (no payload)\n";
+               if (const auto* v = std::get_if<Variant>(&type.value); v && !_types.enum_shaped(*v))
+               {
+                  if (!enc.empty())
+                     fail(at + "the 'protobuf' attribute does not apply to a variant");
+                  fields += in + "oneof " + id + " {\n";
+                  statements(fields, v->attributes, indent + 2);
+                  std::uint64_t j = 0;
+                  for (std::size_t a = 0; a < v->members.size(); ++a)
+                  {
+                     const Member& alt = v->members[a];
+                     if (a == 0 && _types.is_unit(*alt.type))
+                        continue;  // std::monostate: none set
+                     const std::uint64_t n = number_of(alt.attributes, number + j, m.name);
+                     ++j;
+                     take(n, m.name);
+                     const single s = one(*alt.type, enc_of(alt.attributes, "protobuf"), self.full,
+                                          m.name + "_" + alt.name);
+                     fields += in + "  " + s.text + " " +
+                               name_field(identifier(alt.name), identifier(m.name + "_" + alt.name)) + " = " +
+                               std::to_string(n) + bracket(field_options(alt.attributes)) + ";\n";
+                  }
+                  if (!j)
+                     fail(at + "a variant without alternatives");
+                  fields += in + "}\n";
+                  continue;
+               }
+               take(number, m.name);
+               std::string text;
+               if (const auto* opt = std::get_if<Option>(&type.value))
+                  text = "optional " + one(*opt->type, enc, self.full, m.name).text;
+               else if (const auto* c = std::get_if<Custom>(&type.value); c && c->id == "map")
+               {
+                  if (!enc.empty())
+                     fail(at + "a map has 'protobuf_key' and 'protobuf_value'");
+                  const AnyType* entry = list_element(_types.resolve(*c->type));
+                  const auto*    pair  = entry ? std::get_if<Tuple>(&_types.resolve(*entry).value) : nullptr;
+                  if (!pair || pair->members.size() != 2)
+                     fail(at + "a map is over a list of (key, value)");
+                  const single key = one(*pair->members[0], enc_of(m.attributes, "protobuf_key"),
+                                         self.full, m.name + "_key");
+                  if (!key.integer && !key.is_string)
+                     fail(at + "a map's key is an integer, a bool or a string");
+                  const single value = one(*pair->members[1], enc_of(m.attributes, "protobuf_value"),
+                                           self.full, m.name + "_value");
+                  text = "map<" + key.text + ", " + value.text + ">";
+               }
+               else if (const AnyType* element = list_element(type))
+                  text = "repeated " + one(*element, enc, self.full, m.name).text;
                else
-                  _out << inline_any(*m.type, m.attributes) << " " << m.name
-                       << " = " << auto_id << ";\n";
-               ++auto_id;
+               {
+                  const single s = one(*m.type, enc, self.full, m.name);
+                  if (_proto2)
+                     text = d::has_attribute(m.attributes, "required") ? "required " : "optional ";
+                  text += s.text;
+               }
+               fields += in + text + " " + id + " = " + std::to_string(number) + bracket(options) +
+                         ";\n";
             }
-            --_indent;
-            indent();
-            _out << "}\n";
-            --_indent;
-            indent();
-            _out << "}\n\n";
+
+            std::string out = pad(indent) + "message " + self.name + " {\n";
+            statements(out, attrs, indent + 1);
+            // The members may have added nested declarations? No: an
+            // anonymous declaration goes to the top. Children are fixed.
+            for (const AnyType* child : _decls.at(self.node).children)
+               out += declaration(*child, indent + 1);
+            return out + fields + pad(indent) + "}\n\n";
          }
 
-         //  Emit one `<type> <name> = <id>;` line, honouring repeated /
-         //  optional / bytes / encoding-hint annotations.
-         void emit_member_line(const Member& m, std::uint32_t auto_id)
+         std::string service(const Interface& iface)
          {
-            std::uint32_t fid = auto_id;
-            if (auto v = attr_lookup(m.attributes, "field"))
-               fid = static_cast<std::uint32_t>(std::stoul(*v));
-
-            const AnyType& t       = *m.type;
-            bool           printed = false;
-
-            //  Option<T> → `optional T`.
-            if (auto* opt = std::get_if<Option>(&t.value))
+            std::string out = "service " + identifier(iface.name) + " {\n";
+            statements(out, iface.attributes, 1);
+            for (const auto& f : iface.funcs)
             {
-               _out << "optional " << inline_any(*opt->type, m.attributes);
-               printed = true;
+               const std::string at = "function '" + f.name + "' of '" + iface.name + "': ";
+               if (f.params.size() != 1 || !f.result)
+                  fail(at + "an rpc takes one message and returns one");
+               const auto message_name = [&](const AnyType& written, const char* role) {
+                  if (foreign(written))
+                     return std::get<Type>(written.value).type;
+                  const AnyType& type = _types.resolve(written);
+                  if (!is_message(type))
+                     fail(at + "an rpc takes one message and returns one");
+                  return reference(place_anonymous(type, iface.name, f.name + role));
+               };
+               out += "  rpc " + identifier(f.name) + " (" +
+                      (d::has_attribute(f.attributes, "proto_client_streaming") ? "stream " : "") +
+                      message_name(*f.params[0].type, "_request") + ") returns (" +
+                      (d::has_attribute(f.attributes, "proto_server_streaming") ? "stream " : "") +
+                      message_name(**f.result, "_response") + ")";
+               std::string options;
+               statements(options, f.attributes, 2);
+               out += options.empty() ? ";\n" : " {\n" + options + "  }\n";
             }
-            //  List / BoundedList of u8 → bytes (no `repeated`).
-            else if (is_byte_list(t))
-            {
-               _out << "bytes";
-               printed = true;
-            }
-            else if (auto* lst = std::get_if<List>(&t.value))
-            {
-               _out << "repeated " << inline_any(*lst->type, m.attributes);
-               printed = true;
-            }
-            else if (auto* blst = std::get_if<BoundedList>(&t.value))
-            {
-               _out << "repeated " << inline_any(*blst->type, m.attributes);
-               printed = true;
-            }
-            else if (auto* arr = std::get_if<Array>(&t.value))
-            {
-               _out << "repeated " << inline_any(*arr->type, m.attributes);
-               printed = true;
-            }
-
-            if (!printed)
-               _out << inline_any(t, m.attributes);
-
-            _out << " " << m.name << " = " << fid << ";\n";
-         }
-
-         // ── Inline type forms (encoding-hint aware) ───────────────
-         std::string inline_any(const AnyType&                t,
-                                const std::vector<Attribute>& attrs)
-         {
-            return std::visit(
-               [&]<typename U>(const U& v) {
-                  return inline_type(v, attrs);
-               },
-               t.value);
-         }
-
-         //  Default-attribute overload for use from emit_decl_impl
-         //  fallback (alias comment).
-         template <typename U>
-         std::string inline_any_default(const U& v)
-         {
-            std::vector<Attribute> none;
-            return inline_type(v, none);
-         }
-
-         // An enum is rendered as its underlying integer.
-         std::string inline_type(const Enum& e, const std::vector<Attribute>& attrs)
-         {
-            return inline_any(*e.type, attrs);
-         }
-
-         std::string inline_type(const Int&                    i,
-                                 const std::vector<Attribute>& attrs)
-         {
-            //  proto3 has no narrower-than-32-bit types.  8/16-bit
-            //  Int widens; signedness preserved.
-            const std::uint32_t bits = i.bits <= 32 ? 32u : 64u;
-            const bool          fix  = has_attr(attrs, "pb_fixed");
-            const bool          zig  = has_attr(attrs, "pb_sint");
-
-            if (fix)
-            {
-               if (bits == 32)
-                  return i.isSigned ? "sfixed32" : "fixed32";
-               return i.isSigned ? "sfixed64" : "fixed64";
-            }
-            if (zig && i.isSigned)
-               return bits == 32 ? "sint32" : "sint64";
-            if (i.isSigned)
-               return bits == 32 ? "int32" : "int64";
-            return bits == 32 ? "uint32" : "uint64";
-         }
-         std::string inline_type(const Float& f,
-                                 const std::vector<Attribute>&)
-         {
-            if (f.exp == 8 && f.mantissa == 23)
-               return "float";
-            if (f.exp == 11 && f.mantissa == 52)
-               return "double";
-            return "/* TODO: non-IEEE float */";
-         }
-         std::string inline_type(const Type& t,
-                                 const std::vector<Attribute>&)
-         {
-            if (t.type == "bool")
-               return "bool";
-            if (t.type == "string")
-               return "string";
-            if (t.type == "char")
-               return "uint32  // @psio:char";
-            if (!t.type.empty() && t.type.front() == '@')
-            {
-               if (auto* resolved = _s.get(t.type))
-                  return inline_any(*resolved, {});
-               return "/* TODO: unresolved " + t.type + " */";
-            }
-            return to_pascal(t.type);
-         }
-         std::string inline_type(const List& l,
-                                 const std::vector<Attribute>& attrs)
-         {
-            //  Bare List<u8> already collapsed to `bytes` upstream;
-            //  this path is only hit for nested lists, where proto3
-            //  has no syntax — wrap in a comment.
-            return "/* TODO: nested list of " +
-                   inline_any(*l.type, attrs) + " */";
-         }
-         std::string inline_type(const BoundedList& l,
-                                 const std::vector<Attribute>& attrs)
-         {
-            return "/* TODO: nested bounded-list of " +
-                   inline_any(*l.type, attrs) + " */";
-         }
-         std::string inline_type(const Option& o,
-                                 const std::vector<Attribute>& attrs)
-         {
-            //  Option as a value-position type (e.g. inside a list of
-            //  optionals): proto3 can't express that directly.
-            return "/* TODO: nested option of " +
-                   inline_any(*o.type, attrs) + " */";
-         }
-         std::string inline_type(const Tuple& t,
-                                 const std::vector<Attribute>&)
-         {
-            if (t.members.empty())
-               return "/* @psio:unit */";
-            return "/* TODO: tuple */";
-         }
-         std::string inline_type(const Array& a,
-                                 const std::vector<Attribute>& attrs)
-         {
-            return "/* TODO: nested array of " +
-                   inline_any(*a.type, attrs) + " */";
-         }
-         std::string inline_type(const Object&,
-                                 const std::vector<Attribute>&)
-         {
-            return "/* TODO: anonymous record */";
-         }
-         std::string inline_type(const Struct&,
-                                 const std::vector<Attribute>&)
-         {
-            return "/* TODO: anonymous struct */";
-         }
-         std::string inline_type(const Variant&,
-                                 const std::vector<Attribute>&)
-         {
-            return "/* TODO: anonymous variant */";
-         }
-         std::string inline_type(const Resource& r,
-                                 const std::vector<Attribute>&)
-         {
-            return to_pascal(r.name);
-         }
-         std::string inline_type(const Nested&,
-                                 const std::vector<Attribute>&)
-         {
-            // The PSSZ bytes of the inner value.
-            return "bytes";
-         }
-         std::string inline_type(const Custom& c,
-                                 const std::vector<Attribute>& attrs)
-         {
-            if (c.id == "bool")
-               return "bool";
-            if (c.id == "string")
-               return "string";
-            if (c.id == "char")
-               return "uint32  // @psio:char";
-            if (c.id == "hex")
-            {
-               if (auto* lst = std::get_if<List>(&c.type->value))
-                  if (auto* inner = std::get_if<Int>(&lst->type->value);
-                      inner && inner->bits == 8 && !inner->isSigned)
-                     return "bytes";
-            }
-            return inline_any(*c.type, attrs);
+            return out + "}\n\n";
          }
       };
-
    }  // namespace emit_protobuf_detail
 
-   /// Emit the full `.proto3` schema text representation of `schema`.
-   /// Output starts with `syntax = "proto3";` and ends with a trailing
-   /// newline.
+   /// The `.proto` file of a schema. std::runtime_error for what protobuf
+   /// cannot say.
    inline std::string emit_protobuf(const Schema& schema)
    {
       emit_protobuf_detail::Emitter e{schema};

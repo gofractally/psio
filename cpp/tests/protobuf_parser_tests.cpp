@@ -1,330 +1,267 @@
-// Tests for psio/protobuf_parser.hpp — `.proto3` text → Schema IR.
+// psio::parse_protobuf: `.proto` text → Schema IR. That the IR keeps the
+// file's descriptor is protobuf_schema_tests.cpp (which needs protoc); here:
+// what the IR holds, what is refused and where, and that the parser is
+// linear in the text.
 
 #include <psio/emit_protobuf.hpp>
 #include <psio/protobuf_parser.hpp>
 
 #include <catch.hpp>
 
+#include <chrono>
 #include <string>
-#include <string_view>
-#include <variant>
 
-using psio::AnyType;
-using psio::Member;
-using psio::parse_protobuf;
-using psio::Schema;
-using psio::schema_types::Attribute;
-using psio::schema_types::Custom;
-using psio::schema_types::Float;
-using psio::schema_types::Int;
-using psio::schema_types::List;
-using psio::schema_types::Object;
-using psio::schema_types::Option;
-using psio::schema_types::Tuple;
-using psio::schema_types::Type;
-using psio::schema_types::Variant;
+using namespace psio::schema_types;
 
 namespace
 {
-   const Member* find_member(const std::vector<Member>& members,
-                             std::string_view           name)
+   const std::string* attribute(const std::vector<Attribute>& attrs, std::string_view name)
    {
-      for (const auto& m : members)
-         if (m.name == name)
-            return &m;
+      for (const auto& a : attrs)
+         if (a.name == name)
+            return a.value ? &*a.value : nullptr;
       return nullptr;
    }
-
-   bool has_attr(const std::vector<Attribute>& attrs,
-                 std::string_view              name)
+   bool has(const std::vector<Attribute>& attrs, std::string_view name)
    {
       for (const auto& a : attrs)
          if (a.name == name)
             return true;
       return false;
    }
-
-   std::string attr_val(const std::vector<Attribute>& attrs,
-                        std::string_view              name)
+   const Object& message(const Schema& s, std::string_view name)
    {
-      for (const auto& a : attrs)
-         if (a.name == name && a.value)
-            return *a.value;
+      const AnyType* t = s.get(name);
+      REQUIRE(t);
+      return std::get<Object>(t->value);
+   }
+   const Member& member(const Object& o, std::string_view name)
+   {
+      for (const auto& m : o.members)
+         if (m.name == name)
+            return m;
+      FAIL("no member " << name);
+      return o.members.front();
+   }
+   std::string refusal(std::string_view text)
+   {
+      try
+      {
+         (void)psio::parse_protobuf(text);
+      }
+      catch (const psio::protobuf_parse_error& e)
+      {
+         return e.what();
+      }
       return {};
    }
+
+   const char* const sample = R"(// a comment
+syntax = "proto3";
+package demo.v1;
+import public "other.proto";
+option java_package = "a;b";
+
+enum Color { option allow_alias = true; NONE = 0; Red = 5; ROUGE = 5 [deprecated = true]; Neg = -7; }
+
+message Outer {
+  reserved 9, 20 to 30;
+  option deprecated = true;
+  message Mid { message Leaf { sint32 CamelCase = 1; } Leaf leaf = 1; }
+  int32 a = 1;
+  optional string name = 2 [json_name = "n", deprecated = true];
+  repeated Mid.Leaf leaves = 3 [packed = false];
+  map<sfixed64, Mid> mids = 4;
+  oneof first { fixed32 x = 5; Mid.Leaf y = 6; }
+  bytes raw = 7;
+  oneof second { Color tint = 8; }
+  other.Thing imported = 10;
+  .demo.v1.Outer.Mid absolute = 11;
 }
 
-TEST_CASE("parse_protobuf: package + simple message",
-          "[protobuf_parser]")
-{
-   auto src = R"(
-      syntax = "proto3";
-      package wasi.io;
+service Api { rpc Get (Outer) returns (stream Outer.Mid) { option deprecated = true; } }
+)";
+}  // namespace
 
-      message Point {
-         int32 x = 1;
-         int32 y = 2;
+TEST_CASE("parse_protobuf: what the IR keeps", "[protobuf_parser]")
+{
+   const Schema s = psio::parse_protobuf(sample);
+   CHECK(s.package.name == "demo:v1");
+   CHECK(!has(s.package.attributes, "proto_syntax"));
+   CHECK(*attribute(s.package.attributes, "proto_import") == "public \"other.proto\"");
+   CHECK(*attribute(s.package.attributes, "proto_option") == "java_package = \"a;b\"");
+
+   // An enum's values, as written.
+   const Enum& color = std::get<Enum>(s.get("Color")->value);
+   REQUIRE(color.members.size() == 4);
+   CHECK(color.members[1].name == "Red");
+   CHECK(color.members[1].value == 5);
+   CHECK(color.members[2].value == 5);
+   CHECK(static_cast<std::int64_t>(color.members[3].value) == -7);
+   CHECK(std::get<Int>(color.type->value) == Int{32, true});
+   for (const auto& entry : s.types)
+      if (entry.name == "Color")
+      {
+         CHECK(*attribute(entry.attributes, "proto_option") == "allow_alias = true");
+         CHECK(*attribute(entry.attributes, "proto_option.ROUGE") == "deprecated = true");
       }
-   )";
-   Schema s = parse_protobuf(src);
-   CHECK(s.package.name == "wasi:io");
-   const auto* t = s.get("point");
-   REQUIRE(t);
-   const auto* obj = std::get_if<Object>(&t->value);
-   REQUIRE(obj);
-   REQUIRE(obj->members.size() == 2);
-   CHECK(obj->members[0].name == "x");
-   CHECK(attr_val(obj->members[0].attributes, "field") == "1");
-   CHECK(obj->members[1].name == "y");
-   CHECK(attr_val(obj->members[1].attributes, "field") == "2");
+
+   // Nesting to any depth, names as written.
+   CHECK(s.get("Outer.Mid"));
+   const Object& leaf = message(s, "Outer.Mid.Leaf");
+   CHECK(leaf.members[0].name == "CamelCase");
+   CHECK(*attribute(leaf.members[0].attributes, "protobuf") == "sint");
+
+   const Object& outer = message(s, "Outer");
+   CHECK(*attribute(outer.attributes, "proto_reserved") == "9, 20 to 30");
+   CHECK(*attribute(outer.attributes, "proto_option") == "deprecated = true");
+   REQUIRE(outer.members.size() == 9);
+
+   const Member& name = member(outer, "name");
+   CHECK(std::holds_alternative<Option>(name.type->value));
+   CHECK(*attribute(name.attributes, "field") == "2");
+   CHECK(has(name.attributes, "deprecated"));
+   CHECK(*attribute(name.attributes, "proto_option") == "json_name = \"n\"");
+
+   // A reference is the declaration's name.
+   const Member& leaves = member(outer, "leaves");
+   CHECK(std::get<Type>(std::get<List>(leaves.type->value).type->value).type == "Outer.Mid.Leaf");
+   CHECK(*attribute(leaves.attributes, "proto_option") == "packed = false");
+   CHECK(std::get<Type>(member(outer, "absolute").type->value).type == "Outer.Mid");
+   // … or, for a type of an imported file, as written.
+   CHECK(std::get<Type>(member(outer, "imported").type->value).type == "other.Thing");
+
+   const Member& mids = member(outer, "mids");
+   const Custom& map  = std::get<Custom>(mids.type->value);
+   CHECK(map.id == "map");
+   const Tuple& entry = std::get<Tuple>(std::get<List>(map.type->value).type->value);
+   CHECK(std::get<Int>(entry.members[0]->value) == Int{64, true});
+   CHECK(std::get<Type>(entry.members[1]->value).type == "Outer.Mid");
+   CHECK(*attribute(mids.attributes, "protobuf_key") == "fixed");
+
+   // A oneof beside fields; two of them stay two.
+   const Variant& first = std::get<Variant>(member(outer, "first").type->value);
+   REQUIRE(first.members.size() == 3);
+   CHECK(std::holds_alternative<Tuple>(first.members[0].type->value));  // none set
+   CHECK(first.members[1].name == "x");
+   CHECK(*attribute(first.members[1].attributes, "field") == "5");
+   CHECK(*attribute(first.members[1].attributes, "protobuf") == "fixed");
+   CHECK(*attribute(first.members[2].attributes, "field") == "6");
+   const Variant& second = std::get<Variant>(member(outer, "second").type->value);
+   CHECK(second.members.size() == 2);
+   CHECK(*attribute(member(outer, "second").attributes, "field") == "8");
+
+   REQUIRE(s.interfaces.size() == 1);
+   const Func& get = s.interfaces[0].funcs[0];
+   CHECK(get.name == "Get");
+   CHECK(std::get<Type>(get.params[0].type->value).type == "Outer");
+   CHECK(std::get<Type>((*get.result)->value).type == "Outer.Mid");
+   CHECK(has(get.attributes, "proto_server_streaming"));
+   CHECK(!has(get.attributes, "proto_client_streaming"));
+   CHECK(*attribute(get.attributes, "proto_option") == "deprecated = true");
+
+   // Text → IR → text → IR is stable.
+   const std::string once = psio::emit_protobuf(s);
+   CHECK(psio::emit_protobuf(psio::parse_protobuf(once)) == once);
+   CHECK(psio::parse_protobuf(once) == psio::parse_protobuf(psio::emit_protobuf(psio::parse_protobuf(once))));
 }
 
-TEST_CASE("parse_protobuf: scalar type mapping",
-          "[protobuf_parser]")
+TEST_CASE("parse_protobuf: proto2", "[protobuf_parser]")
 {
-   auto src = R"(
-      message AllScalars {
-         int32 a = 1;
-         int64 b = 2;
-         uint32 c = 3;
-         uint64 d = 4;
-         sint32 e = 5;
-         sint64 f = 6;
-         fixed32 g = 7;
-         fixed64 h = 8;
-         sfixed32 i = 9;
-         sfixed64 j = 10;
-         float k = 11;
-         double l = 12;
-         bool m = 13;
-         string n = 14;
-         bytes o = 15;
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto* t = s.get("all_scalars");
-   REQUIRE(t);
-   const auto& m = std::get<Object>(t->value).members;
-
-   //  Int round-trips with width + signedness from the proto keyword.
-   {
-      const auto* a = find_member(m, "a");
-      auto&       v = a->type->value;
-      REQUIRE(std::holds_alternative<Int>(v));
-      CHECK(std::get<Int>(v).bits == 32);
-      CHECK(std::get<Int>(v).isSigned == true);
-      CHECK(!has_attr(a->attributes, "pb_fixed"));
-      CHECK(!has_attr(a->attributes, "pb_sint"));
-   }
-   //  sint*  → pb_sint hint, signed varint.
-   {
-      const auto* e = find_member(m, "e");
-      REQUIRE(std::holds_alternative<Int>(e->type->value));
-      CHECK(has_attr(e->attributes, "pb_sint"));
-   }
-   //  fixed* → pb_fixed hint, unsigned int width preserved.
-   {
-      const auto* g = find_member(m, "g");
-      const auto& v = g->type->value;
-      REQUIRE(std::holds_alternative<Int>(v));
-      CHECK(std::get<Int>(v).isSigned == false);
-      CHECK(std::get<Int>(v).bits == 32);
-      CHECK(has_attr(g->attributes, "pb_fixed"));
-   }
-   //  sfixed* → pb_fixed hint, signed.
-   {
-      const auto* i = find_member(m, "i");
-      const auto& v = i->type->value;
-      REQUIRE(std::holds_alternative<Int>(v));
-      CHECK(std::get<Int>(v).isSigned == true);
-      CHECK(has_attr(i->attributes, "pb_fixed"));
-   }
-   //  float / double → Float{8,23} / Float{11,52}.
-   {
-      const auto* k = find_member(m, "k");
-      REQUIRE(std::holds_alternative<Float>(k->type->value));
-      CHECK(std::get<Float>(k->type->value).exp == 8);
-      const auto* l = find_member(m, "l");
-      CHECK(std::get<Float>(l->type->value).exp == 11);
-   }
-   //  bool / string round-trip via Custom carrier.
-   {
-      const auto* mb = find_member(m, "m");
-      REQUIRE(std::holds_alternative<Custom>(mb->type->value));
-      CHECK(std::get<Custom>(mb->type->value).id == "bool");
-      const auto* n = find_member(m, "n");
-      REQUIRE(std::holds_alternative<Custom>(n->type->value));
-      CHECK(std::get<Custom>(n->type->value).id == "string");
-   }
-   //  bytes → bare List<u8>.
-   {
-      const auto* o = find_member(m, "o");
-      REQUIRE(std::holds_alternative<List>(o->type->value));
-   }
+   const Schema s = psio::parse_protobuf(
+      "message M { required int32 a = 1; optional string b = 2 [default = \"x;y\"];\n"
+      "  repeated M ms = 3; optional E e = 4 [default = B]; enum E { A = 1; B = 2; }\n"
+      "  extensions 100 to max; }");
+   CHECK(*attribute(s.package.attributes, "proto_syntax") == "proto2");
+   const Object& m = message(s, "M");
+   CHECK(has(member(m, "a").attributes, "required"));
+   CHECK(*attribute(member(m, "b").attributes, "default") == "\"x;y\"");
+   CHECK(*attribute(member(m, "e").attributes, "default") == "B");
+   CHECK(*attribute(m.attributes, "proto_extensions") == "100 to max");
+   CHECK(std::get<Enum>(s.get("M.E")->value).members[0].value == 1);
+   const std::string text = psio::emit_protobuf(s);
+   CHECK(text.find("required int32 a = 1;") != std::string::npos);
+   CHECK(text.find("optional string b = 2 [default = \"x;y\"];") != std::string::npos);
+   CHECK(psio::emit_protobuf(psio::parse_protobuf(text)) == text);
 }
 
-TEST_CASE("parse_protobuf: repeated and optional",
-          "[protobuf_parser]")
+TEST_CASE("parse_protobuf: scoping", "[protobuf_parser]")
 {
-   auto src = R"(
-      message Msg {
-         repeated int32 ids = 1;
-         optional int32 maybe = 2;
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto& m = std::get<Object>(s.get("msg")->value).members;
-
-   const auto* ids = find_member(m, "ids");
-   REQUIRE(std::holds_alternative<List>(ids->type->value));
-   const auto& list = std::get<List>(ids->type->value);
-   REQUIRE(std::holds_alternative<Int>(list.type->value));
-   CHECK(std::get<Int>(list.type->value).bits == 32);
-
-   const auto* maybe = find_member(m, "maybe");
-   REQUIRE(std::holds_alternative<Option>(maybe->type->value));
+   // The innermost declaration of the first component wins.
+   const Schema s = psio::parse_protobuf(
+      "syntax = \"proto3\"; package p.q;\n"
+      "message X { int32 a = 1; }\n"
+      "message A { message X { int32 b = 1; } message B { X inner = 1; .p.q.X outer = 2; p.q.X also = 3; } }");
+   const Object& b = message(s, "A.B");
+   CHECK(std::get<Type>(b.members[0].type->value).type == "A.X");
+   CHECK(std::get<Type>(b.members[1].type->value).type == "X");
+   CHECK(std::get<Type>(b.members[2].type->value).type == "X");
+   const std::string text = psio::emit_protobuf(s);
+   CHECK(text.find(".p.q.A.X inner = 1;") != std::string::npos);
+   CHECK(text.find(".p.q.X outer = 2;") != std::string::npos);
 }
 
-TEST_CASE("parse_protobuf: enum → Variant of empty cases",
-          "[protobuf_parser]")
+TEST_CASE("parse_protobuf: what is refused, and where", "[protobuf_parser]")
 {
-   auto src = R"(
-      enum Color {
-         RED = 0;
-         GREEN = 1;
-         BLUE = 2;
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto* t = s.get("color");
-   REQUIRE(t);
-   REQUIRE(std::holds_alternative<Variant>(t->value));
-   const auto& cases = std::get<Variant>(t->value).members;
-   REQUIRE(cases.size() == 3);
-   CHECK(cases[0].name == "RED");
-   CHECK(cases[2].name == "BLUE");
-   //  Each case is a unit Tuple.
-   CHECK(std::holds_alternative<Tuple>(cases[0].type->value));
+   CHECK(refusal("edition = \"2023\";") ==
+         "proto:1:1: editions are not read (proto2 and proto3 are)");
+   CHECK(refusal("syntax = \"proto3\";\nextend Foo { int32 a = 1; }") ==
+         "proto:2:1: extensions are not read");
+   CHECK(refusal("message M { optional group G = 1 { } }") == "proto:1:22: groups are not read");
+   CHECK(refusal("syntax = \"proto3\"; message M { int32 a = 1; int32 b = 1; }") ==
+         "proto:1:55: the field number 1 is used twice");
+   CHECK(refusal("syntax = \"proto3\"; message M { int32 a = 0; }") ==
+         "proto:1:42: a field number is within 1..536870911 and outside 19000..19999");
+   CHECK(refusal("syntax = \"proto3\"; message M { int32 a = 19000; }") ==
+         "proto:1:42: a field number is within 1..536870911 and outside 19000..19999");
+   CHECK(refusal("syntax = \"proto3\"; message M { int32 a = 99999999999999999999; }") ==
+         "proto:1:42: expected a field number");
+   CHECK(refusal("syntax = \"proto3\"; message M { Missing a = 1; }") ==
+         "proto:1:32: 'Missing' is not declared");
+   CHECK(refusal("syntax = \"proto3\"; message M { required int32 a = 1; }") ==
+         "proto:1:32: proto3 has no required fields");
+   CHECK(refusal("syntax = \"proto3\"; enum E { A = 1; }") ==
+         "proto:1:25: proto3: the first value of an enum is zero");
+   CHECK(refusal("syntax = \"proto3\"; message M {} message M {}") ==
+         "proto:1:41: 'M' is declared twice");
+   CHECK(refusal("syntax = \"proto3\"; message M { map<float, int32> m = 1; }") ==
+         "proto:1:36: a map's key is an integer, a bool or a string");
+   CHECK(refusal("message M { int32 a = 1; }") ==
+         "proto:1:13: proto2: a field is optional, required or repeated");
+   CHECK(refusal("syntax = \"proto4\";") == "proto:1:10: expected \"proto2\" or \"proto3\"");
+   // Text that does not end.
+   CHECK(refusal("enum E {") == "proto:1:9: expected an enum value name");
+   CHECK(refusal("enum E { 5") == "proto:1:10: expected an enum value name");
+   CHECK(refusal("message M { /* never") == "proto:1:21: a comment that does not end");
+   CHECK(refusal("option a = \"x") == "proto:1:14: a string that does not end");
+   CHECK(refusal("message M {") == "proto:1:12: a message that does not end");
+   CHECK(refusal("option x = { a: [1, 2 ;") == "proto:1:24: unexpected end of the file");
+   CHECK(refusal("syntax = \"proto3\"; message M { oneof o { int32 a = 1;") ==
+         "proto:1:54: a oneof that does not end");
+   std::string deep;
+   for (int i = 0; i < 100; ++i)
+      deep += "message M" + std::to_string(i) + " { ";
+   CHECK(refusal(deep).find("messages nested too deeply") != std::string::npos);
 }
 
-TEST_CASE("parse_protobuf: oneof body collapses to Variant",
-          "[protobuf_parser]")
+TEST_CASE("parse_protobuf: linear in the text", "[protobuf_parser]")
 {
-   auto src = R"(
-      message Result {
-         oneof value {
-            int32 ok = 1;
-            string err = 2;
-         }
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto* t = s.get("result");
-   REQUIRE(t);
-   REQUIRE(std::holds_alternative<Variant>(t->value));
-   const auto& cases = std::get<Variant>(t->value).members;
-   REQUIRE(cases.size() == 2);
-   CHECK(cases[0].name == "ok");
-   CHECK(cases[1].name == "err");
-}
-
-TEST_CASE("parse_protobuf: skips imports + options",
-          "[protobuf_parser]")
-{
-   auto src = R"(
-      syntax = "proto3";
-      import "google/protobuf/any.proto";
-      option java_package = "com.example.foo";
-
-      message Empty {}
-   )";
-   Schema s = parse_protobuf(src);
-   CHECK(s.get("empty"));
-}
-
-TEST_CASE("parse_protobuf: round-trip emit→parse→emit",
-          "[protobuf_parser]")
-{
-   //  Build a Schema by parsing a hand-written proto, emit it, parse
-   //  the emit, compare.  Field numbers and pb_fixed/pb_sint hints
-   //  must survive the trip.
-   auto src = R"(
-      syntax = "proto3";
-      package demo;
-
-      message Bag {
-         int32 a = 1;
-         sint32 b = 2;
-         sfixed64 c = 3;
-         repeated int32 ids = 7;
-         optional string name = 8;
-      }
-   )";
-   Schema first  = parse_protobuf(src);
-   auto   text   = psio::emit_protobuf(first);
-   Schema second = parse_protobuf(text);
-
-   //  Spot-check: fields survive, hints survive, field numbers survive.
-   const auto& m = std::get<Object>(second.get("bag")->value).members;
-   const auto* b = find_member(m, "b");
-   CHECK(has_attr(b->attributes, "pb_sint"));
-   CHECK(attr_val(b->attributes, "field") == "2");
-   const auto* c = find_member(m, "c");
-   CHECK(has_attr(c->attributes, "pb_fixed"));
-   CHECK(attr_val(c->attributes, "field") == "3");
-   const auto* ids = find_member(m, "ids");
-   CHECK(std::holds_alternative<List>(ids->type->value));
-   CHECK(attr_val(ids->attributes, "field") == "7");
-   const auto* name = find_member(m, "name");
-   CHECK(std::holds_alternative<Option>(name->type->value));
-}
-
-TEST_CASE("parse_protobuf: explicit field numbers preserved",
-          "[protobuf_parser]")
-{
-   auto src = R"(
-      message M {
-         int32 first = 7;
-         int32 second = 11;
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto& m = std::get<Object>(s.get("m")->value).members;
-   CHECK(attr_val(find_member(m, "first")->attributes, "field") == "7");
-   CHECK(attr_val(find_member(m, "second")->attributes, "field") == "11");
-}
-
-TEST_CASE("parse_protobuf: stray semicolons and comments tolerated",
-          "[protobuf_parser]")
-{
-   auto src = R"(
-      // header comment
-      syntax = "proto3";
-
-      message M {
-         /* block
-            comment */
-         int32 a = 1;;
-         int32 b = 2;
-      }
-   )";
-   Schema s = parse_protobuf(src);
-   const auto& m = std::get<Object>(s.get("m")->value).members;
-   CHECK(m.size() == 2);
-}
-
-// Text that is not a schema must end in protobuf_parse_error, not in a loop:
-// an enum body that held anything but a name made no progress and grew until
-// memory ran out (found by the F3 audit; the rest of that audit's list is in
-// docs/formats-migration-status.md).
-TEST_CASE("parse_protobuf: an enum body that is not names is an error", "[protobuf_parser]")
-{
-   for (const char* text : {"enum E {", "enum E { @ }", "enum E { A = 0; 1 }", "enum E { A = 0; ",
-                            "message M { enum E { } ", "enum E { = }"})
-   {
-      INFO(text);
-      CHECK_THROWS_AS(psio::parse_protobuf(text), psio::protobuf_parse_error);
-   }
-   CHECK_THROWS_AS(psio::parse_protobuf("message M { } /* open"), psio::protobuf_parse_error);
-   CHECK_NOTHROW(psio::parse_protobuf("enum E { A = 0; B = 1; } /* closed */"));
+   const auto seconds = [](unsigned count) {
+      std::string text = "syntax = \"proto3\";\n";
+      for (unsigned i = 0; i < count; ++i)
+         text += "message M" + std::to_string(i) + " { int32 a = 1; M" +
+                 std::to_string(i ? i - 1 : 0) + " prev = 2; }\n";
+      const auto   begin = std::chrono::steady_clock::now();
+      const Schema s     = psio::parse_protobuf(text);
+      const auto   end   = std::chrono::steady_clock::now();
+      CHECK(s.types.size() == count);
+      return std::chrono::duration<double>(end - begin).count();
+   };
+   (void)seconds(1000);
+   const double small = seconds(40000);
+   const double large = seconds(320000);
+   INFO("40,000 messages: " << small << " s; 320,000: " << large << " s");
+   // Eight times the text: eight times the time, not sixty-four.
+   CHECK(large < small * 24);
+   CHECK(small < 1.0);
 }

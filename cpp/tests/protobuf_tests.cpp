@@ -5,9 +5,8 @@
 // scalar / container form, assert encode produces those exact bytes
 // (proving wire-format conformance), and decode round-trips back to
 // the original C++ value.  Compound types are checked for round-trip
-// identity rather than exact bytes since field order in the wire
-// matches declaration order today but isn't strictly required by
-// the spec.
+// identity here; byte identity with the official implementation for
+// every shape is protobuf_interop_tests.cpp.
 
 #include <psio/protobuf.hpp>
 
@@ -18,6 +17,9 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "protobuf_random.hpp"
+#include "protobuf_shapes.hpp"
 
 using bytes_t = std::vector<char>;
 
@@ -84,17 +86,13 @@ TEST_CASE("protobuf: int32 field=1 value=150 → 08 96 01", "[protobuf]")
    rt(m);
 }
 
-TEST_CASE("protobuf: int32 zero is omitted by varint encoding "
-          "(value byte = 0)",
-          "[protobuf]")
+TEST_CASE("protobuf: a zero scalar is not written (proto3 implicit presence)", "[protobuf]")
 {
-   //  Default-valued fields are still emitted in proto3 (since proto3.5
-   //  reverted to "always emit explicit fields" for simple scalars on
-   //  encode for typed APIs); we follow that rule.
-   //  tag 0x08 + varint(0) = 0x00.
    test_pb::OneInt m{0};
-   CHECK(psio::encode(psio::protobuf{}, m) == b({0x08, 0x00}));
+   CHECK(psio::encode(psio::protobuf{}, m).empty());
    rt(m);
+   // … and is read when a peer writes it.
+   CHECK(psio::from_protobuf<test_pb::OneInt>(std::span<const char>{b({0x08, 0x00})}).value == 0);
 }
 
 TEST_CASE("protobuf: string field=1 value=\"testing\"", "[protobuf]")
@@ -169,8 +167,7 @@ TEST_CASE("protobuf: bool true / false", "[protobuf]")
    //  tag 0x08 + 0x01 / 0x00.
    CHECK(psio::encode(psio::protobuf{}, test_pb::OneBool{true}) ==
          b({0x08, 0x01}));
-   CHECK(psio::encode(psio::protobuf{}, test_pb::OneBool{false}) ==
-         b({0x08, 0x00}));
+   CHECK(psio::encode(psio::protobuf{}, test_pb::OneBool{false}).empty());
    rt(test_pb::OneBool{true});
    rt(test_pb::OneBool{false});
 }
@@ -521,4 +518,247 @@ TEST_CASE("protobuf: validate rejects truncated varint", "[protobuf]")
    auto st  = psio::validate<test_pb::OneInt>(
       psio::protobuf{}, std::span<const char>{bad});
    CHECK(!st);
+}
+
+// ─── The mapping, beyond the first cut ──────────────────────────────
+
+namespace
+{
+   template <typename T>
+   bool accepts(const bytes_t& bytes)
+   {
+      const bool ok = psio::validate_protobuf<T>(std::span<const char>{bytes}).ok();
+      // Validate and decode are one reader: the same verdict.
+      T    out{};
+      CHECK(psio::protobuf::decode_checked(std::span<const char>{bytes}, out).ok() == ok);
+      return ok;
+   }
+   template <typename T>
+   std::string refusal(const bytes_t& bytes)
+   {
+      const auto st = psio::validate_protobuf<T>(std::span<const char>{bytes});
+      return st.ok() ? std::string{} : std::string{st.error().what};
+   }
+   template <typename T>
+   T read(const bytes_t& bytes)
+   {
+      return psio::from_protobuf<T>(std::span<const char>{bytes});
+   }
+}  // namespace
+
+struct PbClash
+{
+   std::variant<std::int32_t, std::string> v;
+   std::int32_t                            after = 0;  // 2: taken by the variant
+};
+PSIO_REFLECT(PbClash, v, after)
+struct PbZero
+{
+   std::int32_t a = 0;
+};
+PSIO_REFLECT(PbZero, attr(a, field<19000>))
+static_assert(!psio::detail::pb_impl::slots_valid_v<PbClash>);
+static_assert(!psio::detail::pb_impl::slots_valid_v<PbZero>);
+static_assert(psio::detail::pb_impl::slots_valid_v<PbChoice>);
+
+TEST_CASE("protobuf: zero values are absent, and absent is zero", "[protobuf]")
+{
+   CHECK(psio::to_protobuf(PbScalars{}).empty());
+   CHECK(psio::to_protobuf(PbOrder{}).empty());
+   CHECK(psio::to_protobuf(PbText{}).empty());
+   // -0.0 is not the zero value.
+   PbScalars n;
+   n.d = -0.0;
+   CHECK(psio::to_protobuf(n).size() == 9);
+   // A member initialiser is not a default of the wire.
+   const PbDefaults zero = read<PbDefaults>({});
+   CHECK(zero.n == 0);
+   CHECK(!zero.on);
+   CHECK(zero.name.empty());
+   CHECK(psio::to_protobuf(PbDefaults{}).size() > 10);
+   CHECK(read<PbDefaults>(psio::to_protobuf(PbDefaults{})) == PbDefaults{});
+}
+
+TEST_CASE("protobuf: fields are written in number order", "[protobuf]")
+{
+   PbRenumbered v;
+   v.a = 1, v.b = "b", v.c = 2, v.d = true, v.old = 9;
+   CHECK(psio::to_protobuf(v) ==
+         b({0x10, 9, 0x1a, 1, 'b', 0x38, 1, 0x80, 0x01, 1, 0xc0, 0x3e, 2}));
+   CHECK(read<PbRenumbered>(b({0xc0, 0x3e, 2, 0x38, 1, 0x80, 0x01, 1, 0x1a, 1, 'b', 0x10, 9})) == v);
+}
+
+TEST_CASE("protobuf: std::optional is explicit presence", "[protobuf]")
+{
+   PbOptionals v;
+   v.i = 0;
+   v.s = "";
+   CHECK(psio::to_protobuf(v) == b({0x08, 0, 0x1a, 0}));
+   const PbOptionals back = read<PbOptionals>(b({0x08, 0, 0x1a, 0}));
+   CHECK(back == v);
+   CHECK(!back.b);
+}
+
+TEST_CASE("protobuf: std::variant is a oneof", "[protobuf]")
+{
+   PbChoice v;
+   v.pick   = std::string{"x"};
+   v.always = 2.5;
+   // 6: string; 11: double (always set: a oneof alternative has presence)
+   const auto bytes = psio::to_protobuf(v);
+   CHECK(bytes == b({0x32, 1, 'x', 0x59, 0, 0, 0, 0, 0, 0, 4, 0x40}));
+   CHECK(read<PbChoice>(bytes) == v);
+   // Absent: std::monostate, or the first alternative's zero.
+   const PbChoice none = read<PbChoice>({});
+   CHECK(none.pick.index() == 0);
+   CHECK(none.always == std::variant<bool, double>{false});
+   CHECK(psio::to_protobuf(none) == b({0x50, 0}));
+   // The last alternative on the wire wins.
+   const PbChoice last = read<PbChoice>(b({0x32, 1, 'x', 0x28, 7}));
+   CHECK(std::get<std::int32_t>(last.pick) == 7);
+   // The same record alternative twice merges.
+   const PbChoice merged = read<PbChoice>(b({0x3a, 2, 0x08, 1, 0x3a, 2, 0x10, 2}));
+   CHECK(std::get<PbPoint>(merged.pick) == PbPoint{1, 2});
+}
+
+TEST_CASE("protobuf: std::map is a map", "[protobuf]")
+{
+   PbMaps v;
+   v.counts = {{"b", 2}, {"a", 0}};
+   // Entries in key order, key and value both written.
+   const auto bytes = psio::to_protobuf(v);
+   CHECK(bytes == b({0x0a, 5, 0x0a, 1, 'a', 0x10, 0, 0x0a, 5, 0x0a, 1, 'b', 0x10, 2}));
+   CHECK(read<PbMaps>(bytes) == v);
+   // Value before key, a missing key or value, an unknown field, the last
+   // of a key.
+   const PbMaps odd = read<PbMaps>(b({0x0a, 5, 0x10, 9, 0x0a, 1, 'k',  // value, key
+                                      0x0a, 2, 0x10, 4,                // no key: ""
+                                      0x0a, 3, 0x0a, 1, 'z',           // no value: 0
+                                      0x0a, 7, 0x0a, 1, 'k', 0x18, 1, 0x10, 5}));  // k again
+   CHECK(odd.counts == std::map<std::string, std::int32_t>{{"", 4}, {"k", 5}, {"z", 0}});
+}
+
+TEST_CASE("protobuf: repeated scalars are read packed or not", "[protobuf]")
+{
+   PbRepeated v;
+   v.ints = {1, 2, 3};
+   CHECK(psio::to_protobuf(v) == b({0x0a, 3, 1, 2, 3}));
+   CHECK(read<PbRepeated>(b({0x08, 1, 0x08, 2, 0x08, 3})) == v);
+   CHECK(read<PbRepeated>(b({0x08, 1, 0x0a, 2, 2, 3})) == v);
+   CHECK(read<PbRepeated>(b({0x0a, 0, 0x0a, 1, 1, 0x0a, 2, 2, 3})) == v);
+   PbRepeated f;
+   f.floats = {1.0f};
+   CHECK(read<PbRepeated>(b({0x25, 0, 0, 0x80, 0x3f})) == f);
+   CHECK(refusal<PbRepeated>(b({0x22, 3, 0, 0, 0})) ==
+         "protobuf: packed fixed values of a broken length");
+}
+
+TEST_CASE("protobuf: a singular field twice: the last, records merged", "[protobuf]")
+{
+   CHECK(read<PbPoint>(b({0x08, 1, 0x08, 2})).x == 2);
+   PbOrder v = read<PbOrder>(b({0x12, 2, 0x08, 1, 0x12, 2, 0x10, 2}));
+   CHECK(v.origin == PbPoint{1, 2});
+}
+
+TEST_CASE("protobuf: what a reader does not know is skipped", "[protobuf]")
+{
+   // Unknown numbers of every wire type, a group with a nested group, and
+   // a known number with another wire type.
+   const auto bytes = b({0x08, 5,                                  // x = 5
+                         0x98, 0x06, 1,                            // 99: varint
+                         0x99, 0x06, 1, 2, 3, 4, 5, 6, 7, 8,       // 99: fixed64
+                         0x9a, 0x06, 2, 'h', 'i',                  // 99: bytes
+                         0x9d, 0x06, 1, 2, 3, 4,                   // 99: fixed32
+                         0x9b, 0x06, 0x08, 1, 0x13, 0x14, 0x9c, 0x06,  // 99: group { 1: 1, 2: group {} }
+                         0x15, 1, 0, 0, 0});                       // y as fixed32: not y
+   CHECK(accepts<PbPoint>(bytes));
+   CHECK(read<PbPoint>(bytes) == PbPoint{5, 0});
+   CHECK(refusal<PbPoint>(b({0x9b, 0x06, 0x08, 1})) == "protobuf: unterminated group");
+   CHECK(refusal<PbPoint>(b({0x9b, 0x06, 0x94, 0x06})) ==
+         "protobuf: a group ends with another field number");
+   CHECK(refusal<PbPoint>(b({0x0c})) == "protobuf: end of a group that was not begun");
+}
+
+TEST_CASE("protobuf: bytes that are not a message", "[protobuf]")
+{
+   CHECK(refusal<PbPoint>(b({0x08})) == "protobuf: truncated varint");
+   CHECK(refusal<PbPoint>(b({0x00, 0x00})) == "protobuf: field number 0");
+   CHECK(refusal<PbPoint>(b({0x0e})) == "protobuf: unknown wire type");
+   CHECK(refusal<PbPoint>(b({0x0f})) == "protobuf: unknown wire type");
+   CHECK(refusal<PbPoint>(b({0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x02})) ==
+         "protobuf: varint exceeds 64 bits");
+   // -1 as an int32: ten bytes.
+   CHECK(read<PbPoint>(b({0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01})).x == -1);
+   // A 64-bit varint in an int32 is truncated (as every implementation does).
+   CHECK(read<PbPoint>(b({0x08, 0x81, 0x80, 0x80, 0x80, 0x10})).x == 1);
+   CHECK(refusal<PbText>(b({0x0a, 2, 0xc3, 0x28})) == "protobuf: a string is not UTF-8");
+   CHECK(refusal<PbText>(b({0x0a, 3, 0xed, 0xa0, 0x80})) == "protobuf: a string is not UTF-8");
+   CHECK(accepts<PbText>(b({0x12, 2, 0xc3, 0x28})));  // bytes hold anything
+   // A length the input does not have: refused before anything is made.
+   CHECK(refusal<PbText>(b({0x12, 0xff, 0xff, 0xff, 0xff, 0x07, 1, 2})) ==
+         "protobuf: length exceeds the input");
+   CHECK(refusal<PbRepeated>(b({0x0a, 0xf0, 0xff, 0xff, 0x7f, 1})) ==
+         "protobuf: length exceeds the input");
+   CHECK(refusal<PbText>(b({0x22, 3, 1, 2, 3})) ==
+         "protobuf: bytes of a fixed size have another length");
+   // What a narrow C++ type cannot hold.
+   CHECK(refusal<PbScalars>(b({0x10, 0x80, 0x01})) == "protobuf: a value does not fit its type");
+   CHECK(read<PbScalars>(b({0x10, 0x7f})).i8 == 127);
+   CHECK(refusal<PbScalars>(b({0x68, 0x80, 0x02})) == "protobuf: a value does not fit its type");
+   // An open enum: a value without a name is kept.
+   CHECK(read<PbScalars>(b({0x68, 0x4d})).color == static_cast<PbColor>(77));
+   CHECK(read<PbScalars>(b({0x70, 0xc0, 0xc4, 0x07})).level == static_cast<PbLevel>(123456));
+}
+
+TEST_CASE("protobuf: nesting is bounded", "[protobuf]")
+{
+   const auto nested = [](unsigned depth) {
+      bytes_t out;
+      for (unsigned i = 0; i < depth; ++i)
+      {
+         bytes_t     outer{0x12};
+         std::size_t n = out.size();
+         for (; n >= 0x80; n >>= 7)
+            outer.push_back(static_cast<char>(n | 0x80));
+         outer.push_back(static_cast<char>(n));
+         outer.insert(outer.end(), out.begin(), out.end());
+         out = std::move(outer);
+      }
+      return out;
+   };
+   CHECK(accepts<PbTree>(nested(100)));
+   CHECK(refusal<PbTree>(nested(101)) == "protobuf: nested too deeply");
+   const auto deep = nested(40);
+   CHECK(psio::validate_protobuf<PbTree>(std::span<const char>{deep}, {.max_depth = 40}).ok());
+   CHECK(!psio::validate_protobuf<PbTree>(std::span<const char>{deep}, {.max_depth = 39}).ok());
+   CHECK(psio::from_protobuf<PbTree>(std::span<const char>{deep}, {.max_depth = 64}).children.size() == 1);
+   // Groups nest too.
+   bytes_t groups;
+   for (int i = 0; i < 200; ++i)
+      groups.push_back(0x1b);
+   for (int i = 0; i < 200; ++i)
+      groups.push_back(0x1c);
+   CHECK(refusal<PbPoint>(groups) == "protobuf: nested too deeply");
+}
+
+TEST_CASE("protobuf: every shape round-trips", "[protobuf]")
+{
+   pb_rng r{77};
+   for (int i = 0; i < 500; ++i)
+   {
+      const PbOrder v     = pb_random<PbOrder>(r);
+      const auto    bytes = psio::to_protobuf(v);
+      REQUIRE(psio::protobuf_size(v) == bytes.size());
+      REQUIRE(psio::validate_protobuf<PbOrder>(std::span<const char>{bytes}).ok());
+      REQUIRE(read<PbOrder>(bytes) == v);
+      const PbEncodings e = pb_random<PbEncodings>(r);
+      REQUIRE(read<PbEncodings>(psio::to_protobuf(e)) == e);
+      const PbOptionals o = pb_random<PbOptionals>(r);
+      REQUIRE(read<PbOptionals>(psio::to_protobuf(o)) == o);
+      // Appending to a sink keeps what is there.
+      std::vector<char> sink{'x'};
+      psio::to_protobuf(o, sink);
+      REQUIRE(sink.size() == 1 + psio::protobuf_size(o));
+      REQUIRE(sink.front() == 'x');
+   }
 }

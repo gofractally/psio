@@ -1,0 +1,71 @@
+// A proto3 file with everything psio::parse_protobuf keeps.
+syntax = "proto3";
+
+package demo.v1;
+
+import "common.proto";
+
+option java_package = "com.example;x";
+option optimize_for = SPEED;
+
+enum Color {
+  option allow_alias = true;
+  COLOR_UNSPECIFIED = 0;
+  RED = 1;
+  CRIMSON = 1 [deprecated = true];
+  NEG = -5;
+  HEX = 0x10;
+  reserved 9, 10 to 12;
+  reserved "MAUVE";
+}
+
+message Outer {
+  option deprecated = false;
+  reserved 100 to 200, 300;
+  reserved "old_name", "older";
+
+  message Inner {
+    message Deep {
+      sint64 z = 1;
+      Color c = 2;
+      Deep again = 3;
+    }
+    Deep deep = 1;
+    enum Kind { K0 = 0; K1 = 7; }
+    Kind kind = 0x2;
+    repeated Outer back = 3;
+  }
+
+  int32 a = 1;
+  optional string name = 2 [json_name = "theName", deprecated = true];
+  repeated Inner inners = 3;
+  map<string, Inner.Deep> by_name = 4;
+  map<sint32, fixed64> nums = 5;
+  map<bool, Color> colours = 21;
+  oneof choice {
+    string text = 6;
+    Inner inner = 7;
+    sfixed32 n = 20;
+    Color tint = 536870911;
+  }
+  repeated fixed32 packed_off = 8 [packed = false];
+  bytes blob = 9;
+  shared.Stamp at = 10;
+  .demo.v1.Outer.Inner.Kind k = 11;
+  oneof second { bool flag = 12; double d = 13; }
+  float f = 14; uint64 u = 15; uint32 v = 16; int64 w = 17; sfixed64 x = 18; sint32 y = 19;
+  repeated shared.Unit units = 22;
+  optional Inner maybe = 23;
+  repeated string words = 24;
+  repeated bytes blobs = 25;
+  optional Color shade = 26;
+};
+
+message Empty {}
+
+service Greeter {
+  option deprecated = true;
+  rpc Hello (Outer) returns (Outer.Inner);
+  rpc Watch (stream Outer) returns (stream Empty) { option idempotency_level = IDEMPOTENT; }
+  rpc Push (stream .demo.v1.Empty) returns (shared.Stamp);
+}

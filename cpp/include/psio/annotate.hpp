@@ -468,6 +468,25 @@ namespace psio {
       constexpr bool operator==(const field_num_spec&) const = default;
    };
 
+   // How protobuf writes an integer member (or the integer elements of a
+   // list / optional member): `pb_fixed` as fixed32 / sfixed32 / fixed64 /
+   // sfixed64 (by the C++ type's width and sign), `pb_sint` as sint32 /
+   // sint64 (zigzag; signed types only). Without either: int32 / int64 /
+   // uint32 / uint64. Recorded in the Schema IR as the member attribute
+   // `protobuf` = "fixed" | "sint". Read by protobuf only.
+   struct pb_fixed_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const pb_fixed_spec&) const = default;
+   };
+   struct pb_sint_spec
+   {
+      using spec_category = static_spec_tag;
+      constexpr bool operator==(const pb_sint_spec&) const = default;
+   };
+   inline constexpr pb_fixed_spec pb_fixed{};
+   inline constexpr pb_sint_spec  pb_sint{};
+
    // RESERVED — not implemented: no codec skips a member. Every reflected
    // member is encoded.
    struct skip_spec
