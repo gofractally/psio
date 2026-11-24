@@ -549,10 +549,19 @@ namespace psio::graphql
             return write_tuple_list(e, s, f, set, std::make_index_sequence<std::tuple_size_v<L>>{});
          else if constexpr (shape_of<L>() == shape::object)
          {
-            if constexpr (is_view_v<U>)
+            // A view is read as a view. A std::pair (an entry of a map) is
+            // the object its 2-tuple is, and is read as the pair it is: a
+            // pair and a tuple do not share a layout (libstdc++ stores a
+            // tuple's elements last first), so the handlers of the tuple
+            // must never be handed a pair's address.
+            if constexpr (is_view_v<U> || is_pair_source_v<U>)
                return run_set(e, set, &s, handlers<L, const U>::table.data(), object_name<L>());
             else
+            {
+               static_assert(std::is_same_v<U, L>,
+                             "graphql: an object is resolved from a value of its own type");
                return run_set(e, set, &s, handlers<L, const L>::table.data(), object_name<L>());
+            }
          }
          else
          {

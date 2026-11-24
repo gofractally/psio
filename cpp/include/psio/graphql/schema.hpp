@@ -444,6 +444,10 @@ namespace psio::graphql
          using type = std::tuple<std::remove_const_t<A>, B>;
       };
       template <typename S>
+      inline constexpr bool is_pair_source_v = false;
+      template <typename A, typename B>
+      inline constexpr bool is_pair_source_v<std::pair<A, B>> = true;
+      template <typename S>
       using logical_t = typename logical<std::remove_cvref_t<S>>::type;
       template <typename S>
       inline constexpr bool is_reference_wrapper_v = false;
