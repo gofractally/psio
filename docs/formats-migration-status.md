@@ -6,7 +6,155 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
-### After F3 (schemas that agree with the codecs; gofractally/psio#9) — tip of this note
+### After F5, protobuf (gofractally/psio#9) — tip of this note
+
+State: protobuf is first-class in C++ and in Rust, on top of `5ae38ce`.
+Commits: `8faa4ba` (C++ codec, emitter, parser, tests, vectors), `deabcc0`
+(Rust codec), and the one that carries this note (reader / writer speed,
+benchmark, docs). User documentation: `docs/protobuf.md`.
+
+**What exists now.**
+
+* `psio::protobuf` (`cpp/include/psio/protobuf.hpp`), rewritten: a proto3
+  peer of the official implementation. Fields in number order, implicit
+  presence, `std::optional` (explicit presence), `std::variant` (oneof),
+  `std::map`, `std::set`, reflected enums (open), bytes and fixed byte
+  arrays, `pb_sint` / `pb_fixed`, packed repeated scalars read packed or
+  not, last-wins and merging, unknown fields and groups skipped, a nesting
+  limit, UTF-8 checked. One reader for validate and decode; `from_protobuf`
+  is one pass. The writer sizes once and writes back to front (a length is
+  known when its content is written); the earlier slot cache is gone.
+* `psio::emit_protobuf` / `parse_protobuf`, rewritten around one statement
+  of how a Schema IR is read as protobuf (header of `emit_protobuf.hpp`).
+* Rust: `psio::protobuf`, `#[derive(Protobuf)]`, the helpers.
+* `psio::pb_fixed` / `pb_sint` moved to `annotate.hpp` (the schema builder
+  reads them).
+
+**Decisions that change behaviour** (flag for review).
+
+1. **An absent member is zero, not the C++ member initialiser**, and a zero
+   member is not written. The old codec wrote every scalar and decoded into
+   `T{}`, so an absent `int n = 7;` read as 7 — which no proto3 peer does,
+   and which makes a peer's 0 (omitted on the wire) read as 7. The
+   initialiser stays the default for FlatBuffers and Cap'n Proto, whose
+   schemas declare defaults. `docs/protobuf.md` "Presence and default
+   values". psio's protobuf bytes changed for any record with a zero
+   scalar (`cpp-golden.json`: one row).
+2. A non-optional record member that encodes to nothing is not written
+   (uniform implicit presence); the official library writes a set-but-empty
+   submessage as two bytes, so official → psio → official loses that has-bit
+   and nothing else.
+3. A `std::variant` member takes one field number per alternative, counting
+   up from its own; a clash with a later member is a compile error (the
+   member needs a `field<N>`). The numbers of a message are checked at
+   compile time.
+4. A wire-type mismatch on a known field is an unknown field (skipped), as
+   in every implementation; it was an error.
+5. Stricter than the official C++ parser in four places (narrow C++ types,
+   fixed byte arrays, 10-byte varints with excess bits, tags over 32 bits):
+   `docs/protobuf.md` "Validation".
+6. An enum is a protobuf `enum` only with `PSIO_REFLECT_ENUM` (the IR has
+   no names otherwise); any other enum is its integer. A reflected enum
+   without a zero gets `<Name>_UNSPECIFIED = 0` in the emitted file.
+7. `psio::decode<T>(psio::protobuf{}, bytes)` reports bad bytes through
+   `codec_abort` (it threw `std::runtime_error`).
+8. `emit_protobuf` throws for what protobuf does not have, where it wrote
+   `/* TODO */` text; names are kept (no re-casing), and made identifiers
+   only where they are not.
+9. `parse_protobuf` keeps names as written, an enum is an `Enum` with its
+   values (it was a variant of empty cases), `string` is the IR's `utf8`, a
+   oneof is a `Variant` member with a leading `none` alternative.
+
+**IR changes** (every one; the node types and their encoding are unchanged,
+`ir_version` stays 1).
+
+1. Member attribute `protobuf` = `"sint"` | `"fixed"`, written by the C++
+   schema builder for `pb_sint` / `pb_fixed` and by Rust's `ToPsszSchema`
+   for `#[psio(pb_sint)]` / `#[psio(pb_fixed)]`. The schema-driven PSSZ /
+   JSON codecs accept it on a record member and do not read it — C++
+   (`pssz_ir.hpp`), Rust (`pssz_dynamic.rs`), JS (`pssz-core.ts`), Python
+   (`_core.py`); each has a test. A schema-driven reader older than this
+   refuses a schema that has it.
+2. Attribute names written by `parse_protobuf` and read by `emit_protobuf`
+   (only in schemas made from `.proto` text): on the package
+   `proto_syntax`, `proto_import`, `proto_option`; on a record
+   `proto_option`, `proto_reserved`, `proto_extensions`; on a named enum
+   `proto_option`, `proto_reserved`, `proto_option.<VALUE>`; on a member
+   `required`, `proto_option`, `protobuf_key`, `protobuf_value`; on a
+   variant `proto_option`; on a variant member `field`, `protobuf`,
+   `proto_option`; on an interface / function `proto_option`,
+   `proto_client_streaming`, `proto_server_streaming`. (`pb_sint` /
+   `pb_fixed` as attribute *names*, which the old parser wrote, are gone.)
+
+Fixtures: no shared fixture has a `pb_sint` / `pb_fixed` member, so
+`schema-json-vectors.json` and `json-vectors.json` are unchanged;
+`cpp-golden.json` (three copies) has one changed protobuf row; new:
+`conformance/protobuf-vectors.json`.
+
+**Evidence.** Official tools: protoc / libprotobuf 34.0 (Homebrew). ctest
+targets, new: `psio_protobuf_interop_tests` (447,415 assertions: byte
+identity both ways on 34,503 values, 13 messages built by the official
+library from text, the differential fuzz — 60,080 accepted by both, 238,210
+by neither, 1,710 by the official parser only, each for one of the four
+documented reasons), `psio_protobuf_schema_tests` (protoc at run time:
+descriptor equality through parse → emit for 4 hand-written files, the
+reflected shapes, 300 generated schemas), `psio_protobuf_fuzz_tests` and
+`…_sanitized` (522,270 inputs, 158,606 accepted; the bounded-work cases),
+`psio_protobuf_conformance_regen`; rewritten: `psio_protobuf_tests`,
+`psio_emit_protobuf_tests`, `psio_protobuf_parser_tests`; extended:
+`psio_schema_text_fuzz_tests` and `…_sanitized` (the proto parser and
+emitter on mutated text). Rust: `tests/protobuf_conformance.rs`,
+`protobuf_fuzz.rs`, `protobuf_api.rs`. Totals on the final
+tree: C++ 447/447 ctest in both simdjson configurations (442 on main; the
+five new targets); Rust `cargo test --workspace --locked --no-fail-fast`
+1,166 passed, with `--all-features` 1,220 (1,151 / 1,205); JS 261; Python
+100. `tools/check-cpp-golden.py`: 366 fixtures match; `expand.py --check`
+clean.
+
+**Measured** (`docs/protobuf.md` "Performance"; `psio_bench_protobuf`).
+Against libprotobuf 34.0 on identical bytes, two runs on a loaded machine:
+encode 0.87–1.19× of the official speed on five shapes and 2.1× on the
+composite one; decode into a new object 1.1–1.7× faster except a flat record
+of 15 scalars (0.82×) — and 3.5× on a two-field message; decode into a
+reused object 0.55× on a tree and 0.8× on lists of numbers (the official
+message keeps its sub-objects across `Clear`; psio does not pool); validate
+costs 40–105 % of a decode.
+
+**Not done / found on the way.**
+
+* The C++ headers were compiled with GCC 15 / libstdc++ (`-fsyntax-only`,
+  the codec, emitter and parser with every test shape instantiated), not
+  built and run on Linux with clang + libstdc++.
+* JS and Python: no protobuf codec; their typed builders have no spelling
+  for the `protobuf` attribute (the schema-driven codecs accept it).
+* No dynamic protobuf codec over a parsed `.proto` (F4), no Rust emitter /
+  parser, no views (by design: `docs/protobuf.md`).
+* proto2 `required` / `[default]` / groups / extensions and editions are
+  not implemented in the codec; `parse_protobuf` refuses `edition`,
+  `extend` and groups. `import` is kept and not followed.
+* A constant-factor amplification remains by construction: an empty
+  record of a list is 2 bytes on the wire and `sizeof(T)` in memory;
+  there is no element budget (FlatBuffers has `max_tables`). The input's
+  size bounds it (`maxDynamicData`).
+* The protobuf cells of `psio_bench_vs_externals` and
+  `docs/format-comparison.md` predate this pass (the old encoder wrote
+  zeros, and its sizes are in those tables): F6 re-runs them.
+* The Rust items of the F3 list (float `default` text, `deprecated`
+  version, enum names in the IR) are as they were.
+
+**What remains.**
+
+* **F5, the rest — Avro schema emit / parse, WIT → IR.** Not started: the
+  same three properties (emit agrees with the codec, parse keeps what the
+  wire depends on, text → IR → text stable) against `avro-tools` / the WIT
+  toolchain.
+* **F4 — dynamic view + psio-tool.** Unchanged (below); the protobuf side
+  is a schema-driven reader over `parse_protobuf`'s IR, and following
+  `import` (a resolver callback).
+* **F6 — benchmarks and claims.** The benchmark page; re-run
+  `psio_bench_vs_externals`; this pass's table goes with the F1 / F2 ones.
+
+### After F3 (schemas that agree with the codecs; gofractally/psio#9)
 
 State: F3 done for FlatBuffers and Cap'n Proto in C++, on top of main
 `842a538`. User documentation: `docs/flatbuffers.md` "Schema",

@@ -4,6 +4,7 @@
 //
 //   encode     psio::to_protobuf(v, reused vector)   | ByteSizeLong + SerializeWithCachedSizesToArray(reused buffer)
 //   decode     protobuf::decode_checked(bytes, reused value) | ParseFromArray(reused message)
+//   (new)      the same into a value / message constructed for the call
 //   validate   psio::validate_protobuf<T>(bytes)     | (the official library has no check without a parse)
 //
 // ns per operation, the minimum of 11 trials of about 40 ms each.
@@ -115,15 +116,21 @@ namespace
             std::abort();
          keep(parsed);
       });
+      const double fresh_official = ns_per_op([&] {
+         M fresh;
+         if (!fresh.ParseFromArray(bytes.data(), static_cast<int>(bytes.size())))
+            std::abort();
+         keep(fresh);
+      });
       const double validate_psio = ns_per_op([&] {
          const bool ok = psio::validate_protobuf<T>(std::span<const char>{bytes}).ok();
          keep(ok);
       });
 
-      std::printf("| %-9s | %6zu | %8.1f | %8.1f | %5.2f | %8.1f | %8.1f | %8.1f | %5.2f | %8.1f |\n",
+      std::printf("| %-9s | %6zu | %8.1f | %8.1f | %5.2f | %8.1f | %8.1f | %5.2f | %8.1f | %8.1f | %5.2f | %8.1f |\n",
                   name, bytes.size(), encode_psio, encode_official, encode_official / encode_psio,
-                  decode_psio, decode_fresh, decode_official, decode_official / decode_psio,
-                  validate_psio);
+                  decode_psio, decode_official, decode_official / decode_psio, decode_fresh,
+                  fresh_official, fresh_official / decode_fresh, validate_psio);
    }
 
    PbTree tree(unsigned depth, unsigned fanout, unsigned& id)
@@ -201,8 +208,9 @@ int main()
    order.lists["l"].ints = {1, 2, 3, 4, 5, 6, 7, 8};
 
    std::printf("ns per operation (minimum of 11 trials); ×: official / psio, above 1 psio is faster\n\n");
-   std::printf("| shape     |  bytes | enc psio | enc offi |   ×   | dec psio | dec fresh| dec offi |   ×   | validate |\n");
-   std::printf("|-----------|-------:|---------:|---------:|------:|---------:|---------:|---------:|------:|---------:|\n");
+   std::printf("encode | decode into a reused object | decode into a new object | validate (psio)\n\n");
+   std::printf("| shape     |  bytes | enc psio | enc offi |   ×   | dec psio | dec offi |   ×   | new psio | new offi |   ×   | validate |\n");
+   std::printf("|-----------|-------:|---------:|---------:|------:|---------:|---------:|------:|---------:|---------:|------:|---------:|\n");
    row<PbPoint, pbe::PbPoint>("Point", point);
    row<PbScalars, pbe::PbScalars>("Scalars", scalars);
    row<PbText, pbe::PbText>("Text", text);

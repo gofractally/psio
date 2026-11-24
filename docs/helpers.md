@@ -82,7 +82,7 @@ is a constraint failure that names it, for example
 | `msgpack` | `psio/msgpack.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `avro` | `psio/avro.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `bson` | `psio/bson.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
-| `protobuf` | `psio/protobuf.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
+| `protobuf` ([protobuf.md](protobuf.md)) | `psio/protobuf.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no (a message has no index: [why](protobuf.md#why-there-are-no-views)) | no |
 | `capnp` | `psio/capnp.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | no | no |
 | `flatbuf` | `psio/flatbuf.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | yes, safe and trusted (`psio/flatbuf_view.hpp`) | yes: fixed-size fields that are stored (`psio/flatbuf_view.hpp`) |
 | `flatbuf_lib` | `psio/flatbuf_lib.hpp` | `std::vector<char>` | no | yes | no | no |

@@ -573,24 +573,18 @@ namespace psio
       // The last byte first: a length is known when its content has been
       // written, so one walk of the value suffices after the sizing walk.
 
+      //
+      // The writer does not test for room: the buffer is exactly what the
+      // sizing walk of the same value computed, and encode_into compares the
+      // two when the walk is done.
       struct back_writer
       {
          char* base;
          char* p;
-         bool  overrun = false;
 
-         bool room(std::size_t n) noexcept
-         {
-            if (static_cast<std::size_t>(p - base) < n) [[unlikely]]
-            {
-               overrun = true;
-               return false;
-            }
-            return true;
-         }
          void bytes(const void* data, std::size_t n) noexcept
          {
-            if (n && room(n))
+            if (n)
             {
                p -= n;
                std::memcpy(p, data, n);
@@ -600,13 +594,10 @@ namespace psio
          {
             if (v < 0x80)
             {
-               if (room(1))
-                  *--p = static_cast<char>(v);
+               *--p = static_cast<char>(v);
                return;
             }
             const std::size_t n = varint_size(v);
-            if (!room(n))
-               return;
             p -= n;
             char* q = p;
             while (v >= 0x80)
@@ -779,7 +770,7 @@ namespace psio
          sink.resize(before + total);
          back_writer w{sink.data() + before, sink.data() + before + total};
          write_message(w, v);
-         if (w.overrun || w.p != w.base)
+         if (w.p != w.base)
             ::psio::codec_abort(
                codec_error{"protobuf: the value changed while it was written", 0, "protobuf"});
       }
@@ -896,6 +887,13 @@ namespace psio
             if (p < end && static_cast<unsigned char>(*p) < 0x80) [[likely]]
             {
                v = static_cast<unsigned char>(*p++);
+               return true;
+            }
+            if (end - p >= 2 && static_cast<unsigned char>(p[1]) < 0x80)
+            {
+               v = (static_cast<unsigned char>(p[0]) & 0x7fu) |
+                   (static_cast<std::uint64_t>(static_cast<unsigned char>(p[1])) << 7);
+               p += 2;
                return true;
             }
             std::uint64_t out = 0;
@@ -1161,9 +1159,23 @@ namespace psio
                      constexpr std::size_t width = scalar_wire_v<X, E> == wt::fixed32 ? 4 : 8;
                      if (n % width)
                         return done(r.fail("protobuf: packed fixed values of a broken length"));
-                     if constexpr (is_vector_v<F>)
+                     if constexpr (is_vector_v<F> && memcpy_packed_v<X, E>)
+                     {
+                        // The wire is the vector's memory.
+                        if (out && n)
+                        {
+                           const std::size_t old = out->size();
+                           out->resize(old + n / width);
+                           std::memcpy(out->data() + old, r.p, n);
+                        }
+                        r.p = sub;
+                        return got::read;
+                     }
+                     else if constexpr (is_vector_v<F>)
+                     {
                         if (out)
                            out->reserve(out->size() + n / width);
+                     }
                   }
                   while (r.p < sub)
                   {
@@ -1190,6 +1202,13 @@ namespace psio
                   return got::not_mine;
                if (!out)
                   return done(read_payload<E>(r, end, static_cast<X*>(nullptr)));
+               if constexpr (is_vector_v<F>)
+               {
+                  // In place: nothing is moved.
+                  out->emplace_back();
+                  clear(out->back());
+                  return done(read_payload<E>(r, end, &out->back()));
+               }
                X x{};
                clear(x);
                if (!read_payload<E>(r, end, &x))
@@ -1268,6 +1287,29 @@ namespace psio
             return read_field<E>(r, end, wire, m);
       }
 
+      // Field number → reader, for a message whose numbers are small (the
+      // usual case): one load and an indirect call per field. Otherwise the
+      // numbers are compared one by one.
+      template <typename T>
+      inline constexpr std::uint32_t max_number_v =
+         total_slots_v<T> ? slots_v<T>[total_slots_v<T> - 1].number : 0;
+
+      template <typename T>
+      inline constexpr bool dense_numbers_v = total_slots_v<T> > 4 && max_number_v<T> <= 255;
+
+      template <typename T>
+      using slot_reader = got (*)(reader&, const char*, std::uint8_t, T*);
+
+      template <typename T>
+      inline constexpr auto slot_table_v = [] {
+         std::array<slot_reader<T>, dense_numbers_v<T> ? max_number_v<T> + 1 : 1> table{};
+         if constexpr (dense_numbers_v<T>)
+            [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+               ((table[slots_v<T>[Ks].number] = &read_slot<T, Ks>), ...);
+            }(std::make_index_sequence<total_slots_v<T>>{});
+         return table;
+      }();
+
       template <typename T>
       bool read_message(reader& r, const char* end, T* out)
       {
@@ -1282,12 +1324,19 @@ namespace psio
             if (number == 0)
                return r.fail("protobuf: field number 0");
             got g = got::not_mine;
-            [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
-               (void)((number == slots_v<T>[Ks].number
-                          ? (g = read_slot<T, Ks>(r, end, wire, out), true)
-                          : false) ||
-                      ...);
-            }(std::make_index_sequence<total_slots_v<T>>{});
+            if constexpr (dense_numbers_v<T>)
+            {
+               if (number <= max_number_v<T>)
+                  if (const slot_reader<T> read = slot_table_v<T>[number])
+                     g = read(r, end, wire, out);
+            }
+            else
+               [&]<std::size_t... Ks>(std::index_sequence<Ks...>) {
+                  (void)((number == slots_v<T>[Ks].number
+                             ? (g = read_slot<T, Ks>(r, end, wire, out), true)
+                             : false) ||
+                         ...);
+               }(std::make_index_sequence<total_slots_v<T>>{});
             if (g == got::failed)
                return false;
             if (g == got::not_mine && !skip_field(r, end, number, wire))
