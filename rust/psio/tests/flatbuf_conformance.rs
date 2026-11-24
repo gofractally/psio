@@ -98,7 +98,7 @@ fn rejected_buffers() {
         rows.len(),
         rust_first.len()
     );
-    assert_eq!(rows.len(), 427);
+    assert_eq!(rows.len(), 429);
 }
 
 #[test]

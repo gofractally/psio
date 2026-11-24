@@ -229,7 +229,7 @@ fn a_buffer_that_shares_sub_objects_cannot_make_the_verifier_run_away() {
     let e = psio::validate_flatbuf::<natural::Tree>(&buf).unwrap_err();
     assert_eq!(e.message(), "flatbuf: too many tables");
     // A smaller budget stops sooner; the view of the unverified bytes is lazy.
-    let limits = FbLimits { max_depth: 64, max_tables: 100 };
+    let limits = FbLimits { max_tables: 100, ..FbLimits::default() };
     let e = psio::validate_flatbuf_with::<natural::Tree>(&buf, &FbOptions::default(), limits).unwrap_err();
     assert_eq!(e.message(), "flatbuf: too many tables");
     use natural::TreeFbAccessors;
@@ -274,7 +274,11 @@ struct Names {
 #[test]
 fn checking_strings_for_utf8_is_linear_however_they_share_bytes() {
     // One 400 KiB string pointed at 100,000 times: 40 GB to scan if every
-    // reference were scanned.
+    // reference were scanned. (The payload budget refuses such a buffer
+    // long before that; it is lifted here, to show that the check itself
+    // is linear.)
+    let unlimited = FbLimits { max_expansion: u32::MAX, ..FbLimits::default() };
+    let validate = |buf: &[u8]| psio::validate_flatbuf_with::<Names>(buf, &FbOptions::default(), unlimited);
     let (count, len) = (100_000usize, 400 * 1024usize);
     let mut buf = vec![0u8; 16];
     put32(&mut buf, 0, 12);
@@ -294,11 +298,15 @@ fn checking_strings_for_utf8_is_linear_however_they_share_bytes() {
     buf.extend(std::iter::repeat(b'a').take(len));
     buf.extend_from_slice(&[0; 4]);
     let start = std::time::Instant::now();
-    psio::validate_flatbuf::<Names>(&buf).unwrap();
+    assert_eq!(
+        psio::validate_flatbuf::<Names>(&buf).unwrap_err().message(),
+        "flatbuf: too many bytes referenced"
+    );
+    validate(&buf).unwrap();
     // The same with a byte that is not UTF-8 at the end of the string.
     let last = string + 4 + len - 1;
     buf[last] = 0xff;
-    assert_eq!(psio::validate_flatbuf::<Names>(&buf).unwrap_err().message(), "flatbuf: string is not valid UTF-8");
+    assert_eq!(validate(&buf).unwrap_err().message(), "flatbuf: string is not valid UTF-8");
     buf[last] = b'a';
 
     // Overlapping strings: every 8 bytes of the big string start another
@@ -312,9 +320,141 @@ fn checking_strings_for_utf8_is_linear_however_they_share_bytes() {
         let cell = vector + 4 + i * 4;
         put32(&mut buf, cell, (at - cell) as u32);
     }
-    match psio::validate_flatbuf::<Names>(&buf) {
+    match validate(&buf) {
         Ok(()) => {}
         Err(e) => assert_eq!(e.message(), "flatbuf: string is not valid UTF-8"),
     }
     assert!(start.elapsed() < std::time::Duration::from_secs(20), "took {:?}", start.elapsed());
+}
+
+
+/// `table Bag { keys: [string]; }` (a sorted set) and `table Bags { bags:
+/// [Bag]; }`.
+#[derive(Debug, PartialEq, psio::FbPack, psio::FbUnpack)]
+struct Bag {
+    keys: std::collections::BTreeSet<String>,
+}
+#[derive(Debug, PartialEq, psio::FbPack, psio::FbUnpack)]
+struct Bags {
+    bags: Vec<Bag>,
+}
+
+/// `tables` bags, each with its own set of two offsets to the SAME two keys
+/// of `len` bytes, which differ in their last byte (the construction of
+/// C++ `flatbuf_fuzz_tests.cpp`, `shared_keys`).
+fn shared_keys(tables: usize, len: usize) -> Vec<u8> {
+    let (vec, t0) = (20, 24 + 4 * tables);
+    let (v0, s0) = (t0 + 8 * tables, t0 + 20 * tables);
+    let slen = (4 + len + 1 + 3) & !3;
+    let mut b = vec![0u8; s0 + 2 * slen];
+    put32(&mut b, 0, 12);
+    put16(&mut b, 4, 6);
+    put16(&mut b, 6, 8);
+    put16(&mut b, 8, 4);
+    put32(&mut b, 12, 8);
+    put32(&mut b, 16, 4);
+    put32(&mut b, vec, tables as u32);
+    for i in 0..tables {
+        let (cell, tbl, kv) = (vec + 4 + 4 * i, t0 + 8 * i, v0 + 12 * i);
+        put32(&mut b, cell, (tbl - cell) as u32);
+        put32(&mut b, tbl, (tbl - 4) as u32);
+        put32(&mut b, tbl + 4, (kv - (tbl + 4)) as u32);
+        put32(&mut b, kv, 2);
+        put32(&mut b, kv + 4, (s0 - (kv + 4)) as u32);
+        put32(&mut b, kv + 8, (s0 + slen - (kv + 8)) as u32);
+    }
+    for k in 0..2 {
+        put32(&mut b, s0 + k * slen, len as u32);
+        b[s0 + k * slen + 4..s0 + k * slen + 4 + len].fill(b'a');
+        b[s0 + k * slen + 4 + len - 1] = b'a' + k as u8;
+    }
+    b
+}
+
+/// `count` offsets to one string of `len` bytes (a `Names`).
+fn shared_string(count: usize, len: usize) -> Vec<u8> {
+    let (vec, s0) = (20, 24 + 4 * count);
+    let mut b = vec![0u8; s0 + ((4 + len + 1 + 3) & !3)];
+    put32(&mut b, 0, 12);
+    put16(&mut b, 4, 6);
+    put16(&mut b, 6, 8);
+    put16(&mut b, 8, 4);
+    put32(&mut b, 12, 8);
+    put32(&mut b, 16, 4);
+    put32(&mut b, vec, count as u32);
+    for i in 0..count {
+        let cell = vec + 4 + 4 * i;
+        put32(&mut b, cell, (s0 - cell) as u32);
+    }
+    put32(&mut b, s0, len as u32);
+    b[s0 + 4..s0 + 4 + len].fill(b'a');
+    b
+}
+
+#[test]
+fn comparing_keys_that_share_their_bytes_is_bounded_by_the_buffer() {
+    // gofractally/psio#10: tables × key length bytes were compared (0.22 /
+    // 0.44 / 0.88 MB took 4.5 / 24 / 71 ms). The bytes compared are charged
+    // to the payload budget.
+    let unlimited = FbLimits { max_expansion: u32::MAX, ..FbLimits::default() };
+    for (tables, len) in [(5_000usize, 50_000usize), (10_000, 100_000), (20_000, 200_000)] {
+        let buf = shared_keys(tables, len);
+        let start = std::time::Instant::now();
+        let e = psio::validate_flatbuf::<Bags>(&buf).unwrap_err();
+        let took = start.elapsed();
+        assert!(
+            ["flatbuf: too many bytes referenced", "flatbuf: too many key bytes compared"].contains(&e.message()),
+            "{e}"
+        );
+        eprintln!("{tables} tables x {len} byte keys, {} bytes: refused in {took:?} ({})", buf.len(), e.message());
+    }
+    // The construction is a well-formed buffer: small, it is valid, and it
+    // is what it looks like.
+    let small = shared_keys(50, 100);
+    let bags = psio::from_flatbuf::<Bags>(&small).unwrap();
+    assert_eq!(bags.bags.len(), 50);
+    assert_eq!(bags.bags[49].keys.len(), 2);
+    // Where the budget runs out: 5,000 sets of two 50 kB keys reach 500 MB
+    // of strings and compare 250 MB; the buffer allows 1 MiB + 64 × 220,040.
+    let buf = shared_keys(5_000, 50_000);
+    assert_eq!(buf.len(), 220_040);
+    assert_eq!(
+        psio::validate_flatbuf::<Bags>(&buf).unwrap_err().message(),
+        "flatbuf: too many key bytes compared"
+    );
+    // With the budget lifted the buffer is valid (and slow to verify).
+    assert!(psio::validate_flatbuf_with::<Bags>(&shared_keys(200, 2_000), &FbOptions::default(), unlimited).is_ok());
+    // An honest buffer needs no more than three times its size: every key
+    // reached once and compared with its two neighbours.
+    let honest = Bags {
+        bags: (0..2_000)
+            .map(|i| Bag { keys: (0..8).map(|k| format!("key-{i:06}-{k:02}-{}", "x".repeat(40))).collect() })
+            .collect(),
+    };
+    let bytes = psio::to_flatbuf(&honest);
+    let tight = FbLimits { max_expansion: 3, ..FbLimits::default() };
+    assert!(psio::validate_flatbuf_with::<Bags>(&bytes, &FbOptions::default(), tight).is_ok());
+}
+
+#[test]
+fn a_shared_string_cannot_decode_to_more_than_the_budget() {
+    // gofractally/psio#10: 50,032 bytes that decoded to 100 MB.
+    let buf = shared_string(10_000, 10_000);
+    assert_eq!(buf.len(), 50_032);
+    let e = psio::validate_flatbuf::<Names>(&buf).unwrap_err();
+    assert_eq!(e.message(), "flatbuf: too many bytes referenced");
+    assert!(psio::from_flatbuf::<Names>(&buf).is_err());
+    assert!(FbView::<Names>::new(&buf).is_err());
+    // What the default allows: 1 MiB and 64 times the buffer. A string an
+    // official builder shares (`CreateSharedString`) is reached once per
+    // reference: 1,000 references to a 1 kB string are 1 MB from 5 kB.
+    let shared = shared_string(1_000, 1_000);
+    let names = psio::from_flatbuf::<Names>(&shared).unwrap();
+    assert_eq!((names.names.len(), names.names[999].len()), (1_000, 1_000));
+    // The limit is an option.
+    let tight = FbLimits { max_expansion: 0, ..FbLimits::default() };
+    let e = psio::validate_flatbuf_with::<Names>(&shared_string(2_000, 1_000), &FbOptions::default(), tight);
+    assert_eq!(e.unwrap_err().message(), "flatbuf: too many bytes referenced");
+    let loose = FbLimits { max_expansion: 4_000, ..FbLimits::default() };
+    assert!(psio::validate_flatbuf_with::<Names>(&buf, &FbOptions::default(), loose).is_ok());
 }

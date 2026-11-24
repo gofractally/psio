@@ -251,6 +251,25 @@ namespace
       std::memcpy(&soff, b.data() + table, 4);
       return table - soff;
    }
+   // A buffer whose root table (a T) stores one member, `member`, a vector
+   // of `count` elements; `vec` is where the vector is (its elements, and
+   // what they point to, follow).
+   template <typename T>
+   Bytes one_member_root(std::size_t member, std::size_t count, std::size_t& vec)
+   {
+      const std::size_t vt    = psio::flatbuf::layout<T>::vtable_offset(member);
+      const std::size_t table = (4 + vt + 2 + 3) & ~std::size_t{3};
+      vec                     = table + 8;
+      Bytes b(vec + 4, 0);
+      put32(b, 0, static_cast<std::uint32_t>(table));
+      put16(b, 4, static_cast<std::uint16_t>(vt + 2));  // the vtable: its size,
+      put16(b, 6, 8);                                   // the table's size,
+      put16(b, 4 + vt, 4);                              // the member at +4
+      put32(b, table, static_cast<std::uint32_t>(table - 4));
+      put32(b, table + 4, 4);
+      put32(b, vec, static_cast<std::uint32_t>(count));
+      return b;
+   }
    // The position of the field of member `member` of the root table (a T).
    template <typename T>
    std::size_t root_field(const Bytes& b, std::size_t member)
@@ -557,6 +576,47 @@ namespace
             }
          }
          reject<Tree>("Tree", "shared_subobjects", b, "flatbuf: too many tables");
+      }
+      // The payload budget (limits::max_expansion: 1 MiB and 64 times the
+      // buffer). Both rows are a root table that stores one member, a
+      // vector: `one_member_root` below.
+      {
+         // A Basket whose `tags` hold 350 offsets to ONE string of 4,092
+         // bytes: 1.4 MB of strings if each reference were copied.
+         const std::size_t count = 350, len = 4092;
+         std::size_t       vec   = 0;
+         Bytes             b     = one_member_root<Basket>(3, count, vec);
+         const std::size_t str   = vec + 4 + count * 4;
+         b.resize(str + 4 + len + 4, 0);
+         for (std::size_t i = 0; i < count; ++i)
+            put32(b, vec + 4 + i * 4, static_cast<std::uint32_t>(str - (vec + 4 + i * 4)));
+         put32(b, str, static_cast<std::uint32_t>(len));
+         std::memset(b.data() + str + 4, 'a', len);
+         reject<Basket>("Basket", "shared_string", b, "flatbuf: too many bytes referenced");
+      }
+      {
+         // An Order whose `labels` (a set of strings) are 400 keys of 2,048
+         // bytes that overlap: key i starts 8 bytes after key i-1, inside
+         // it. Every 8 bytes are the length of a key (2,048) and the 4
+         // bytes it starts with: a NUL (the terminator of the key that
+         // ends there) and i + 1 in base 128, which puts the keys in
+         // ascending order and keeps them UTF-8. Reaching the keys fits the
+         // budget (820 kB); comparing each with the next one does not.
+         const std::size_t count = 400, len = 2048;
+         std::size_t       vec   = 0;
+         Bytes             b     = one_member_root<Order>(12, count, vec);
+         const std::size_t blob  = vec + 4 + count * 4;
+         b.resize(blob + 8 * (count - 1) + 4 + len + 4, 0);
+         for (std::size_t i = 0; i < count; ++i)
+         {
+            const std::size_t at = blob + 8 * i;
+            put32(b, vec + 4 + i * 4, static_cast<std::uint32_t>(at - (vec + 4 + i * 4)));
+            put32(b, at, static_cast<std::uint32_t>(len));
+            b[at + 5] = static_cast<char>(((i + 1) >> 14) & 0x7f);
+            b[at + 6] = static_cast<char>(((i + 1) >> 7) & 0x7f);
+            b[at + 7] = static_cast<char>((i + 1) & 0x7f);
+         }
+         reject<Order>("Order", "shared_key_bytes", b, "flatbuf: too many key bytes compared");
       }
 
       // ── Corrupted buffers the verifier accepts ────────────────────────

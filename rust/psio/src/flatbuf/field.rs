@@ -319,6 +319,13 @@ pub trait FbUnpack: FbPack {
         false
     }
 
+    /// The bytes [`fb_key_less`](Self::fb_key_less) may read for the keys
+    /// at cells `a` and `b` beyond their inline cells: for strings, the
+    /// length of the shorter one. The verifier charges it to its budget.
+    fn fb_key_cost(_buf: &[u8], _a: Option<usize>, _b: Option<usize>) -> u64 {
+        0
+    }
+
     /// A fixed value from its `FIXED_SIZE` bytes.
     fn fb_read_fixed(_src: &[u8]) -> Self {
         unreachable!("psio::flatbuf: not a fixed-size type")
@@ -433,7 +440,7 @@ fn check_vector_of<T: FbUnpack>(c: &mut FbChecker<'_>, pos: u64) -> Option<(u64,
     if target == 0 {
         return None;
     }
-    let count = c.check_vector(target, T::INLINE_SIZE as u64, T::INLINE_ALIGN as u64)?;
+    let count = c.check_vector(target, T::INLINE_SIZE as u64, T::INLINE_ALIGN as u64, T::INLINE)?;
     Some((target, count))
 }
 
@@ -596,6 +603,9 @@ impl FbUnpack for String {
     fn fb_key_less(buf: &[u8], a: Option<usize>, b: Option<usize>) -> bool {
         string_at(buf, a) < string_at(buf, b)
     }
+    fn fb_key_cost(buf: &[u8], a: Option<usize>, b: Option<usize>) -> u64 {
+        string_at(buf, a).len().min(string_at(buf, b).len()) as u64
+    }
     fn fb_decode_cell(buf: &[u8], cell: usize) -> Self {
         std::str::from_utf8(string_at(buf, Some(cell))).unwrap_or("").to_string()
     }
@@ -620,6 +630,9 @@ impl FbUnpack for RawString {
     }
     fn fb_key_less(buf: &[u8], a: Option<usize>, b: Option<usize>) -> bool {
         string_at(buf, a) < string_at(buf, b)
+    }
+    fn fb_key_cost(buf: &[u8], a: Option<usize>, b: Option<usize>) -> u64 {
+        string_at(buf, a).len().min(string_at(buf, b).len()) as u64
     }
     fn fb_decode_cell(buf: &[u8], cell: usize) -> Self {
         RawString(string_at(buf, Some(cell)).to_vec())
@@ -778,6 +791,9 @@ impl<K: FbUnpack + Ord> FbUnpack for BTreeSet<K> {
         let buf = c.buffer();
         for i in 1..count {
             let at = |i: u64| Some((target + 4 + i * step) as usize);
+            if !c.charge_key_bytes(K::fb_key_cost(buf, at(i - 1), at(i)), target) {
+                return false;
+            }
             if !K::fb_key_less(buf, at(i - 1), at(i)) {
                 return c.fail("flatbuf: set keys are not in ascending order", target);
             }
@@ -835,7 +851,7 @@ impl<K: FbUnpack + Ord, V: FbUnpack> FbUnpack for BTreeMap<K, V> {
         if target == 0 {
             return false;
         }
-        let Some(count) = c.check_vector(target, 4, 4) else {
+        let Some(count) = c.check_vector(target, 4, 4, false) else {
             return false;
         };
         for i in 0..count {
@@ -855,6 +871,9 @@ impl<K: FbUnpack + Ord, V: FbUnpack> FbUnpack for BTreeMap<K, V> {
         let buf = c.buffer();
         for i in 1..count {
             let key = |i: u64| entry_key_cell::<K>(buf, (target + 4 + i * 4) as usize);
+            if !c.charge_key_bytes(K::fb_key_cost(buf, key(i - 1), key(i)), target) {
+                return false;
+            }
             if !K::fb_key_less(buf, key(i - 1), key(i)) {
                 return c.fail("flatbuf: map keys are not in ascending order", target);
             }

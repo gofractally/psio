@@ -4,10 +4,13 @@
 //!
 //! The verifier is typed — it follows everything a `T` can reach — and safe
 //! on arbitrary bytes: every read is bounds-checked, nesting is limited
-//! ([`FbLimits::max_depth`]) and so is the number of tables visited
-//! ([`FbLimits::max_tables`]). Offsets are unsigned and point forward, so a
-//! buffer cannot contain a cycle; what a hostile buffer can do is reach one
-//! sub-object along very many paths, which the table budget bounds.
+//! ([`FbLimits::max_depth`]) and so are the number of tables visited
+//! ([`FbLimits::max_tables`]) and the bytes of strings and vectors reached
+//! ([`FbLimits::max_expansion`]). Offsets are unsigned and point forward, so
+//! a buffer cannot contain a cycle; what a hostile buffer can do is reach
+//! one sub-object along very many paths, which the budgets bound: the work
+//! of the verifier and the size of what the buffer decodes to are both
+//! limited by the size of the buffer.
 
 /// What a buffer is refused for, and where.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,13 +50,27 @@ pub struct FbLimits {
     pub max_depth: u32,
     /// Tables visited in total (a table reachable twice counts twice).
     pub max_tables: u32,
+    /// The bytes of the strings and of the vectors of scalars / structs
+    /// reached (each with its 4-byte length), one reachable twice counted
+    /// twice, as a multiple of the buffer's size (on top of
+    /// [`PAYLOAD_ALLOWANCE`], which every buffer has): what a decode
+    /// copies. The bytes read to compare string keys of a set / map (the
+    /// shorter key of each neighbouring pair) are charged to the same
+    /// budget, so the verifier's work is bounded by the buffer too. A
+    /// buffer in which nothing is shared needs 3; the default leaves room
+    /// for the strings an official builder shares (`CreateSharedString`).
+    pub max_expansion: u32,
 }
 
 impl Default for FbLimits {
     fn default() -> Self {
-        FbLimits { max_depth: 64, max_tables: 1_000_000 }
+        FbLimits { max_depth: 64, max_tables: 1_000_000, max_expansion: 64 }
     }
 }
+
+/// The payload budget of every buffer, before [`FbLimits::max_expansion`]
+/// times its size: one mebibyte.
+pub const PAYLOAD_ALLOWANCE: u64 = 1 << 20;
 
 /// A file identifier and / or a size prefix (C++ `psio::flatbuf::options`):
 /// what [`to_flatbuf_with`](super::to_flatbuf_with) writes and
@@ -77,6 +94,8 @@ pub struct FbChecker<'a> {
     limits: FbLimits,
     depth: u32,
     tables: u32,
+    /// What is left of the payload budget.
+    payload: u64,
     error: Option<FbError>,
     utf8_scanned: u64,
     utf8_seen: Option<Utf8Seen>,
@@ -164,6 +183,7 @@ impl<'a> FbChecker<'a> {
             limits,
             depth: 0,
             tables: 0,
+            payload: PAYLOAD_ALLOWANCE + buf.len() as u64 * limits.max_expansion as u64,
             error: None,
             utf8_scanned: 0,
             utf8_seen: None,
@@ -187,6 +207,25 @@ impl<'a> FbChecker<'a> {
             self.error = Some(FbError::new(message, pos));
         }
         false
+    }
+
+    /// Takes `n` bytes from the payload budget.
+    #[inline]
+    fn charge(&mut self, n: u64, message: &'static str, pos: u64) -> bool {
+        if n > self.payload {
+            return self.fail(message, pos);
+        }
+        self.payload -= n;
+        true
+    }
+
+    /// Charges the bytes read to compare two neighbouring string keys of
+    /// the set / map at `pos` (the length of the shorter key). Keys that
+    /// share their bytes — one long string in many sets — cannot make the
+    /// verifier read more than the budget.
+    #[inline]
+    pub fn charge_key_bytes(&mut self, n: u64, pos: u64) -> bool {
+        n == 0 || self.charge(n, "flatbuf: too many key bytes compared", pos)
     }
 
     /// Whether `n` bytes at `pos` are inside the buffer.
@@ -268,7 +307,7 @@ impl<'a> FbChecker<'a> {
         if self.u8(pos + 4 + len) != 0 {
             return self.fail("flatbuf: string is not NUL-terminated", pos);
         }
-        true
+        self.charge(4 + len, "flatbuf: too many bytes referenced", pos)
     }
 
     /// The verified string at `pos` is UTF-8: what a Rust `String` requires
@@ -297,8 +336,10 @@ impl<'a> FbChecker<'a> {
     }
 
     /// The element count of the vector at `pos` (4 readable bytes); `None`
-    /// after recording an error.
-    pub fn check_vector(&mut self, pos: u64, elem_size: u64, elem_align: u64) -> Option<u64> {
+    /// after recording an error. `leaf`: the elements are scalars or
+    /// structs, the vector's own payload (the tables and strings that
+    /// offsets lead to are budgeted where they are reached).
+    pub fn check_vector(&mut self, pos: u64, elem_size: u64, elem_align: u64, leaf: bool) -> Option<u64> {
         if pos & 3 != 0 {
             self.fail("flatbuf: misaligned vector", pos);
             return None;
@@ -310,6 +351,9 @@ impl<'a> FbChecker<'a> {
         }
         if count != 0 && (pos + 4) & (elem_align - 1) != 0 {
             self.fail("flatbuf: misaligned vector elements", pos);
+            return None;
+        }
+        if leaf && !self.charge(4 + count * elem_size, "flatbuf: too many bytes referenced", pos) {
             return None;
         }
         Some(count)

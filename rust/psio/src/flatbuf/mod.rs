@@ -47,7 +47,7 @@ pub use field::{
 pub use layout::{FbFieldLoc, FbLayout};
 pub use raw::{FbTable, FbVector};
 pub use schema::{to_fbs_schema, to_fbs_text, FbFieldSchema, FbSchema, FbTypeSchema};
-pub use verify::{FbCheckedTable, FbChecker, FbError, FbLimits, FbOptions, MAX_BUFFER_SIZE};
+pub use verify::{FbCheckedTable, FbChecker, FbError, FbLimits, FbOptions, MAX_BUFFER_SIZE, PAYLOAD_ALLOWANCE};
 pub use view::{FbKey, FbMap, FbSet, FbUnion, FbVec, FbView, FbViewable};
 
 // The derives, beside the traits they implement.

@@ -58,7 +58,7 @@ accessors):
   the same values. The reverse does not hold: psio refuses about 5 % of
   them that the official verifier takes (see "Validation").
 
-`conformance/flatbuf-vectors.json` pins 27 buffers, 427 that must be
+`conformance/flatbuf-vectors.json` pins 27 buffers, 429 that must be
 refused (with the reason and the position), 62 corrupted ones the verifier
 accepts, and the verdicts on 300,000 further corruptions as ten digests.
 Rust decodes and re-encodes all 27 to the same bytes and gives the same
@@ -156,20 +156,59 @@ a `T` can reach — and safe on arbitrary bytes. It checks:
 * sets and maps: keys strictly ascending (so that key lookup is correct); a
   string key present;
 * nesting depth (64) and the number of tables visited (1,000,000) — the
-  official verifier's defaults; `validate_flatbuf<T>(bytes,
-  psio::flatbuf::limits{…})` changes them.
+  official verifier's defaults — and the payload budget below;
+  `validate_flatbuf<T>(bytes, psio::flatbuf::limits{…})` changes them.
 
 Offsets are unsigned and point forward, so a buffer cannot contain a cycle;
-what a hostile buffer can do is reach one sub-object along very many paths,
-which the table budget bounds (`flatbuf_fuzz_tests.cpp` builds such a
-buffer: 40^12 paths, refused after 1,000,000 tables).
+what a hostile buffer can do is reach one sub-object along very many paths.
+Three budgets bound that, each counting a sub-object **every time it is
+reached**:
+
+| `psio::flatbuf::limits` | default | bounds |
+|---|---|---|
+| `max_depth` | 64 | tables nested inside tables |
+| `max_tables` | 1,000,000 | tables visited (`flatbuf_fuzz_tests.cpp` builds a buffer with 40^12 paths: refused after 1,000,000 tables, "flatbuf: too many tables") |
+| `max_expansion` | 64 | the bytes of the strings and of the vectors of scalars / structs reached (each with its 4-byte length), **and** the bytes read to compare the string keys of sets / maps (the shorter key of each neighbouring pair): at most 1 MiB + `max_expansion` × the buffer's size. "flatbuf: too many bytes referenced", "flatbuf: too many key bytes compared" |
+
+The payload budget is what makes the verifier's work, and the size of what
+a verified buffer decodes to, proportional to the buffer:
+
+* **Work.** Comparing neighbouring string keys reads their common prefix.
+  A buffer of many small tables, each with a set that points at the same
+  two long keys, made the verifier read (tables × key length) bytes: valid
+  buffers of 0.22 / 0.44 / 0.88 / 1.76 MB (5,000 to 40,000 tables, keys of
+  50 to 400 kB) took 4.6 / 24 / 71 / 283 ms in C++ and 4.5 / 18 / 71 / 282 ms
+  in Rust. They are refused now, after 0.09 / 0.23 / 0.48 / 0.66 ms (C++)
+  and 0.10 / 0.18 / 0.36 / 0.70 ms (Rust). The keys of a buffer in which
+  nothing is shared are reached once and compared with two neighbours: 3
+  times the buffer at most, whatever the keys are.
+* **Decoded size.** A decode copies a string or vector once per reference:
+  a 50,032-byte buffer of 10,000 offsets to one 10 kB string verified and
+  decoded to 100 MB. It is refused now; what a verified buffer decodes to
+  is bounded by 1 MiB + 64 × its size of strings and vectors (and by
+  `max_tables` tables). Views do not copy and are not concerned.
+* **The default.** `FlatBufferBuilder::CreateSharedString` writes a string
+  once and returns the same offset for every equal string after it, so an
+  honest buffer may reach one string very often. A reference costs at
+  least 4 bytes of buffer (an offset in a vector; about 20 with a table
+  around it), so a buffer exceeds 64 only with strings longer than 256
+  bytes that are each shared hundreds of times — and not at all while it
+  reaches less than 1 MiB. 20,000 rows that share one 300-byte string
+  (`flatbuf_interop_tests.cpp`, written by the official builder) are 19×.
+  A program that reads buffers which share more sets `max_expansion`
+  (`0xffffffff`: no limit); one that wants a tight bound on what it
+  decodes sets it lower (3 holds every buffer in which nothing is shared).
+  The official verifier has no such budget: psio refuses these buffers and
+  the official library accepts them, like the other cases below.
 
 It is **stricter than the official verifier**. On the corrupted buffers of
 the interop test it refuses, and the official one accepts: a table size or
 vtable size that is inconsistent, a field offset outside its table, set /
 map keys out of order, an unknown union type, a union type without a value
 or a `NONE` with one, a fixed-length vector of another length, a null
-offset inside a vector. Each of these is something no builder writes.
+offset inside a vector. Each of these is something no builder writes. (A
+buffer over the payload budget is one a builder can write, by sharing long
+strings on purpose: see the default above.)
 Fields a newer schema added (slots beyond the ones `T` knows) are not
 followed and not checked — a view never reads them.
 
@@ -372,8 +411,9 @@ Per member:
 `validate_flatbuf::<T>` (`FbUnpack::fb_validate`,
 `validate_flatbuf_with(bytes, &FbOptions, FbLimits)`) is the C++ verifier
 ported check for check: the same order, messages and positions, the same
-limits (depth 64, 1,000,000 tables). It never panics, reads outside the
-bytes or does unbounded work. `FbError` has `message()` and `offset()`.
+limits (`FbLimits`: depth 64, 1,000,000 tables, `max_expansion` 64 — the
+payload budget of "Validation" above, `PAYLOAD_ALLOWANCE` being its 1 MiB).
+It never panics, reads outside the bytes or does unbounded work. `FbError` has `message()` and `offset()`.
 
 Two checks are Rust's own, because the Rust type cannot hold what C++
 accepts:
@@ -395,7 +435,7 @@ and position, and reproduces the fixture's ten digests — the verdict,
 message and position of the C++ verifier on 300,000 corruptions (82,459
 accepted) that Rust draws the same way. For the same types written with
 `String` and plain enums it pins which rows differ (9 of the 62 corrupted
-rows C++ accepts are refused; in 2 of the 427 rejected rows a Rust-only
+rows C++ accepts are refused; in 2 of the 429 rejected rows a Rust-only
 check comes first) and checks, on the 300,000, that nothing C++ refuses is
 accepted and that an extra refusal is one of the two above.
 

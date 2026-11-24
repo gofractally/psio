@@ -639,3 +639,49 @@ TEST_CASE("flatbuf interop: corrupted buffers, both verifiers", "[flatbuf][inter
                              << ", by the official verifier only: " << official_only << reasons);
    CHECK(both > 1000);
 }
+
+TEST_CASE("flatbuf interop: strings the official builder shares are within the payload budget",
+          "[flatbuf][interop][budget]")
+{
+   // FlatBufferBuilder::CreateSharedString writes a string once and hands
+   // out the same offset for every equal string after it. psio's verifier
+   // counts such a string each time it is reached (a decode copies it each
+   // time): the default budget (1 MiB and 64 times the buffer) has room for
+   // what a builder shares.
+   auto shared_names = [](std::size_t children, const std::string& name, bool shared) {
+      ::flatbuffers::FlatBufferBuilder                  fbb;
+      std::vector<::flatbuffers::Offset<fbi::Tree>> kids;
+      for (std::size_t i = 0; i < children; ++i)
+      {
+         const auto text = shared ? fbb.CreateSharedString(name) : fbb.CreateString(name);
+         kids.push_back(fbi::CreateTree(fbb, static_cast<std::int32_t>(i), text));
+      }
+      const auto vec = fbb.CreateVector(kids);
+      fbb.Finish(fbi::CreateTree(fbb, 7, fbb.CreateSharedString(name), vec));
+      const auto* p = reinterpret_cast<const char*>(fbb.GetBufferPointer());
+      return std::vector<char>(p, p + fbb.GetSize());
+   };
+   // 20,000 rows that share one 300-byte string (a message template, a
+   // host name, a URL): 6 MB of strings from 0.4 MB.
+   const std::string name(300, 'n');
+   const auto        bytes = shared_names(20000, name, true);
+   CHECK(bytes.size() < shared_names(200, name, false).size() * 20);
+   ::flatbuffers::Verifier verifier(reinterpret_cast<const std::uint8_t*>(bytes.data()),
+                                    bytes.size());
+   REQUIRE(verifier.VerifyBuffer<fbi::Tree>(nullptr));
+   REQUIRE(psio::validate_flatbuf<Tree>(bytes).ok());
+   const Tree tree = psio::from_flatbuf<Tree>(bytes);
+   REQUIRE(tree.children.size() == 20000);
+   CHECK(tree.children[19999].name == name);
+   CHECK(tree.name == name);
+   // The expansion of this buffer: (4 + 300) bytes per reference against
+   // about 20 bytes of table and offset each.
+   const double expansion = 20001.0 * 304 / static_cast<double>(bytes.size());
+   WARN("official CreateSharedString: " << bytes.size() << " bytes reach " << 20001 * 304
+                                        << " bytes of strings (" << expansion << "x)");
+   CHECK(expansion < 32);
+   // Under a budget smaller than the sharing it is refused, for that reason.
+   const auto tight = psio::validate_flatbuf<Tree>(bytes, psio::flatbuf::limits{.max_expansion = 4});
+   REQUIRE_FALSE(tight.ok());
+   CHECK(tight.error().what == "flatbuf: too many bytes referenced");
+}

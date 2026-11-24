@@ -47,7 +47,8 @@ position it reports. Two kinds:
 
 * written by hand, one for each reason the verifier has (the rows whose id
   names the reason: `Profile/null_root`, `Order/union_none_with_value`,
-  `Tree/shared_subobjects`, …). Every message of `validate_flatbuf` is
+  `Tree/shared_subobjects`, `Basket/shared_string`,
+  `Order/shared_key_bytes`, …). Every message of `validate_flatbuf` is
   there except the three that cannot be reached or stored: "buffer larger
   than 2 GiB", "field out of bounds" and "table out of bounds" (the checks
   before them already cover the buffer);
@@ -94,8 +95,8 @@ every language.
 
 | Language | Accepted rows | Rejected rows | Corrupted rows C++ accepts | Digests |
 |---|---|---|---|---|
-| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 427 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer | computed by the emitter |
-| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 427 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below | all ten reproduced with the `raw` declarations: 300,000 buffers, 82,459 accepted; with the `natural` ones every buffer C++ refuses is refused and an accepted one is refused only for the two reasons below |
+| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 429 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer | computed by the emitter |
+| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 429 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below | all ten reproduced with the `raw` declarations: 300,000 buffers, 82,459 accepted; with the `natural` ones every buffer C++ refuses is refused and an accepted one is refused only for the two reasons below |
 | JavaScript, Python | none: neither package implements FlatBuffers | none | none | none |
 
 Rust declares the types twice. `raw` holds what the C++ types hold:

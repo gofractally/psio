@@ -54,9 +54,11 @@
 // follows everything a T can reach and checks bounds, alignment, vtables,
 // field offsets against the table's size, string terminators, vector
 // lengths, union types, the order of set / map keys — under a depth limit
-// and a table budget (the official verifier's defaults). Offsets are
-// unsigned and point forward, so a buffer cannot contain a cycle; the
-// budget bounds the work a buffer that shares sub-objects can cause.
+// and a table budget (the official verifier's defaults) and a payload
+// budget (`flatbuf::limits`). Offsets are unsigned and point forward, so a
+// buffer cannot contain a cycle; the budgets bound the work a buffer that
+// shares sub-objects can cause, and the size of what it decodes to: tables,
+// strings and vectors are counted each time they are reached.
 //
 // Not supported: vectors of unions, unions of structs or strings, nested
 // vectors without a wrapping table (FlatBuffers has none either), shared
@@ -1289,7 +1291,19 @@ namespace psio {
          std::uint32_t max_depth = 64;
          // Tables visited in total (a table reachable twice counts twice).
          std::uint32_t max_tables = 1'000'000;
+         // The bytes of the strings and of the vectors of scalars / structs
+         // reached (each with its 4-byte length), one reachable twice
+         // counted twice, as a multiple of the buffer's size (on top of
+         // `payload_allowance`, one mebibyte, that every buffer has):
+         // what a decode copies. The bytes read to compare string keys of
+         // a set / map (the shorter key of each neighbouring pair) are
+         // charged to the same budget, so the verifier's work is bounded
+         // by the buffer too. A buffer in which nothing is shared needs
+         // 3; the default leaves room for the strings an official builder
+         // shares (`CreateSharedString`).
+         std::uint32_t max_expansion = 64;
       };
+      inline constexpr std::uint64_t payload_allowance = std::uint64_t{1} << 20;
 
       struct checker
       {
@@ -1298,6 +1312,8 @@ namespace psio {
          limits              lim;
          std::uint32_t       depth  = 0;
          std::uint32_t       tables = 0;
+         // What is left of the payload budget (limits::max_expansion).
+         std::uint64_t       payload = 0;
          const char*         error  = nullptr;
          std::uint64_t       at     = 0;
 
@@ -1313,6 +1329,14 @@ namespace psio {
          [[nodiscard]] bool has(std::uint64_t pos, std::uint64_t n) const noexcept
          {
             return pos <= size && n <= size - pos;
+         }
+         // Takes `n` bytes from the payload budget.
+         [[nodiscard]] bool charge(std::uint64_t n, const char* what, std::uint64_t pos) noexcept
+         {
+            if (n > payload)
+               return fail(what, pos);
+            payload -= n;
+            return true;
          }
       };
 
@@ -1339,13 +1363,15 @@ namespace psio {
             return c.fail("flatbuf: string out of bounds", pos);
          if (c.buf[pos + 4 + len] != 0)
             return c.fail("flatbuf: string is not NUL-terminated", pos);
-         return true;
+         return c.charge(4 + len, "flatbuf: too many bytes referenced", pos);
       }
 
       // The element count of the vector at `pos` (4 readable bytes); false
-      // after recording an error.
+      // after recording an error. `leaf`: the elements are scalars or
+      // structs, the vector's own payload (the tables and strings that
+      // offsets lead to are budgeted where they are reached).
       inline bool check_vector(checker& c, std::uint64_t pos, std::uint64_t elem_size,
-                               std::uint64_t elem_align, std::uint64_t& count) noexcept
+                               std::uint64_t elem_align, bool leaf, std::uint64_t& count) noexcept
       {
          if (pos & 3)
             return c.fail("flatbuf: misaligned vector", pos);
@@ -1354,7 +1380,8 @@ namespace psio {
             return c.fail("flatbuf: vector out of bounds", pos);
          if (count && ((pos + 4) & (elem_align - 1)))
             return c.fail("flatbuf: misaligned vector elements", pos);
-         return true;
+         return !leaf ||
+                c.charge(4 + count * elem_size, "flatbuf: too many bytes referenced", pos);
       }
 
       template <typename Def>
@@ -1378,6 +1405,21 @@ namespace psio {
             return kc ? string_at(follow(kc)) : std::string_view{};
          else
             return kc ? load_scalar<K>(kc) : K{};
+      }
+
+      // Whether key `a` orders before key `b`, neighbours in the vector at
+      // `vec`. Comparing strings reads up to the length of the shorter one:
+      // that is charged first, so keys that share their bytes (one long
+      // string in many sets) cannot make the verifier read more than the
+      // budget.
+      template <typename K, typename Key>
+      [[gnu::always_inline]] inline bool keys_ascend(checker& c, const Key& a, const Key& b,
+                                                     std::uint64_t vec, const char* what) noexcept
+      {
+         if constexpr (std::is_same_v<K, std::string>)
+            if (!c.charge(std::min(a.size(), b.size()), "flatbuf: too many key bytes compared", vec))
+               return false;
+         return a < b ? true : c.fail(what, vec);
       }
 
       // The value whose inline cell is at `pos` (a table field, or a vector
@@ -1408,7 +1450,8 @@ namespace psio {
             {
                using E = typename F::value_type;
                std::uint64_t count = 0;
-               if (!check_vector(c, target, inline_size<E>(), inline_align<E>(), count))
+               if (!check_vector(c, target, inline_size<E>(), inline_align<E>(),
+                                 Scalar<E> || is_struct_v<E>, count))
                   return false;
                if constexpr (is_array_v<F>)
                {
@@ -1425,9 +1468,10 @@ namespace psio {
                {
                   constexpr std::size_t step = inline_size<E>();
                   for (std::uint64_t i = 1; i < count; ++i)
-                     if (!(key_at<E>(c.buf + target + 4 + (i - 1) * step) <
-                           key_at<E>(c.buf + target + 4 + i * step)))
-                        return c.fail("flatbuf: set keys are not in ascending order", target);
+                     if (!keys_ascend<E>(c, key_at<E>(c.buf + target + 4 + (i - 1) * step),
+                                         key_at<E>(c.buf + target + 4 + i * step), target,
+                                         "flatbuf: set keys are not in ascending order"))
+                        return false;
                }
                return true;
             }
@@ -1436,7 +1480,7 @@ namespace psio {
                using K = typename F::key_type;
                using V = typename F::mapped_type;
                std::uint64_t count = 0;
-               if (!check_vector(c, target, 4, 4, count))
+               if (!check_vector(c, target, 4, 4, false, count))
                   return false;
                for (std::uint64_t i = 0; i < count; ++i)
                {
@@ -1445,9 +1489,10 @@ namespace psio {
                      return false;
                }
                for (std::uint64_t i = 1; i < count; ++i)
-                  if (!(entry_key_at<K>(c.buf + target + 4 + (i - 1) * 4) <
-                        entry_key_at<K>(c.buf + target + 4 + i * 4)))
-                     return c.fail("flatbuf: map keys are not in ascending order", target);
+                  if (!keys_ascend<K>(c, entry_key_at<K>(c.buf + target + 4 + (i - 1) * 4),
+                                      entry_key_at<K>(c.buf + target + 4 + i * 4), target,
+                                      "flatbuf: map keys are not in ascending order"))
+                     return false;
                return true;
             }
             else
@@ -1590,6 +1635,7 @@ namespace psio {
          checker c{reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size(), lim};
          if (bytes.size() > max_buffer_size)
             return codec_fail("flatbuf: buffer larger than 2 GiB", 0, "flatbuf");
+         c.payload = payload_allowance + c.size * lim.max_expansion;
          const std::uint64_t start = opts.size_prefixed ? 4 : 0;
          if (!c.has(0, start + 4))
             return codec_fail("flatbuf: buffer too small", 0, "flatbuf");

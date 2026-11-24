@@ -22,9 +22,11 @@
 #include <catch.hpp>
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <random>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -381,4 +383,180 @@ TEST_CASE("flatbuf fuzz: a buffer that shares sub-objects cannot make the verifi
    }
    REQUIRE(psio::validate_flatbuf<Tree>(small).ok());
    CHECK(psio::flatbuf_view<Tree>{small}.children()[0].children().size() == 1);
+}
+
+// ── The payload budget (gofractally/psio#10) ─────────────────────────────
+
+namespace
+{
+   // table Bag { keys: [string]; } (a sorted set), table Bags { bags: [Bag]; }
+   struct Bag
+   {
+      std::set<std::string> keys;
+      friend bool           operator==(const Bag&, const Bag&) = default;
+   };
+   PSIO_REFLECT(Bag, keys)
+   struct Bags
+   {
+      std::vector<Bag> bags;
+      friend bool      operator==(const Bags&, const Bags&) = default;
+   };
+   PSIO_REFLECT(Bags, bags)
+   // table Names { names: [string]; }
+   struct Names
+   {
+      std::vector<std::string> names;
+      friend bool              operator==(const Names&, const Names&) = default;
+   };
+   PSIO_REFLECT(Names, names)
+
+   using Bytes = std::vector<char>;
+   void put32(Bytes& b, std::size_t at, std::uint32_t v) { std::memcpy(b.data() + at, &v, 4); }
+   void put16(Bytes& b, std::size_t at, std::uint16_t v) { std::memcpy(b.data() + at, &v, 2); }
+
+   // A root table with one member, an offset at +4, and its vector of
+   // `count` elements at 20: the first 24 bytes.
+   void one_vector_root(Bytes& b, std::size_t count)
+   {
+      put32(b, 0, 12);  // the root table
+      put16(b, 4, 6);   // its vtable: size, object size, member 0 at +4
+      put16(b, 6, 8);
+      put16(b, 8, 4);
+      put32(b, 12, 8);  // soffset to the vtable
+      put32(b, 16, 4);  // the vector, at 20
+      put32(b, 20, static_cast<std::uint32_t>(count));
+   }
+
+   // `tables` bags, each with its own set of two offsets to the SAME two
+   // keys of `len` bytes, which differ in their last byte: the verifier
+   // compares tables × len bytes unless it counts them.
+   Bytes shared_keys(std::size_t tables, std::size_t len)
+   {
+      const std::size_t t0 = 24 + 4 * tables, v0 = t0 + 8 * tables, s0 = v0 + 12 * tables;
+      const std::size_t slen = (4 + len + 1 + 3) & ~std::size_t{3};
+      Bytes             b(s0 + 2 * slen, 0);
+      one_vector_root(b, tables);
+      for (std::size_t i = 0; i < tables; ++i)
+      {
+         const std::size_t cell = 24 + 4 * i, tbl = t0 + 8 * i, keys = v0 + 12 * i;
+         put32(b, cell, static_cast<std::uint32_t>(tbl - cell));
+         put32(b, tbl, static_cast<std::uint32_t>(tbl - 4));  // the same vtable
+         put32(b, tbl + 4, static_cast<std::uint32_t>(keys - (tbl + 4)));
+         put32(b, keys, 2);
+         put32(b, keys + 4, static_cast<std::uint32_t>(s0 - (keys + 4)));
+         put32(b, keys + 8, static_cast<std::uint32_t>(s0 + slen - (keys + 8)));
+      }
+      for (std::size_t k = 0; k < 2; ++k)
+      {
+         put32(b, s0 + k * slen, static_cast<std::uint32_t>(len));
+         std::memset(b.data() + s0 + k * slen + 4, 'a', len);
+         b[s0 + k * slen + 4 + len - 1] = static_cast<char>('a' + k);
+      }
+      return b;
+   }
+
+   // `count` offsets to one string of `len` bytes.
+   Bytes shared_string(std::size_t count, std::size_t len)
+   {
+      const std::size_t s0 = 24 + 4 * count;
+      Bytes             b(s0 + ((4 + len + 1 + 3) & ~std::size_t{3}), 0);
+      one_vector_root(b, count);
+      for (std::size_t i = 0; i < count; ++i)
+         put32(b, 24 + 4 * i, static_cast<std::uint32_t>(s0 - (24 + 4 * i)));
+      put32(b, s0, static_cast<std::uint32_t>(len));
+      std::memset(b.data() + s0 + 4, 'a', len);
+      return b;
+   }
+}  // namespace
+
+TEST_CASE("flatbuf budget: comparing keys that share their bytes is bounded by the buffer",
+          "[flatbuf][fuzz][budget]")
+{
+   // tables × key length bytes were compared: 0.22 / 0.44 / 0.88 MB took
+   // 4.6 / 24 / 71 ms. The bytes compared are charged to the payload budget.
+   for (auto [tables, len] : {std::pair<std::size_t, std::size_t>{5000, 50000},
+                              {10000, 100000},
+                              {20000, 200000}})
+   {
+      const Bytes b  = shared_keys(tables, len);
+      const auto  st = psio::validate_flatbuf<Bags>(b);
+      REQUIRE_FALSE(st.ok());
+      const bool budget = st.error().what == "flatbuf: too many bytes referenced" ||
+                          st.error().what == "flatbuf: too many key bytes compared";
+      CHECK(budget);
+   }
+   // The construction is a well-formed buffer: small, it is valid and is
+   // what it looks like.
+   const Bytes small = shared_keys(50, 100);
+   REQUIRE(psio::validate_flatbuf<Bags>(small).ok());
+   const Bags bags = psio::from_flatbuf<Bags>(small);
+   REQUIRE(bags.bags.size() == 50);
+   CHECK(bags.bags[49].keys ==
+         std::set<std::string>{std::string(100, 'a'), std::string(99, 'a') + "b"});
+   // Where the budget runs out: 5,000 sets of two 50 kB keys reach 500 MB of
+   // strings and compare 250 MB; the buffer allows 1 MiB + 64 × 220,040.
+   const Bytes b = shared_keys(5000, 50000);
+   REQUIRE(b.size() == 220040);
+   const auto st = psio::validate_flatbuf<Bags>(b);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "flatbuf: too many key bytes compared");
+   // The budget is an option: lifted, the buffer is valid.
+   const psio::flatbuf::limits unlimited{.max_expansion = 0xffffffffu};
+   CHECK(psio::validate_flatbuf<Bags>(shared_keys(200, 2000), unlimited).ok());
+   CHECK_FALSE(psio::validate_flatbuf<Bags>(shared_keys(200, 2000),
+                                            psio::flatbuf::limits{.max_expansion = 0})
+                  .ok());
+   // An honest buffer needs no more than three times its size: every key
+   // reached once and compared with its two neighbours.
+   Bags honest;
+   for (int i = 0; i < 2000; ++i)
+   {
+      Bag bag;
+      for (int k = 0; k < 8; ++k)
+      {
+         char key[32];
+         std::snprintf(key, sizeof key, "key-%06d-%02d-", i, k);
+         bag.keys.insert(key + std::string(40, 'x'));
+      }
+      honest.bags.push_back(std::move(bag));
+   }
+   const auto bytes = psio::to_flatbuf(honest);
+   CHECK(psio::validate_flatbuf<Bags>(bytes, psio::flatbuf::limits{.max_expansion = 3}).ok());
+   CHECK(psio::from_flatbuf<Bags>(bytes) == honest);
+}
+
+TEST_CASE("flatbuf budget: a shared string cannot decode to more than the budget",
+          "[flatbuf][fuzz][budget]")
+{
+   // 50,032 bytes that verified and decoded to 100 MB: 10,000 offsets to one
+   // string of 10 kB.
+   const Bytes b = shared_string(10000, 10000);
+   REQUIRE(b.size() == 50032);
+   const auto st = psio::validate_flatbuf<Names>(b);
+   REQUIRE_FALSE(st.ok());
+   CHECK(st.error().what == "flatbuf: too many bytes referenced");
+   CHECK_THROWS_AS(psio::from_flatbuf<Names>(b), psio::codec_exception);
+   // The safe view does not copy: it reads the bytes whatever they are.
+   CHECK(psio::flatbuf_view<Names>{b}.names().size() == 10000);
+   // What the default allows: 1 MiB and 64 times the buffer. A string an
+   // official builder shares (CreateSharedString) is reached once per
+   // reference: 1,000 references to a 1 kB string are 1 MB from 5 kB.
+   const Bytes shared = shared_string(1000, 1000);
+   REQUIRE(psio::validate_flatbuf<Names>(shared).ok());
+   const Names names = psio::from_flatbuf<Names>(shared);
+   REQUIRE(names.names.size() == 1000);
+   CHECK(names.names[999] == std::string(1000, 'a'));
+   // The limit is an option, either way.
+   CHECK(psio::validate_flatbuf<Names>(shared_string(2000, 1000),
+                                       psio::flatbuf::limits{.max_expansion = 0})
+            .error()
+            .what == "flatbuf: too many bytes referenced");
+   CHECK(psio::validate_flatbuf<Names>(b, psio::flatbuf::limits{.max_expansion = 4000}).ok());
+   // A vector of scalars is payload as a string is: `Longs.values` shared
+   // by nothing here, so the same bytes are reached once.
+   Longs longs;
+   longs.values.assign(1000, 7);
+   CHECK(psio::validate_flatbuf<Longs>(psio::to_flatbuf(longs),
+                                       psio::flatbuf::limits{.max_expansion = 1})
+            .ok());
 }

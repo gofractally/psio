@@ -6,7 +6,91 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
-### After the JSON sink pass (gofractally/psio#11) — tip of this note
+### After the FlatBuffers budget pass (gofractally/psio#10) — tip of this note
+
+Branch `codex/json-sink` (worktree `~/psio-json-sink`), on top of the JSON
+sink pass below. User documentation: `docs/flatbuffers.md` "Validation" (the
+three budgets) and "Rust / Verifier".
+
+**Cause.** Both items of "Found on the way" below are one gap: the verifier
+counted tables each time they were reached and nothing else.
+
+1. *Verification time.* The ascending-key check compares neighbouring keys;
+   comparing two strings reads their common prefix. Comparing n keys that
+   do not share bytes is linear in the keys. Keys that are **shared** are
+   read once per set that points at them: many small tables, each with a
+   set of the same two long keys with a long common prefix, cost
+   (tables × key length). It is the shape, not the prefixes: the honest
+   buffer of 20,000 sets with their own keys (1.44 MB) verifies in 0.2 ms.
+   C++ was the same algorithm and measures the same as Rust.
+2. *Decode amplification.* A string or a vector of scalars reached R times
+   is copied R times by a decode.
+
+**Fix** (`cpp/include/psio/flatbuf.hpp`, `rust/psio/src/flatbuf/verify.rs`,
+`field.rs`; the same checks in the same order with the same messages and
+positions). One more budget in `psio::flatbuf::limits` / `FbLimits`:
+
+```cpp
+std::uint32_t max_expansion = 64;     // Rust: pub max_expansion: u32
+```
+
+The verifier may reach 1 MiB + `max_expansion` × (buffer size) bytes of
+payload. Charged to it: every string reached (4 + its length), every vector
+of scalars / structs reached (4 + its bytes) — "flatbuf: too many bytes
+referenced", at the string / vector — and, before two neighbouring string
+keys are compared, the length of the shorter one — "flatbuf: too many key
+bytes compared", at the set / map. Vectors of offsets are not charged: the
+tables they lead to are counted by `max_tables` and the strings where they
+are reached (4 bytes each at least, so offsets to empty strings are bounded
+too). The verifier's work and the size of what a verified buffer decodes to
+are now both O(buffer). `validate_flatbuf`, `from_flatbuf` (the validating
+decode), `validated_view` and Rust `FbView::new` all go through it.
+
+**Why 64, and 1 MiB.** A buffer in which nothing is shared needs 3 (every
+key reached once, compared with two neighbours). The official builder
+shares strings on request (`CreateSharedString`: one copy, the same offset
+for every equal string), so an honest buffer can reach one string very
+often; a reference costs at least 4 bytes (about 20 with a table around
+it), so the expansion of a shared string of length L is at most (L + 4) / 4
+and exceeds 64 only for strings over 252 bytes each shared hundreds of
+times. The allowance lets every buffer that reaches less than 1 MiB
+through whatever it shares. Measured: 20,000 tables written by the official
+builder sharing one 300-byte string are 19× (`flatbuf_interop_tests.cpp`).
+The limit is an option both ways (`0xffffffff`: none).
+
+**Measured** (release; the buffers of `shared_keys` in
+`flatbuf_fuzz_tests.cpp` / `flatbuf_fuzz.rs`: n tables, each with a set of
+the same two keys):
+
+| tables × key | buffer | C++ before | C++ after | Rust before | Rust after |
+|---|---:|---:|---:|---:|---:|
+| 5,000 × 50 kB | 0.22 MB | 4.6 ms, valid | 0.09 ms, refused | 4.5 ms, valid | 0.10 ms, refused |
+| 10,000 × 100 kB | 0.44 MB | 24 ms, valid | 0.23 ms, refused | 18 ms, valid | 0.18 ms, refused |
+| 20,000 × 200 kB | 0.88 MB | 71 ms, valid | 0.48 ms, refused | 71 ms, valid | 0.36 ms, refused |
+| 40,000 × 400 kB | 1.76 MB | 283 ms, valid | 0.66 ms, refused | 282 ms, valid | 0.70 ms, refused |
+| honest: 20,000 sets of their own two keys | 1.44 MB | 0.16 ms, valid | 0.17 ms, valid | — | — |
+| 10,000 offsets to one 10 kB string | 50,032 B | valid, decodes to 100 MB | refused | valid, decodes to 100 MB | refused |
+
+(Rust "before" is the present code with the budget lifted, which is the
+old comparison.)
+
+**Evidence.** `conformance/flatbuf-vectors.json`: two rejected rows written
+by hand, `Basket/shared_string` (350 offsets to one 4,092-byte string) and
+`Order/shared_key_bytes` (400 overlapping 2,048-byte keys whose references
+fit the budget and whose comparisons do not): 429 rejected rows; no other
+row and no digest changed (the verdicts on the 300,000 corruptions are what
+they were). Rust reproduces all of it. C++ `flatbuf_fuzz_tests.cpp`
+(`[budget]`, also in the sanitizer build), Rust `flatbuf_fuzz.rs`; the
+differential fuzz against the official library
+(`flatbuf_interop_tests.cpp`, 300,000 corruptions): accepted by psio ⊆
+accepted by the official verifier, as before (139,955 accepted by both, 144,315 by neither, 15,730 by the official verifier only, none of them for a budget: the numbers of `2c64a24`).
+
+**Decision to review.** psio now refuses buffers the official verifier
+accepts *and an official builder can write*: one that shares long strings
+(or reuses the offset of a vector) so often that it reaches more than
+1 MiB + 64 × its size. Such a reader sets `max_expansion`.
+
+### After the JSON sink pass (gofractally/psio#11)
 
 Branch `codex/json-sink` (worktree `~/psio-json-sink`), from `2c64a24`.
 User documentation: `docs/json.md` "Where the text goes: capacity, exact
@@ -112,7 +196,8 @@ User documentation: `docs/flatbuffers.md`, "Rust".
 
 * `verify.rs`: `FbChecker`, the checks of C++ `validate_flatbuf<T>` in the
   same order with the same messages and positions; `FbLimits` (depth 64,
-  1,000,000 tables), `FbOptions` (file identifier, size prefix), `FbError`;
+  1,000,000 tables; `max_expansion` since #10), `FbOptions` (file
+  identifier, size prefix), `FbError`;
 * `field.rs`: `FbPack` (the mapping, as constants; the encoder) and
   `FbUnpack` (verify, decode) with the standard types: scalars, `String`,
   `RawString`, `Vec`, `[T; N]`, `Option`, `BTreeSet`, `BTreeMap`;
@@ -189,7 +274,9 @@ User documentation: `docs/flatbuffers.md`, "Rust".
    safe view and not faster than `new` per access; it only skips the
    verification pass.
 
-**Found on the way** (not fixed; C++ is the reference and was not changed).
+**Found on the way** (the first two are fixed since: "After the FlatBuffers
+budget pass" above; the numbers of rows below are those of this pass, 429
+rejected rows now).
 
 * **Verification time that grows with the square of the buffer.** The
   ascending-key check of a set / map compares neighbouring string keys
@@ -202,14 +289,16 @@ User documentation: `docs/flatbuffers.md`, "Rust".
   for line, so C++ is expected to behave the same; that was not measured.
   The Rust UTF-8 check had the same shape (one string pointed at many
   times) and is linear now (`FbChecker::check_utf8`). A byte budget for
-  key comparisons in `limits` would close it in both languages.
+  key comparisons in `limits` would close it in both languages. *(Done:
+  `max_expansion`.)*
 * **Decode amplification.** A verified buffer may point at one string (or
   scalar vector) many times; the decoded value holds a copy per reference.
   Measured in Rust: a 50,032-byte buffer (`[string]` with 10,000 offsets to
   one 10 kB string) verifies and decodes to 100 MB. Views do not copy. The
   C++ verifier accepts such a buffer by the same checks and `from_flatbuf`
   copies per reference too (not run); the official `UnPack` has the
-  property as well. A decoded-size limit would be new API.
+  property as well. A decoded-size limit would be new API. *(Done: the
+  same budget.)*
 * `FbMut` (untyped in-place writes, from the earlier crate) indexes
   without checking and was not touched; `FbSchema` / `to_fbs_schema` and
   the FlatBuffers side of `dynamic_view` know only the shapes they knew.
