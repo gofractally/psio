@@ -287,3 +287,163 @@ TEST_CASE("packs_as: sources of a record as method arguments", "[pssz][packs_as]
    REQUIRE((psio::method_args_to_pssz<Svc, 1>(tags) ==
             psio::to_pssz(psio::reflect<Svc>::method_arg_tuple<1>{{"a", "bb"}})));
 }
+
+// ── Recursive records ────────────────────────────────────────────────────
+//
+// A record that contains itself: directly (a list of itself), and through a
+// list of variants whose alternative is the record (psibase's ActionTrace /
+// InnerTrace). packs_as, pssz_evolves_from and everything built on them
+// (to_pssz_as, method arguments, a Table<T>::put(U) constraint) compare
+// such types.
+namespace
+{
+   struct Node
+   {
+      std::string       name;
+      std::vector<Node> children;
+      friend bool       operator==(const Node&, const Node&) = default;
+   };
+   PSIO_REFLECT(Node, name, children)
+   struct NodeRef
+   {
+      std::string_view     name;
+      std::vector<NodeRef> children;
+   };
+   PSIO_REFLECT(NodeRef, name, children)
+   // Not the same layout, at depth: the count is of another size.
+   struct NodeWide
+   {
+      std::string           name;
+      std::vector<NodeWide> children;
+      std::uint64_t         extra = 0;
+   };
+   PSIO_REFLECT(NodeWide, name, children, extra)
+   // Node with a trailing optional: it evolves from Node, and does not pack
+   // as it.
+   struct Node2
+   {
+      std::string                  name;
+      std::vector<Node2>           children;
+      std::optional<std::uint32_t> weight;
+   };
+   PSIO_REFLECT(Node2, name, children, weight)
+
+   struct Console
+   {
+      std::string text;
+      friend bool operator==(const Console&, const Console&) = default;
+   };
+   PSIO_REFLECT(Console, text)
+   struct Inner;
+   struct Action
+   {
+      std::uint64_t         sender = 0;
+      std::vector<char>     raw;
+      std::vector<Inner>    inner;
+      std::optional<std::string> error;
+      friend bool           operator==(const Action&, const Action&) = default;
+   };
+   struct Inner
+   {
+      std::variant<Console, Action> inner;
+      friend bool operator==(const Inner&, const Inner&) = default;
+   };
+   PSIO_REFLECT(Action, sender, raw, inner, error)
+   PSIO_REFLECT(Inner, inner)
+
+   struct InnerRef;
+   struct ActionRef
+   {
+      std::uint64_t                   sender = 0;
+      std::span<const char>           raw;
+      std::vector<InnerRef>           inner;
+      std::optional<std::string_view> error;
+   };
+   struct ConsoleRef
+   {
+      std::string_view text;
+   };
+   PSIO_REFLECT(ConsoleRef, text)
+   struct InnerRef
+   {
+      std::variant<ConsoleRef, ActionRef> inner;
+   };
+   PSIO_REFLECT(ActionRef, sender, raw, inner, error)
+   PSIO_REFLECT(InnerRef, inner)
+
+   // A row that holds the recursive record, and the same by reference.
+   struct Success
+   {
+      std::uint64_t id = 0;
+      Action        trace;
+   };
+   PSIO_REFLECT(Success, id, trace)
+   struct SuccessRef
+   {
+      std::uint64_t id = 0;
+      ActionRef     trace;
+   };
+   PSIO_REFLECT(SuccessRef, id, trace)
+   struct SuccessView
+   {
+      std::uint64_t            id = 0;
+      psio::pssz_view<Action>  trace;
+   };
+   PSIO_REFLECT(SuccessView, id, trace)
+
+   struct Tracer
+   {
+      void record(Action trace, std::uint32_t n);
+      PSIO_REFLECT(Tracer, method(record, trace, n))
+   };
+
+   static_assert(psio::packs_as<Node, Node>);
+   static_assert(psio::packs_as<NodeRef, Node>);
+   static_assert(psio::packs_as<Node, NodeRef>);
+   static_assert(psio::packs_as<std::vector<NodeRef>, std::vector<Node>>);
+   static_assert(!psio::packs_as<NodeWide, Node>);
+   static_assert(!psio::packs_as<Node, NodeWide>);
+   static_assert(!psio::packs_as<Node2, Node>);
+   static_assert(psio::pssz_evolves_from<Node, Node2>);
+   static_assert(!psio::pssz_evolves_from<Node2, Node>);
+   static_assert(psio::pssz_evolves_from<Node, Node>);
+
+   static_assert(psio::packs_as<ActionRef, Action>);
+   static_assert(psio::packs_as<Action, ActionRef>);
+   static_assert(psio::packs_as<InnerRef, Inner>);
+   static_assert(psio::packs_as<SuccessRef, Success>);
+   static_assert(psio::packs_as<SuccessView, Success>);
+   static_assert(!psio::packs_as<Action, Node>);
+   static_assert(!psio::packs_as<InnerRef, Action>);
+   static_assert(psio::pssz_source_of<ActionRef, Action>);
+}  // namespace
+
+TEST_CASE("packs_as: recursive records", "[pssz][packs_as][recursive]")
+{
+   const NodeRef ref{"a", {NodeRef{"b", {}}, NodeRef{"c", {NodeRef{"d", {}}}}}};
+   const Node    node{"a", {Node{"b", {}}, Node{"c", {Node{"d", {}}}}}};
+   same_bytes<Node>(ref, node);
+   REQUIRE(put<Node>(ref) == psio::to_pssz(node));
+
+   const Action action{
+      1, {'x', 'y'},
+      {Inner{Console{"hello"}}, Inner{Action{2, {}, {Inner{Console{"deep"}}}, "failed"}}},
+      std::nullopt};
+   const std::string_view hello = "hello", deep = "deep", failed = "failed";
+   const std::vector<char> raw{'x', 'y'};
+   ActionRef               inner_action{2, {}, {}, failed};
+   inner_action.inner.push_back(InnerRef{ConsoleRef{deep}});
+   ActionRef action_ref{1, raw, {}, std::nullopt};
+   action_ref.inner.push_back(InnerRef{ConsoleRef{hello}});
+   action_ref.inner.push_back(InnerRef{inner_action});
+   same_bytes<Action>(action_ref, action);
+   REQUIRE(psio::from_pssz<Action>(psio::to_pssz(action_ref)) == action);
+
+   const auto trace_bytes = psio::to_pssz(action);
+   const auto want        = psio::to_pssz(Success{7, action});
+   REQUIRE(put<Success>(SuccessRef{7, action_ref}) == want);
+   REQUIRE(put<Success>(SuccessView{7, psio::pssz_view<Action>{trace_bytes}}) == want);
+   // As a method argument: written as it stands.
+   REQUIRE((psio::method_args_to_pssz<Tracer, 0>(action_ref, 5) ==
+            psio::method_args_to_pssz<Tracer, 0>(action, 5)));
+}

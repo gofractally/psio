@@ -222,7 +222,13 @@ namespace psio {
       template <std::size_t W, bool Auto, typename T, typename A>
       codec_status assoc_validate(std::span<const char> src, std::size_t pos, std::size_t end,
                                   std::size_t depth, validate_flags* flags) noexcept;
-      template <typename Old, typename New>
+      // The pairs of reflected types a layout comparison is in the middle
+      // of (layout_evolves below): what lets it compare recursive types.
+      template <typename... Pairs>
+      struct evolve_seen
+      {
+      };
+      template <typename Old, typename New, typename Seen>
       consteval bool assoc_evolves() noexcept;
       template <std::size_t W, bool Auto, typename T, typename A>
       codec_status exact_assoc_distinct(std::span<const char> src, std::size_t pos,
@@ -4089,7 +4095,33 @@ namespace psio {
    //   static_assert(psio::pssz_evolves_from<AccountV1, AccountV2>);
    namespace detail::pssz_impl
    {
+      // `Seen`: the pairs of reflected types whose comparison is under way
+      // on the path to this one. A type may contain itself (a record that
+      // holds a list of itself, directly or through a variant of records
+      // that hold it); the comparison of such a pair comes back to the pair,
+      // and the answer there is "as far as the rest goes": the layouts
+      // agree unless a member compared elsewhere on the way says otherwise.
+      // (Asking the function for its own value while it is being evaluated
+      // is not a constant expression, hence the list rather than plain
+      // recursion; each revisit is a distinct specialization.)
       template <typename Old, typename New>
+      struct evolve_pair
+      {
+      };
+      template <typename Seen, typename Old, typename New>
+      inline constexpr bool evolve_seen_v = false;
+      template <typename... Ps, typename Old, typename New>
+      inline constexpr bool evolve_seen_v<evolve_seen<Ps...>, Old, New> =
+         (std::is_same_v<Ps, evolve_pair<Old, New>> || ...);
+      template <typename Seen, typename Old, typename New>
+      struct evolve_push;
+      template <typename... Ps, typename Old, typename New>
+      struct evolve_push<evolve_seen<Ps...>, Old, New>
+      {
+         using type = evolve_seen<Ps..., evolve_pair<Old, New>>;
+      };
+
+      template <typename Old, typename New, typename Seen = evolve_seen<>>
       consteval bool layout_evolves() noexcept;
 
       template <typename T, typename A>
@@ -4307,7 +4339,7 @@ namespace psio {
          return true;
       }
 
-      template <Record Old, Record New>
+      template <Record Old, Record New, typename Seen>
       consteval bool record_evolves() noexcept
       {
          using RO = record_traits<Old>;
@@ -4332,7 +4364,7 @@ namespace psio {
                             ? std::is_same_v<typename RO::template member_type<Is>,
                                              typename RN::template member_type<Is>>
                             : (layout_evolves<typename RO::template member_type<Is>,
-                                              typename RN::template member_type<Is>>() &&
+                                              typename RN::template member_type<Is>, Seen>() &&
                                member_annotations_evolve<Old, New, Is>()))) &&
                        ...);
             }(std::make_index_sequence<NO>{});
@@ -4343,11 +4375,27 @@ namespace psio {
          }
       }
 
-      template <typename Old, typename New>
+      // What the comparisons below a reflected type are made under: the
+      // pair itself joins the list.
+      template <typename Old, typename New, typename Seen>
+      struct evolve_below
+      {
+         using type = Seen;
+      };
+      template <typename Old, typename New, typename Seen>
+         requires(::psio::Reflected<Old> && ::psio::Reflected<New>)
+      struct evolve_below<Old, New, Seen> : evolve_push<Seen, Old, New>
+      {
+      };
+
+      template <typename Old, typename New, typename Seen>
       consteval bool layout_evolves() noexcept
       {
+         using Below = typename evolve_below<Old, New, Seen>::type;
          if constexpr (std::is_same_v<Old, New>)
             return true;
+         else if constexpr (evolve_seen_v<Seen, Old, New>)
+            return true;   // a recursive type, back at itself
          else if constexpr (::psio::is_transparent_v<Old> || ::psio::is_transparent_v<New>)
          {
             // A transparent type keeps its identity: it evolves only from a
@@ -4357,7 +4405,7 @@ namespace psio {
                // the type: member_annotations_evolve's rules).
                return ::psio::reflect<Old>::name == ::psio::reflect<New>::name &&
                       layout_evolves<::psio::transparent_inner_t<Old>,
-                                     ::psio::transparent_inner_t<New>>() &&
+                                     ::psio::transparent_inner_t<New>, Below>() &&
                       annotation_widths_agree<::psio::transparent_inner_t<Old>,
                                               ann::transparent_ann<Old, no_ann>,
                                               ::psio::transparent_inner_t<New>,
@@ -4396,7 +4444,7 @@ namespace psio {
             else
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return (layout_evolves<std::variant_alternative_t<Is, Old>,
-                                         std::variant_alternative_t<Is, New>>() &&
+                                         std::variant_alternative_t<Is, New>, Below>() &&
                           ...);
                }(std::make_index_sequence<std::variant_size_v<Old>>{});
          }
@@ -4405,27 +4453,27 @@ namespace psio {
             return false;
          else if constexpr (is_psio_box_v<Old> && is_psio_box_v<New>)
             return layout_evolves<typename is_psio_box<Old>::elem,
-                                  typename is_psio_box<New>::elem>();
+                                  typename is_psio_box<New>::elem, Below>();
          else if constexpr (is_nested_v<Old> && is_nested_v<New>)
             return layout_evolves<typename is_nested<Old>::inner,
-                                  typename is_nested<New>::inner>();
+                                  typename is_nested<New>::inner, Below>();
          else if constexpr (is_assoc_v<Old> || is_assoc_v<New>)
-            return assoc_evolves<Old, New>();
+            return assoc_evolves<Old, New, Below>();
          else if constexpr (is_std_optional_v<Old> && is_std_optional_v<New>)
             return optional_uses_selector_v<typename Old::value_type> ==
                       optional_uses_selector_v<typename New::value_type> &&
-                   layout_evolves<typename Old::value_type, typename New::value_type>();
+                   layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          else if constexpr (is_std_vector_v<Old> && is_std_vector_v<New>)
-            return layout_evolves<typename Old::value_type, typename New::value_type>();
+            return layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          else if constexpr (is_std_array_v<Old> && is_std_array_v<New>)
          {
             if constexpr (std::tuple_size_v<Old> != std::tuple_size_v<New>)
                return false;
             else
-               return layout_evolves<typename Old::value_type, typename New::value_type>();
+               return layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          }
          else if constexpr (Record<Old> && Record<New>)
-            return record_evolves<Old, New>();
+            return record_evolves<Old, New, Below>();
          else
             return false;
       }

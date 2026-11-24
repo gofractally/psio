@@ -798,6 +798,11 @@ Everything else is false: another member count, order or integer size, a
 tuple against a record, other bounds, a type with a binary adapter against
 anything but itself. The relation is symmetric.
 
+Recursive types are compared like any other: a record that holds a list of
+itself, or a list of variants one of whose alternatives is the record (a
+trace of actions that hold traces), packs as the record of references with
+the same shape. `psio::pssz_evolves_from` takes them too.
+
 ```cpp
 struct TxSuccessView { Checksum256 id; BlockNum blockNum; psio::pssz_view<const TransactionTrace> trace; };
 PSIO_REFLECT(TxSuccessView, id, blockNum, trace)
