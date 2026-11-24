@@ -6,6 +6,7 @@
 //! * memcmp-sortable keys: `Key`
 //! * Cap'n Proto: `CapnpPack`, `CapnpUnpack`, `CapnpView`
 //! * FlatBuffers: `FbPack`, `FbUnpack`, `FbView`
+//! * Protocol Buffers: `Protobuf`
 //! * WIT Canonical ABI: `WitPack`, `WitUnpack`, `WitView`
 //! * dynamic views: `ToDynamicSchema`
 //! * methods and interfaces: the attribute `#[psio::interface]` on a trait
@@ -36,6 +37,8 @@ mod capnp_macro;
 mod dynamic_schema_macro;
 #[cfg(feature = "flatbuf")]
 mod fb_macro;
+#[cfg(feature = "protobuf")]
+mod pb_macro;
 #[cfg(feature = "experimental-frac")]
 mod frac_macro;
 #[cfg(feature = "experimental-frac")]
@@ -166,6 +169,16 @@ pub fn derive_fb_unpack(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(FbView, attributes(psio, serde))]
 pub fn derive_fb_view(input: TokenStream) -> TokenStream {
     fb_macro::fb_view_macro_impl(input)
+}
+
+// ── Protocol Buffers derive macro ───────────────────────────────────────
+
+/// A struct is a message, a field-less `#[repr(int)]` enum a protobuf enum,
+/// an enum whose variants hold one value each a oneof (psio `protobuf`).
+#[cfg(feature = "protobuf")]
+#[proc_macro_derive(Protobuf, attributes(psio, serde))]
+pub fn derive_protobuf(input: TokenStream) -> TokenStream {
+    pb_macro::protobuf_macro_impl(input)
 }
 
 // ── WIT Canonical ABI derive macros ─────────────────────────────────────

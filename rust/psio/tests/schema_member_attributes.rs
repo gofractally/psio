@@ -2,7 +2,8 @@
 //! Proto, FlatBuffers): `field`, `default`, `deprecated`. The schema-driven
 //! PSSZ codec accepts them on a record member and does not read them; the
 //! schema derive writes them from `#[psio(field = N)]`,
-//! `#[psio(default = ..)]` and `#[psio(deprecated)]`.
+//! `#[psio(default = ..)]` and `#[psio(deprecated)]`; and `protobuf`
+//! (`#[psio(pb_sint)]` / `#[psio(pb_fixed)]`), which protobuf alone reads.
 
 #![allow(dead_code)]
 
@@ -32,7 +33,12 @@ fn variant(members: Vec<Member>, attributes: Vec<Attribute>) -> AnyType {
     AnyType::new(AnyValue::Variant(Variant { members, attributes }))
 }
 fn numbered() -> Vec<Attribute> {
-    vec![attribute("field", "7"), attribute("deprecated", ""), attribute("default", "-1")]
+    vec![
+        attribute("field", "7"),
+        attribute("deprecated", ""),
+        attribute("default", "-1"),
+        attribute("protobuf", "sint"),
+    ]
 }
 fn row(attributes: [Vec<Attribute>; 2]) -> AnyType {
     let [id, name] = attributes;
@@ -87,7 +93,7 @@ fn a_record_member_with_them_is_the_same_type() {
 fn they_belong_to_record_members_only() {
     let schema = Schema::default();
     let unit = Value::Record(vec![]);
-    for name in ["field", "default", "deprecated"] {
+    for name in ["field", "default", "deprecated", "protobuf"] {
         let stated = vec![attribute(name, "1")];
         let on_record = object(vec![], stated.clone());
         let on_variant = variant(vec![member("a", object(vec![], vec![]), vec![])], stated.clone());
@@ -156,6 +162,11 @@ struct Stated {
     idle: Status,
     #[psio(default = 0.0)]
     nothing: f64,
+    // How protobuf writes the member's integers: before `default`, as C++.
+    #[psio(pb_sint, default = -2)]
+    zig: i32,
+    #[psio(field = 9, pb_fixed)]
+    wide: Vec<u64>,
     plain: String,
 }
 
@@ -191,6 +202,8 @@ fn the_derive_writes_them() {
         ("off", vec![]),
         ("idle", vec![]),
         ("nothing", vec![]),
+        ("zig", vec![("protobuf", "sint"), ("default", "-2")]),
+        ("wide", vec![("field", "9"), ("protobuf", "fixed")]),
         ("plain", vec![]),
     ];
     let expected: Vec<(String, Vec<(String, String)>)> = expected

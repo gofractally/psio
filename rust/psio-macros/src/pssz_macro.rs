@@ -1453,6 +1453,12 @@ fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms,
             if m.attrs.deprecated {
                 out.push(schema_attribute(k, "deprecated", ""));
             }
+            // (C++ writes `protobuf` before `default`.)
+            if m.attrs.pb_fixed {
+                out.push(schema_attribute(k, "protobuf", "fixed"));
+            } else if m.attrs.pb_sint {
+                out.push(schema_attribute(k, "protobuf", "sint"));
+            }
             let default = m.attrs.default.as_ref().map(|value| {
                 let ty = &m.field.ty;
                 quote! {

@@ -13,6 +13,7 @@ default = []
 # The derives of the formats psio compiles by feature.
 capnp = []
 flatbuf = []
+protobuf = []
 wit = []
 dynamic-view = []
 # The derives of psio::experimental::frac, a format kept for benchmarks.

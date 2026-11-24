@@ -31,6 +31,7 @@
 //! | `ssz`, `beacon` | [`ssz`], `ssz_struct!`, [`struct@SszView`]; [`beacon_types`] |
 //! | `pjson` | [`pjson`], `pjson_struct!` |
 //! | `capnp`, `flatbuf`, `wit` | the module and the `Capnp*` / `Fb*` / `Wit*` derives |
+//! | `protobuf` | [`protobuf`] and the `Protobuf` derive: Protocol Buffers (proto3) |
 //! | `dynamic-view` | [`dynamic_view`], [`dynamic_schema`], schema import and export (implies the three above) |
 //! | `all-formats` | every format above |
 //! | `chrono` | `TryFrom` between [`time`] values and `chrono` |
@@ -186,6 +187,8 @@ pub mod serde_bridge;
 pub use psio_macros::{CapnpPack, CapnpUnpack, CapnpView};
 #[cfg(feature = "flatbuf")]
 pub use psio_macros::{FbPack, FbUnpack, FbView};
+#[cfg(feature = "protobuf")]
+pub use psio_macros::Protobuf;
 #[cfg(feature = "dynamic-view")]
 pub use psio_macros::ToDynamicSchema;
 #[cfg(feature = "wit")]
@@ -207,6 +210,11 @@ pub use capnp::{capnp_size, from_capnp, from_capnp_trusted, to_capnp, to_capnp_i
 pub use flatbuf::{
     flatbuf_has_identifier, flatbuf_identifier, flatbuf_size, flatbuf_size_prefixed, from_flatbuf,
     from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, to_flatbuf_with, validate_flatbuf, validate_flatbuf_with,
+};
+#[cfg(feature = "protobuf")]
+pub use protobuf::{
+    from_protobuf, from_protobuf_with, protobuf_size, to_protobuf, to_protobuf_into, validate_protobuf,
+    validate_protobuf_with,
 };
 #[cfg(feature = "wit")]
 pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, validate_wit, wit_size};
@@ -261,6 +269,8 @@ pub mod dynamic_schema;
 pub mod capnp;
 #[cfg(feature = "flatbuf")]
 pub mod flatbuf;
+#[cfg(feature = "protobuf")]
+pub mod protobuf;
 #[cfg(feature = "pjson")]
 pub mod pjson;
 #[cfg(feature = "pjson")]

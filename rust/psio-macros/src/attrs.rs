@@ -16,6 +16,7 @@
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
 //! | `psio` | `field = N` | field | the member's field number (C++ `field<N>`): its vtable slot order in FlatBuffers; the declaration position, from 1, by default; the member attribute `field` of its schema |
 //! | `psio` | `deprecated` | field | the member keeps its place on the wire and is neither written nor read (FlatBuffers `deprecated`); a reader fills it with its default; the member attribute `deprecated` of its schema |
+//! | `psio` | `pb_sint`, `pb_fixed` | field | how protobuf writes the member's integers (or those of its `Option` / `Vec` / `BTreeSet`): zigzag (`sint32` / `sint64`), or at a fixed width (`fixed32` / `sfixed32` / `fixed64` / `sfixed64`); the member attribute `protobuf` = `sint` / `fixed` of its schema (C++ `pb_sint` / `pb_fixed`) |
 //! | `psio` | `default = value` | field | the value of a scalar member that is not on the wire (C++: the member's initialiser): a literal, or an expression in a string (`default = "Color::Green"`, `default = "-1"`); when it is not zero, the member attribute `default` of its schema |
 //! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | length bounds of the member and of the positions below it (`psio::pssz::bounds`) |
 //! | `psio` | `sorted`, `unique` (`sorted_unique`), `unique_keys` | field | the elements of a list or an array are in non-descending / strictly ascending key order, or have pairwise different keys; also inside `element(...)` and friends |
@@ -92,6 +93,10 @@ const KEYS: &[Key] = &[
           because: "retires the member for every format", usage: "deprecated" },
     Key { name: "default", namespace: "psio", sites: &[Site::Field],
           because: "is the member's value when it is not on the wire, for every format", usage: "default = value" },
+    Key { name: "pb_sint", namespace: "psio", sites: &[Site::Field],
+          because: "says how protobuf writes the member's integers, in the codec and in the schema", usage: "pb_sint" },
+    Key { name: "pb_fixed", namespace: "psio", sites: &[Site::Field],
+          because: "says how protobuf writes the member's integers, in the codec and in the schema", usage: "pb_fixed" },
     Key { name: "max", namespace: "psio", sites: &[Site::Field],
           because: "bounds the member for every format", usage: "max = N" },
     Key { name: "element", namespace: "psio", sites: &[Site::Field],
@@ -185,6 +190,13 @@ pub(crate) struct Attrs {
     pub(crate) deprecated: bool,
     /// `#[psio(default = value)]`: the expression.
     pub(crate) default: Option<proc_macro2::TokenStream>,
+    /// `#[psio(pb_sint)]`: protobuf writes the member's integers zigzag
+    /// (`sint32` / `sint64`; C++ `pb_sint`).
+    pub(crate) pb_sint: bool,
+    /// `#[psio(pb_fixed)]`: protobuf writes the member's integers at a
+    /// fixed width (`fixed32` / `sfixed32` / `fixed64` / `sfixed64`; C++
+    /// `pb_fixed`).
+    pub(crate) pb_fixed: bool,
     /// `#[psio(skip)]` or `#[serde(skip)]`.
     pub(crate) skip: bool,
     /// `#[serde(default = "path")]` on a skipped field: what a reader fills
@@ -623,6 +635,12 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
             }
         }
         "deprecated" => set_flag(&mut out.deprecated, meta)?,
+        "pb_sint" | "pb_fixed" => {
+            set_flag(if key.name == "pb_sint" { &mut out.pb_sint } else { &mut out.pb_fixed }, meta)?;
+            if out.pb_sint && out.pb_fixed {
+                return Err(syn::Error::new_spanned(meta, "a member is pb_sint or pb_fixed, not both"));
+            }
+        }
         "default" => {
             let nv = name_value(meta, key.usage)?;
             let value = match &nv.lit {

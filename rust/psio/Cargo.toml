@@ -66,13 +66,15 @@ pjson = ["dep:xxhash-rust"]
 capnp = ["psio-macros/capnp"]
 # psio::flatbuf and the Fb* derives.
 flatbuf = ["psio-macros/flatbuf"]
+# psio::protobuf and the Protobuf derive.
+protobuf = ["psio-macros/protobuf"]
 # psio::wit and the Wit* derives: the WIT Canonical ABI.
 wit = ["psio-macros/wit"]
 # psio::dynamic_view / dynamic_schema, schema import and export over the
 # Cap'n Proto, FlatBuffers and WIT formats, and the ToDynamicSchema derive.
 dynamic-view = ["capnp", "flatbuf", "wit", "psio-macros/dynamic-view"]
 # Every format.
-all-formats = ["ssz", "beacon", "pjson", "capnp", "flatbuf", "wit", "dynamic-view"]
+all-formats = ["ssz", "beacon", "pjson", "capnp", "flatbuf", "protobuf", "wit", "dynamic-view"]
 # `TryFrom` between psio::time values and chrono::DateTime / chrono::TimeDelta.
 chrono = ["dep:chrono"]
 # psio::graphql_scalars: psio::time values, RawString, the bounded strings and
