@@ -22,6 +22,13 @@ psio_add_test(psio_scaffold_test scaffold_test.cpp)
 
 # Phase 1: reflection core — psio::reflect<T>.
 psio_add_test(psio_reflect_tests reflect_tests.cpp)
+# A record of 255 members (the maximum) through the codecs, the views and
+# the Schema IR, under the expression nesting limit clang had before 21
+# (256): a fold over the members must fit in it.
+psio_add_test(psio_wide_record_tests wide_record_tests.cpp)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+   target_compile_options(psio_wide_record_tests PRIVATE -fbracket-depth=256)
+endif()
 # psio::fixed_string: a structural compile-time string (template argument,
 # constexpr concatenation), and reflect<T>::fixed_name.
 psio_add_test(psio_fixed_string_tests fixed_string_tests.cpp)

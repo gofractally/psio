@@ -574,9 +574,23 @@ namespace psio {
       constexpr bool reflected_names_distinct(const std::array<std::string_view, N>& fields,
                                               const std::array<std::string_view, M>& methods)
       {
+         // Each name is hashed once and the pairs are compared by hash,
+         // the names themselves only where the hashes agree: a record may
+         // have 255 members, and 32 385 string comparisons evaluated at
+         // compile time exceed clang's constant-evaluation step limit where
+         // the library compares characters in a loop (libstdc++).
+         std::array<std::uint64_t, N + M> hashes{};
+         for (std::size_t i = 0; i < N + M; ++i)
+         {
+            std::uint64_t h = 14695981039346656037ull;
+            for (const char c : i < N ? fields[i] : methods[i - N])
+               h = (h ^ static_cast<unsigned char>(c)) * 1099511628211ull;
+            hashes[i] = h;
+         }
          for (std::size_t i = 0; i < N + M; ++i)
             for (std::size_t j = i + 1; j < N + M; ++j)
-               if ((i < N ? fields[i] : methods[i - N]) == (j < N ? fields[j] : methods[j - N]))
+               if (hashes[i] == hashes[j] &&
+                   (i < N ? fields[i] : methods[i - N]) == (j < N ? fields[j] : methods[j - N]))
                   return false;
          return true;
       }
