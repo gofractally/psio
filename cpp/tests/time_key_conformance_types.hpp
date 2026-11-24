@@ -275,7 +275,8 @@ namespace tk_conf
    void for_each_type(F&& f)
    {
       auto each = [&]<typename... Ts>(std::type_identity<std::tuple<Ts...>>) {
-         (f(std::type_identity<Ts>{}), ...);
+         const int in_order[] = {0, (static_cast<void>(f(std::type_identity<Ts>{})), 0)...};
+         static_cast<void>(in_order);
       };
       each(std::type_identity<
            std::tuple<sys_seconds, sys_millis, sys_micros, sys_nanos, sys_sec32, seconds,

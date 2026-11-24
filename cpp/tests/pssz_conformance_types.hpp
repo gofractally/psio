@@ -1127,7 +1127,11 @@ namespace pssz_conf
    template <typename F, typename... Ts>
    void each_type(types<Ts...>, F&& f)
    {
-      (f(std::type_identity<Ts>{}), ...);
+      // (a braced list, not a comma fold: the list has several hundred
+      // types, and a fold nests one expression per element — past clang's
+      // default nesting limit of 256 before clang 21)
+      const int in_order[] = {0, (static_cast<void>(f(std::type_identity<Ts>{})), 0)...};
+      static_cast<void>(in_order);
    }
    // Calls f(std::type_identity<T>{}) for every fixture type, in fixture order.
    template <typename F>

@@ -659,7 +659,10 @@ namespace json_conf
    template <typename Fn>
    void for_each_type(Fn&& fn)
    {
-      auto each = [&]<typename... Ts>(std::type_identity<Ts>... ids) { (fn(ids), ...); };
+      auto each = [&]<typename... Ts>(std::type_identity<Ts>... ids) {
+         const int in_order[] = {0, (static_cast<void>(fn(ids)), 0)...};
+         static_cast<void>(in_order);
+      };
       each(std::type_identity<bool>{}, std::type_identity<std::uint8_t>{},
            std::type_identity<std::int8_t>{}, std::type_identity<std::uint16_t>{},
            std::type_identity<std::int16_t>{}, std::type_identity<std::uint32_t>{},
