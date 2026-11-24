@@ -9,6 +9,10 @@
 //
 //   primitives:    bool, int8..int64, uint8..uint64, float, double,
 //                  char, int128, uint128, std::string
+//                  (an integer type is named by its width and signedness:
+//                  long, long long, std::size_t, std::ptrdiff_t are int64 /
+//                  uint64 on a 64-bit platform, whichever of them
+//                  std::int64_t happens to be there)
 //   sequences:     std::vector<T>      → "T[]"
 //                  std::array<T, N>    → "T[N]"
 //                  T[N]                → same
@@ -33,6 +37,7 @@
 
 #include <array>
 #include <chrono>
+#include <concepts>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -43,6 +48,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -127,6 +133,32 @@ namespace psio {
    constexpr const char* get_type_name(const __int128*) { return "int128"; }
    constexpr const char* get_type_name(const unsigned __int128*) { return "uint128"; }
    // clang-format on
+
+   // The standard integer types that are not one of the fixed-width typedefs
+   // above. Which ones those are depends on the platform: std::int64_t is
+   // `long` on LP64 Linux (so `long long` is the type left over) and
+   // `long long` on macOS (so `long`, and with it std::size_t,
+   // std::ptrdiff_t and std::intptr_t, is). They are named by width and
+   // signedness, as the codecs and the Schema IR treat them, so that a type
+   // has the same name — and a variant alternative the same label — on
+   // every platform.
+   namespace detail {
+      template <typename T>
+      concept leftover_standard_integer =
+         (std::same_as<T, long> || std::same_as<T, unsigned long> ||
+          std::same_as<T, long long> || std::same_as<T, unsigned long long>) &&
+         !std::same_as<T, std::int32_t> && !std::same_as<T, std::uint32_t> &&
+         !std::same_as<T, std::int64_t> && !std::same_as<T, std::uint64_t>;
+   }
+   template <detail::leftover_standard_integer T>
+   constexpr const char* get_type_name(const T*)
+   {
+      static_assert(sizeof(T) == 4 || sizeof(T) == 8);
+      if constexpr (sizeof(T) == 8)
+         return std::is_signed_v<T> ? "int64" : "uint64";
+      else
+         return std::is_signed_v<T> ? "int32" : "uint32";
+   }
 
    // ── Reflected types — pull name from psio::reflect<T>::name ────────
    //

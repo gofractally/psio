@@ -20,6 +20,11 @@ endfunction()
 # Phase 0: placeholder test proves the runner wiring works.
 psio_add_test(psio_scaffold_test scaffold_test.cpp)
 
+# long / long long / std::size_t / std::ptrdiff_t / std::intptr_t have the
+# same names, variant labels, schemas and bytes whichever of them the
+# fixed-width typedefs are on the platform (LP64 Linux and macOS differ).
+psio_add_test(psio_integer_alias_tests integer_alias_tests.cpp)
+
 # Phase 1: reflection core — psio::reflect<T>.
 psio_add_test(psio_reflect_tests reflect_tests.cpp)
 # A record of 255 members (the maximum) through the codecs, the views and
