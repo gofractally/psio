@@ -281,9 +281,41 @@ pub fn encode<F: JsonFormat, T: JsonText>(value: &T) -> String {
 }
 
 /// Appends the text of `value` to `out`. On error `out` is left as it was.
+///
+/// The text is written straight into `out`: capacity the caller reserved is
+/// used before any is allocated (text that fits it never reallocates), and
+/// past it the buffer grows by doubling. No second buffer is made.
 pub fn encode_into<F: JsonFormat, T: JsonText>(value: &T, out: &mut String) -> Result<()> {
-    out.push_str(&try_encode::<F, T>(value)?);
-    Ok(())
+    let start = out.len();
+    let mut bytes = std::mem::take(out).into_bytes();
+    let result = append_text::<F, T>(value, &mut bytes);
+    // The tail is checked, as `try_encode` checks all of its text; an error
+    // has already removed it.
+    assert!(
+        std::str::from_utf8(&bytes[start..]).is_ok(),
+        "the JSON writer emits UTF-8"
+    );
+    // SAFETY: `bytes[..start]` came out of a `String` and `bytes[start..]`
+    // has just been validated; both end on a character boundary, so the
+    // whole is UTF-8.
+    *out = unsafe { String::from_utf8_unchecked(bytes) };
+    result.map(|_| ())
+}
+
+/// Appends the text of `value` to `out`, in place, and returns its length.
+/// On error `out` is left as it was.
+fn append_text<F: JsonFormat, T: JsonText>(value: &T, out: &mut Vec<u8>) -> Result<usize> {
+    let start = out.len();
+    let mut w = Writer::appending(std::mem::take(out), F::IJSON);
+    let result = value.write_json(&mut w);
+    *out = w.into_bytes();
+    match result {
+        Ok(()) => Ok(out.len() - start),
+        Err(e) => {
+            out.truncate(start);
+            Err(e)
+        }
+    }
 }
 
 /// Reads `text` as exactly one `T`. The reader checks as it reads.
@@ -368,9 +400,8 @@ macro_rules! format_impls {
     ($tag:ty) => {
         impl<T: JsonText> Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize> {
-                let text = try_encode::<$tag, T>(self)?;
-                out.extend_from_slice(text.as_bytes());
-                Ok(text.len())
+                // In place: the capacity of `out` is used, no second buffer.
+                append_text::<$tag, T>(self, out)
             }
         }
         impl<T: JsonText> Decode<$tag> for T {
@@ -536,6 +567,8 @@ pub fn compact_json(text: &[u8], ijson: bool) -> Result<String> {
 /// Output sink of [`JsonText::write_json`].
 pub struct Writer {
     out: Vec<u8>,
+    /// Where the text starts in `out` (a sink that appends).
+    start: usize,
     ijson: bool,
     form: IntForm,
 }
@@ -549,9 +582,16 @@ fn is_noncharacter(cp: u32) -> bool {
 impl Writer {
     /// An empty sink for `IJson` (`ijson`) or `Json` text.
     pub fn new(ijson: bool) -> Self {
-        Self { out: Vec::new(), ijson, form: IntForm::Natural }
+        Self { out: Vec::new(), start: 0, ijson, form: IntForm::Natural }
     }
-    /// The text written so far (UTF-8).
+    /// A sink that appends to `out`, in its buffer: the capacity `out` has
+    /// is used before any is allocated. [`Writer::into_bytes`] returns the
+    /// buffer, the text after what it held.
+    pub fn appending(out: Vec<u8>, ijson: bool) -> Self {
+        Self { start: out.len(), out, ijson, form: IntForm::Natural }
+    }
+    /// The buffer: the text written so far (UTF-8), after what an appending
+    /// sink held.
     pub fn into_bytes(self) -> Vec<u8> {
         self.out
     }
@@ -562,7 +602,7 @@ impl Writer {
         if self.ijson { "ijson" } else { "json" }
     }
     pub fn err(&self, what: impl Into<Cow<'static, str>>) -> JsonTextError {
-        JsonTextError { what: what.into(), offset: self.out.len(), format: self.format() }
+        JsonTextError { what: what.into(), offset: self.out.len() - self.start, format: self.format() }
     }
     /// Appends text that is already JSON (punctuation, keywords).
     pub fn raw(&mut self, text: &str) {

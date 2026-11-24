@@ -182,6 +182,10 @@ psio_add_test(psio_pssz_packs_as_tests pssz_packs_as_tests.cpp)
 # identity with the two-step encoding, and the heap it takes (this binary
 # replaces operator new to count).
 psio_add_test(psio_pssz_in_place_tests pssz_in_place_tests.cpp)
+# Where JSON text goes (gofractally/psio#11): a sink's capacity, the exact
+# size of a text, and psio::json_of / ijson_of, a text member written in
+# place (this binary replaces operator new to count).
+psio_add_test(psio_json_sink_tests json_sink_tests.cpp)
 add_test(NAME psio_pssz_packs_as_control_compiles
          COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
 function(psio_packs_as_compile_fail NAME DEFINE MESSAGE)

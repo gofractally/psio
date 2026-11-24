@@ -77,8 +77,8 @@ is a constraint failure that names it, for example
 | `borsh` | `psio/borsh.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `bincode` | `psio/bincode.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `key` | `psio/key.hpp` | `std::array<char, N>` for a key of fixed size, else `std::vector<char>` | appends to `std::vector<char>`; writes to any psio stream | yes | no | no |
-| `json` | `psio/json.hpp` | `std::string` | appends to `std::string` or `std::vector<char>` | yes | no | no |
-| `ijson` | `psio/json.hpp` | `std::string` | appends to `std::string` or `std::vector<char>` | yes | no | no |
+| `json` | `psio/json.hpp` | `std::string` | appends to `std::string` or `std::vector<char>`, into the capacity it has; `psio::json_sizing::exact` as a last argument sizes first ([json.md](json.md#where-the-text-goes-capacity-exact-size-in-place)) | yes; `json_size` measures without making the text | no | no |
+| `ijson` | `psio/json.hpp` | `std::string` | as `json` | yes; `ijson_size` measures without making the text | no | no |
 | `msgpack` | `psio/msgpack.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `avro` | `psio/avro.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
 | `bson` | `psio/bson.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no | no |
@@ -660,6 +660,7 @@ bytes that type writes, without copying what it refers to:
 | `psio::view<X, F>` (any view, given as a value) | `X` |
 | `psio::nested_of(v)`, `psio::nested_as<X>(v)`, `psio::method_args_nested<T, I>(args...)` | `psio::nested<X>`: the value, written in place ([below](#packing-in-place-a-value-as-its-packed-bytes)) |
 | `psio::packed(v)`, `psio::packed_as<X>(v)`, `psio::method_args_packed<T, I>(args...)` | `std::vector<char>` holding the encoding: the value, written in place |
+| `psio::json_of(v)`, `psio::ijson_of(v)` (`psio/json.hpp`) | `std::vector<char>` holding the JSON / I-JSON text of the value, written in place |
 | a reflected record with members of the kinds above | the record with owning members (same layout, same widths, same bounds) |
 
 ```cpp
@@ -859,6 +860,7 @@ auto b = psio::to_pssz(OuterOf{1, psio::nested_of(MiddleOf{2, psio::nested_of(in
 | `psio::packed(value)`, `psio::packed_as<X>(source)` | a `std::vector<char>` whose content is the encoding (`to_pssz(value)`, `to_pssz_as<X>(source)`) | the same |
 | `psio::method_args_packed<T, I>(args...)` | a `std::vector<char>` holding the argument tuple of method `I` of `T`: what `psio::method_args_to_pssz<T, I>(args...)` returns, not yet written | the arguments, taken and converted as `method_args_to_pssz` takes them |
 | `psio::method_args_nested<T, I>(args...)` | a `psio::nested<reflect<T>::method_arg_tuple<I>>` | the same |
+| `psio::json_of(value)`, `psio::ijson_of(value)` (`psio/json.hpp`) | a `std::vector<char>` whose content is the text (`to_json(value)`, `to_ijson(value)`) | anything the JSON writer takes: the value, a view, a tuple of references |
 
 The types are `psio::nested_ref<X, Held>` and `psio::packed_ref<X, Held>`
 (`s.source()`, `s.size()`); write `auto`, or make the member a template
@@ -882,9 +884,13 @@ parameter as above.
   byte list from `packed` starts a value of its own). A length bound on
   the member counts the bytes written.
 - **PSSZ only.** These are sources for the PSSZ encoder; the key and text
-  encoders do not take them. There is no in-place form yet for a member that is the
-  *text* of a value (a JSON body inside a packed reply): that text is
-  still made first.
+  encoders do not take them.
+- **Text.** A member that is the *text* of a value (a JSON body inside a
+  packed reply) is `psio::json_of(value)` / `psio::ijson_of(value)`: the
+  text is measured (`psio::ijson_size`) and written straight into the
+  enclosing buffer. The type is `psio::json_ref<Fmt, Held>`; the length is
+  measured once and kept, so the value must not change between sizing and
+  writing ([json.md](json.md#where-the-text-goes-capacity-exact-size-in-place)).
 
 A call inside a call — an action whose arguments are another action — is
 then one buffer:
@@ -899,6 +905,11 @@ auto exec = ActionOf{me, transact, "execTrx"_m, psio::method_args_packed<Transac
 auto post = ActionOf{me, xrun, "post"_m,
                      psio::method_args_packed<XRun, J>(mode, std::move(exec), timeout, callback)};
 auto bytes = psio::to_pssz(post);              // one allocation: the packed call
+
+// The same for a reply whose body is JSON text: the text is written into the call.
+template <typename Body> struct ReplyOf { std::string_view contentType; Body body; };
+auto send = ActionOf{me, http, "sendReply"_m,
+                     psio::packed(std::forward_as_tuple(socket, ReplyOf{"application/json", psio::ijson_of(trace)}))};
 ```
 
 Measured (`cpp/tests/pssz_in_place_tests.cpp`, a 1 MiB payload under three

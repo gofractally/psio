@@ -137,10 +137,12 @@
 #include <psio/time.hpp>
 #include <psio/transparent.hpp>
 #include <psio/untagged.hpp>
+#include <psio/wire_type.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for, byte_array, ...
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstddef>
@@ -178,6 +180,33 @@ namespace psio {
 
    struct json;
    struct ijson;
+
+   // How `to_json` / `to_ijson` / `encode_json_checked` give the text room.
+   // The text is the same either way.
+   //
+   //   exact      two walks of the value: the text is measured
+   //              (`json_size`), the sink is given room for exactly that
+   //              — one allocation at most, none when the sink has the
+   //              capacity — and the text is written. Peak memory is the
+   //              text. Costs up to twice the time for text made of
+   //              numbers and short strings; less time than `growth` for
+   //              large strings and hex, which are measured without being
+   //              read.
+   //   growth     one walk: the capacity the sink has is used first (text
+   //              that fits what the caller reserved never reallocates),
+   //              then doubled when it runs out. A reallocation copies the
+   //              text so far while both buffers are live: up to three
+   //              times the text at the peak, up to twice held at the end.
+   //   automatic  `exact` where memory is fixed and an allocation is not
+   //              returned (WebAssembly), `growth` elsewhere. Define
+   //              PSIO_JSON_SIZING (to `exact` or `growth`, the same in
+   //              every translation unit) to choose for a whole program.
+   enum class json_sizing : std::uint8_t
+   {
+      automatic,
+      exact,
+      growth,
+   };
 
    namespace detail::json_impl {
 
@@ -510,69 +539,145 @@ namespace psio {
          }();
       };
 
+      // Sets a sink's size; growing (`!shrink`), the new bytes need no value.
+      inline void set_sink_size(std::string& s, std::size_t size, bool shrink)
+      {
+#if defined(__cpp_lib_string_resize_and_overwrite)
+         if (!shrink)
+            s.resize_and_overwrite(size, [&](char*, std::size_t) { return size; });
+         else
+            s.resize(size);
+#else
+         (void)shrink;
+         s.resize(size);
+#endif
+      }
+      inline void set_sink_size(std::vector<char>& v, std::size_t size, bool)
+      {
+         v.resize(size);
+      }
+
       // ── Encoding ──────────────────────────────────────────────────────────
       //
-      // The writer owns the tail of its sink (a std::string or a
-      // std::vector<char>) as a raw buffer: text is written through a
-      // pointer after one capacity check per value (`reserve`), and the
-      // sink's size is set once at the end (`finish`). While a writer is
-      // live, the sink's size is the buffer's extent, not the text's
-      // length; `n` is the length.
-
+      // The writer owns a region of memory as a raw buffer: text is written
+      // through a pointer after one capacity check per value (`reserve`).
+      // Three kinds of destination:
+      //
+      //   a sink     a std::string or a std::vector<char>, appended to. The
+      //              writer takes the capacity the sink already has before
+      //              it allocates (text that fits what the caller reserved
+      //              never reallocates), then grows by doubling. The sink's
+      //              size is set once at the end (`finish`); while a writer
+      //              is live the sink's size is the buffer's extent.
+      //   a span     exactly `size` bytes the caller sized with a counting
+      //              pass (`ijson_size`): nothing is written outside it. A
+      //              worst-case reservation that does not fit the bytes left
+      //              goes to a scratch buffer and is copied back.
+      //   nothing    the counting pass: the text is measured, not kept.
+// (the steps of a small text are flattened into its caller: they are a
+// measurable part of writing one)
+#if defined(__GNUC__) || defined(__clang__)
+#define PSIO_JSON_INLINE __attribute__((always_inline)) inline
+#else
+#define PSIO_JSON_INLINE inline
+#endif
       struct writer
       {
          std::string_view format;
          bool             fail_fast = true;
          std::string_view err{};
-         std::size_t      n = 0;  // bytes of the sink that are text
          // The status of a violated invariant, reported unchanged.
          ::psio::codec_error invariant{};
          bool                has_invariant = false;
 
-         // The text is appended to `sink`: a std::string or a
-         // std::vector<char>.
+         // The text is appended to `sink`.
          writer(std::string& sink, std::string_view format, bool fail_fast = true)
-             : format(format),
-               fail_fast(fail_fast),
-               n(sink.size()),
-               sink_(&sink),
-               data_(sink.data()),
-               size_(sink.size()),
-               resize_(&resize_string)
+             : writer(&sink, sink.data(), sink.size(), &extend<std::string>,
+                      // (the capacity every std::string has is nobody's reservation)
+                      sink.capacity() > std::string{}.capacity() ? sink.capacity() : 0, format,
+                      fail_fast)
          {
          }
          writer(std::vector<char>& sink, std::string_view format, bool fail_fast = true)
+             : writer(&sink, sink.data(), sink.size(), &extend<std::vector<char>>,
+                      sink.capacity(), format, fail_fast)
+         {
+         }
+         // The same for a sink the caller has given a first extent: its
+         // bytes from `text` on are room, not text.
+         struct room_from
+         {
+            std::size_t text;
+         };
+         writer(std::string& sink, room_from from, std::string_view format, bool fail_fast = true)
+             : writer(&sink, sink.data(), sink.size(), &extend<std::string>, 0, format, fail_fast)
+         {
+            p_ = base_ + from.text;
+         }
+         // The text is written to [dst, dst + size) and must be exactly
+         // that long (`exact()` after `finish()`).
+         writer(char* dst, std::size_t size, std::string_view format, bool fail_fast = true)
              : format(format),
                fail_fast(fail_fast),
-               n(sink.size()),
-               sink_(&sink),
-               data_(sink.data()),
-               size_(sink.size()),
-               resize_(&resize_vector)
+               p_(dst),
+               base_(dst),
+               end_(dst + size),
+               dst_(dst),
+               cap_(size),
+               fixed_(true)
          {
          }
+         // The text is measured only: `size()` after `finish()`.
+         struct count_only
+         {
+         };
+         writer(count_only, std::string_view format, bool fail_fast = true)
+             : format(format),
+               fail_fast(fail_fast),
+               p_(scratch_),
+               base_(scratch_),
+               end_(scratch_ + sizeof(scratch_)),
+               fixed_(true)
+         {
+         }
+         writer(const writer&)            = delete;
+         writer& operator=(const writer&) = delete;
 
-         // Room for `k` more bytes; returns where they go.
+         // Room for `k` more bytes; returns where they go. `k` may be a
+         // worst case (at most `worst_case` bytes more than is written):
+         // what is not committed is not text.
+         static constexpr std::size_t worst_case = 128;
          char* reserve(std::size_t k)
          {
-            if (size_ - n < k) [[unlikely]]
+            if (room() < k) [[unlikely]]
                grow(k);
-            return data_ + n;
+            return p_;
+         }
+         // Room that is likely to be needed (a list's worth of elements):
+         // one growth for a sink nobody reserved, the capacity of one
+         // somebody did, nothing for an exact destination.
+         void hint(std::size_t k)
+         {
+            if (!fixed_ && room() < k)
+               grow_hint(k);
          }
          // The bytes [reserve(), end) are now text.
-         void commit(const char* end) noexcept
-         {
-            n = static_cast<std::size_t>(end - data_);
-         }
+         void commit(const char* end) noexcept { p_ = const_cast<char*>(end); }
          void put(char c)
          {
             *reserve(1) = c;
-            ++n;
+            ++p_;
          }
          void append(std::string_view text)
          {
-            std::memcpy(reserve(text.size()), text.data(), text.size());
-            n += text.size();
+            if (room() < text.size()) [[unlikely]]
+            {
+               if (fixed_)
+                  return append_fixed(text);
+               grow(text.size());
+            }
+            std::memcpy(p_, text.data(), text.size());
+            p_ += text.size();
          }
          void append(const char* b, const char* e)
          {
@@ -581,21 +686,56 @@ namespace psio {
          template <std::size_t N>
          void literal(const std::array<char, N>& text)
          {
-            std::memcpy(reserve(N), text.data(), N);
-            n += N;
+            if (room() < N) [[unlikely]]
+               return append(std::string_view{text.data(), N});
+            std::memcpy(p_, text.data(), N);
+            p_ += N;
          }
-         // Ends the buffer phase: the sink is exactly the text.
-         void finish()
+         // Whether the text is only measured: a writer of long runs (a
+         // string, hex) then adds its exact length with `count`.
+         bool counting() const noexcept { return fixed_ && !dst_; }
+         // (counting: where the bytes would go does not matter)
+         void count(std::size_t k) noexcept { before_ += k; }
+         // The length of the text so far (for a sink: with what it held).
+         std::size_t size() const noexcept
          {
-            data_ = resize_(sink_, n, false);
-            size_ = n;
+            return before_ + static_cast<std::size_t>(p_ - base_);
          }
+         // Drops the text after its first `n` bytes (`n <= size()`): a
+         // value that turned out to have no text is taken back.
+         void truncate(std::size_t n)
+         {
+            flush();
+            if (base_ == dst_)
+               p_ = base_ + n;
+            else
+            {
+               // (counting, or a span that overflowed)
+               before_ = n;
+               p_      = base_;
+            }
+         }
+         // Ends the buffer phase: a sink is exactly the text.
+         PSIO_JSON_INLINE void finish()
+         {
+            flush(true);
+            if (fixed_)
+               return;
+            const std::size_t n = size();
+            if (n != cap_)
+               set_extent(n, resize::exact);
+            set_main(n);
+         }
+         // An exact destination, after `finish`: it holds the text and
+         // nothing else.
+         bool exact() const noexcept { return !overflow_ && size() == cap_; }
+         bool overflowed() const noexcept { return overflow_; }
 
          void fail(std::string_view what)
          {
             if (fail_fast)
             {
-               const auto at = static_cast<std::uint32_t>(n);
+               const auto at = static_cast<std::uint32_t>(size());
                finish();
                ::psio::codec_abort(::psio::codec_error{what, at, format});
             }
@@ -619,46 +759,295 @@ namespace psio {
          }
 
         private:
-         // The sink, as a raw buffer: [data_, data_ + size_).
-         void*       sink_;
-         char*       data_;
-         std::size_t size_;
-         // Sets the sink's size (growing: the new bytes need no value) and
-         // returns its data.
-         char* (*resize_)(void* sink, std::size_t size, bool growing);
-
-         static char* resize_string(void* sink, std::size_t size, bool growing)
+         // How a sink's size is set.
+         enum class resize : std::uint8_t
          {
-            auto& s = *static_cast<std::string*>(sink);
-#if defined(__cpp_lib_string_resize_and_overwrite)
-            if (growing)
-               s.resize_and_overwrite(size, [&](char*, std::size_t) { return size; });
-            else
-               s.resize(size);
-#else
-            (void)growing;
-            s.resize(size);
-#endif
+            exact,   // to `need`
+            within,  // towards `need` (doubling), within the capacity it has: no allocation
+            grow,    // to at least `need` (doubling): allocates when the capacity is short
+         };
+         // Sets the sink's size (`extent`, before and after) and returns
+         // its data. Bytes added need no value.
+         using extend_fn = char* (*)(void* sink, std::size_t need, std::size_t& extent, resize how);
+         PSIO_JSON_INLINE char* set_extent(std::size_t need, resize how)
+         {
+            // (the calls are direct so that they can be inlined)
+            dst_ = extend_ == &extend<std::string> ? extend<std::string>(sink_, need, cap_, how)
+                                                   : extend<std::vector<char>>(sink_, need, cap_, how);
+            if (cap_ > sink_capacity_)
+               sink_capacity_ = cap_;
+            return dst_;
+         }
+
+         writer(void* sink, char* data, std::size_t size, extend_fn extend, std::size_t capacity,
+                std::string_view format, bool fail_fast)
+             : format(format),
+               fail_fast(fail_fast),
+               p_(data + size),
+               base_(data),
+               end_(data + size),
+               sink_(sink),
+               extend_(extend),
+               dst_(data),
+               cap_(size),
+               honour_(capacity > size),
+               sink_capacity_(capacity)
+         {
+         }
+
+         // The region being written: [base_, end_), text up to p_. It is
+         // the destination ([dst_, dst_ + cap_): the sink's buffer or the
+         // caller's span) or a scratch buffer.
+         // (p_ and end_ apart: loaded as a pair right after p_ is stored,
+         // they are not forwarded from the store on every CPU)
+         char* p_;
+         char* base_;
+         char* end_;
+         // Text bytes that precede base_ (when it is a scratch buffer).
+         std::size_t before_ = 0;
+         // A sink.
+         void*     sink_   = nullptr;
+         extend_fn extend_ = nullptr;
+         // The destination; counting has none.
+         char*       dst_ = nullptr;
+         std::size_t cap_ = 0;
+         // A span or counting: nothing grows.
+         bool fixed_ = false;
+         // A span: more text than it holds was written (and dropped).
+         bool overflow_ = false;
+         // A sink that came with capacity to spare, not yet used up: it is
+         // reallocated only for text that does not fit it. `hint_` is the
+         // size a sink is given when it is reallocated.
+         bool        honour_ = false;
+         std::size_t hint_   = 0;
+         // The sink's capacity, as far as the writer knows (at least).
+         std::size_t sink_capacity_ = 0;
+         // Where a reservation goes that the destination has no room for.
+         std::unique_ptr<char[]> big_;
+         std::size_t             big_size_ = 0;
+         char                    scratch_[worst_case];
+
+         std::size_t room() const noexcept { return static_cast<std::size_t>(end_ - p_); }
+         // The region is the destination, holding `n` bytes of text.
+         void set_main(std::size_t n) noexcept
+         {
+            base_   = dst_;
+            p_      = dst_ + n;
+            end_    = dst_ + cap_;
+            before_ = 0;
+         }
+         // The region is a scratch buffer of at least `k` bytes; the text
+         // so far stays where it is.
+         void set_scratch(std::size_t k)
+         {
+            before_           = size();
+            char*       s     = scratch_;
+            std::size_t avail = sizeof(scratch_);
+            if (k > avail)
+            {
+               if (k > big_size_)
+               {
+                  big_.reset(new char[k]);
+                  big_size_ = k;
+               }
+               s     = big_.get();
+               avail = big_size_;
+            }
+            base_ = p_ = s;
+            end_       = s + avail;
+         }
+
+         template <typename S>
+         static constexpr bool zero_fills = !std::is_same_v<S, std::string>;
+         template <typename S>
+         PSIO_JSON_INLINE static char* extend(void* sink, std::size_t need, std::size_t& extent,
+                                              resize how)
+         {
+            auto& s = *static_cast<S*>(sink);
+            if (how != resize::exact)
+            {
+               // By doubling. Within the capacity too (a
+               // std::vector<char> gives its new bytes a value: a small
+               // text must not pay for a large reservation).
+               std::size_t want = std::max({need, extent * 2, std::size_t{128}});
+               if (how == resize::within)
+               {
+                  const std::size_t cap = s.capacity();
+                  want                  = zero_fills<S> ? std::min(want, cap) : cap;
+               }
+               need = std::max(want, extent);
+            }
+            set_sink_size(s, need, how == resize::exact);
+            extent = need;
             return s.data();
          }
-         static char* resize_vector(void* sink, std::size_t size, bool)
-         {
-            auto& v = *static_cast<std::vector<char>*>(sink);
-            v.resize(size);
-            return v.data();
-         }
+
          void grow(std::size_t k)
          {
-            const std::size_t want = std::max({n + k, size_ * 2, std::size_t{128}});
-            data_                  = resize_(sink_, want, true);
-            size_                  = want;
+            flush();
+            if (room() >= k)
+               return;
+            if (fixed_)
+               return set_scratch(k);
+            const std::size_t n = static_cast<std::size_t>(p_ - base_);
+            if (honour_)
+            {
+               if (n + k <= sink_capacity_)
+               {
+                  set_extent(n + k, resize::within);
+                  return set_main(n);
+               }
+               // The capacity the caller reserved is short of `k`. A
+               // worst case may still fit: it is written to scratch, and
+               // `flush` makes room for what was committed, so the sink
+               // is reallocated only for text that does not fit it.
+               if (k <= worst_case)
+                  return set_scratch(k);
+               honour_ = false;
+            }
+            set_extent(std::max(n + k, hint_), resize::grow);
+            set_main(n);
+         }
+         void grow_hint(std::size_t k)
+         {
+            flush();
+            const std::size_t n = static_cast<std::size_t>(p_ - base_);
+            hint_               = std::max(hint_, n + k);
+            // (a sink that was reserved is given the hinted size only if
+            // its capacity turns out too small for the text)
+            if (!honour_)
+               set_extent(hint_, resize::grow);
+            else if (hint_ <= sink_capacity_)
+               set_extent(hint_, resize::within);
+            set_main(n);
+         }
+         // What was written to scratch goes to its place, and the region
+         // is the destination again (counting: the scratch buffer, whole;
+         // a span that overflowed: empty). `last`: no more text follows.
+         void flush(bool last = false)
+         {
+            if (base_ != dst_)
+               flush_scratch(last);
+         }
+         void flush_scratch(bool last)
+         {
+            const std::size_t len = static_cast<std::size_t>(p_ - base_);
+            const std::size_t at  = before_;
+            const std::size_t pos = at + len;
+            if (!fixed_)
+            {
+               if (pos > cap_)
+               {
+                  if (last)
+                     set_extent(pos, resize::exact);
+                  else if (pos <= sink_capacity_)
+                     set_extent(pos, resize::within);
+                  else
+                  {
+                     // Text the sink's capacity does not hold.
+                     honour_ = false;
+                     set_extent(std::max(pos, hint_), resize::grow);
+                  }
+               }
+               if (len)
+                  std::memcpy(dst_ + at, base_, len);
+               return set_main(pos);
+            }
+            if (!dst_)
+            {
+               before_ = pos;
+               base_ = p_ = scratch_;
+               end_       = scratch_ + sizeof(scratch_);
+               return;
+            }
+            if (!overflow_ && pos <= cap_)
+            {
+               if (len)
+                  std::memcpy(dst_ + at, base_, len);
+               return set_main(pos);
+            }
+            // Text longer than the span: counted, not written.
+            overflow_ = true;
+            base_ = p_ = end_ = scratch_;
+            before_           = pos;
+         }
+         // Text the region has no room for, a span or counting.
+         void append_fixed(std::string_view text)
+         {
+            flush();
+            if (room() >= text.size())
+            {
+               std::memcpy(p_, text.data(), text.size());
+               p_ += text.size();
+               return;
+            }
+            if (dst_)
+            {
+               before_   = size();
+               overflow_ = true;
+               base_ = p_ = end_ = scratch_;
+            }
+            before_ += text.size();
          }
       };
+
+#undef PSIO_JSON_INLINE
+
+      // The length of the text write_string writes for sv, which it adds
+      // to a counting writer. The same checks, the same failures.
+#if defined(__GNUC__) || defined(__clang__)
+      __attribute__((noinline))
+#endif
+      inline void count_string(writer& w, std::string_view sv, bool nonchar)
+      {
+         std::size_t total = sv.size() + 2;
+         const auto* p     = reinterpret_cast<const unsigned char*>(sv.data());
+         const auto* end   = p + sv.size();
+         while (true)
+         {
+            while (end - p >= 8)
+            {
+               std::uint64_t word;
+               std::memcpy(&word, p, 8);
+               if (string_special(word))
+                  break;
+               p += 8;
+            }
+            if (p >= end)
+               break;
+            const unsigned char c = *p;
+            if (c >= 0x80)
+            {
+               std::uint32_t  cp  = 0;
+               const unsigned len = utf8_multibyte(p, end, cp);
+               if (len == 0)
+               {
+                  w.fail("json: string is not valid UTF-8");
+                  break;
+               }
+               if (nonchar && is_noncharacter(cp))
+               {
+                  w.fail("ijson: string holds a Unicode noncharacter");
+                  break;
+               }
+               p += len;
+               continue;
+            }
+            if (c < 0x20)
+               total += (c == '\n' || c == '\r' || c == '\t') ? 1 : 5;
+            else if (c == '"' || c == '\\')
+               total += 1;
+            ++p;
+         }
+         w.count(total);
+      }
 
       // Quotes and escapes sv. The text must be UTF-8; `nonchar` also
       // refuses Unicode noncharacters (I-JSON).
       inline void write_string(writer& w, std::string_view sv, bool nonchar)
       {
+         if (w.counting()) [[unlikely]]
+            return count_string(w, sv, nonchar);
          // Worst case without escapes; each escape reserves again.
          char* out = w.reserve(sv.size() + 2);
          *out++    = '"';
@@ -709,26 +1098,38 @@ namespace psio {
                ++p;
                continue;
             }
-            // An escape: up to six bytes instead of one.
-            w.commit(out);
-            out = w.reserve(static_cast<std::size_t>(end - p) + 7);
-            *out++ = '\\';
+            // An escape: two or six bytes instead of one. The room asked
+            // for is exactly what the rest of the string needs if it
+            // holds no further escape (an exact destination has that
+            // much and may have no more).
+            char letter = 0;
             switch (c)
             {
-               case '"':  *out++ = '"'; break;
-               case '\\': *out++ = '\\'; break;
-               case '\n': *out++ = 'n'; break;
-               case '\r': *out++ = 'r'; break;
-               case '\t': *out++ = 't'; break;
-               default:
-               {
-                  static constexpr char hex[] = "0123456789abcdef";
-                  *out++ = 'u';
-                  *out++ = '0';
-                  *out++ = '0';
-                  *out++ = hex[c >> 4];
-                  *out++ = hex[c & 0xF];
-               }
+               case '"':  letter = '"'; break;
+               case '\\': letter = '\\'; break;
+               case '\n': letter = 'n'; break;
+               case '\r': letter = 'r'; break;
+               case '\t': letter = 't'; break;
+               default: break;
+            }
+            w.commit(out);
+            const std::size_t rest = static_cast<std::size_t>(end - p);
+            if (letter)
+            {
+               out    = w.reserve(rest + 2);
+               *out++ = '\\';
+               *out++ = letter;
+            }
+            else
+            {
+               static constexpr char hex[] = "0123456789abcdef";
+               out    = w.reserve(rest + 6);
+               *out++ = '\\';
+               *out++ = 'u';
+               *out++ = '0';
+               *out++ = '0';
+               *out++ = hex[c >> 4];
+               *out++ = hex[c & 0xF];
             }
             ++p;
          }
@@ -750,6 +1151,8 @@ namespace psio {
 
       inline void write_hex(writer& w, const unsigned char* data, std::size_t n)
       {
+         if (w.counting())
+            return w.count(2 * n + 2);
          char* out = w.reserve(2 * n + 2);
          *out++    = '"';
          for (std::size_t i = 0; i < n; ++i)
@@ -905,11 +1308,42 @@ namespace psio {
       template <typename Fmt, int_mode IM, typename T>
       void encode_assoc(const T& v, writer& w);
 
+      // The number of decimal digits of v.
+      constexpr std::size_t decimal_digits(std::uint64_t v) noexcept
+      {
+         constexpr std::uint64_t pow10[20] = {1ull,
+                                              10ull,
+                                              100ull,
+                                              1000ull,
+                                              10000ull,
+                                              100000ull,
+                                              1000000ull,
+                                              10000000ull,
+                                              100000000ull,
+                                              1000000000ull,
+                                              10000000000ull,
+                                              100000000000ull,
+                                              1000000000000ull,
+                                              10000000000000ull,
+                                              100000000000000ull,
+                                              1000000000000000ull,
+                                              10000000000000000ull,
+                                              100000000000000000ull,
+                                              1000000000000000000ull,
+                                              10000000000000000000ull};
+         v |= 1;
+         const std::size_t t = (static_cast<std::size_t>(std::bit_width(v)) * 1233) >> 12;
+         return t + 1 - (v < pow10[t]);
+      }
+      static_assert(decimal_digits(0) == 1 && decimal_digits(9) == 1 && decimal_digits(10) == 2 &&
+                    decimal_digits(9999999999999999999ull) == 19 &&
+                    decimal_digits(10000000000000000000ull) == 20 &&
+                    decimal_digits(~std::uint64_t{0}) == 20);
+
       template <typename Fmt, int_mode IM, typename I>
       void encode_integer(I v, writer& w)
       {
-         char* const out    = w.reserve(48);
-         bool        quoted = int_as_string_v<Fmt, IM, I>;
+         bool quoted = int_as_string_v<Fmt, IM, I>;
          if constexpr (IM == int_mode::natural && int_as_string_v<Fmt, IM, I>)
          {
             // Natural ijson: a wide integer JavaScript holds exactly
@@ -925,7 +1359,17 @@ namespace psio {
             else
                quoted = static_cast<std::uint64_t>(v) > safe;
          }
-         char* p = out;
+         if constexpr (sizeof(I) <= 8)
+            if (w.counting()) [[unlikely]]
+            {
+               // Measured without being written.
+               const bool          negative  = v < 0;
+               const std::uint64_t magnitude = negative ? std::uint64_t{0} - static_cast<std::uint64_t>(v)
+                                                        : static_cast<std::uint64_t>(v);
+               return w.count(decimal_digits(magnitude) + negative + 2 * quoted);
+            }
+         char* const out = w.reserve(48);
+         char*       p   = out;
          *p      = '"';
          p += quoted;
          p  = std::to_chars(p, out + 46, v).ptr;
@@ -1313,7 +1757,7 @@ namespace psio {
             using E = std::remove_cv_t<typename T::value_type>;
             // Elements of a constant text bound: one reservation for all.
             if constexpr (constexpr std::size_t bound = text_bound<Fmt, E>(); bound != 0)
-               (void)w.reserve(v.size() * (bound + 1) + 2);
+               w.hint(v.size() * (bound + 1) + 2);
             w.put('[');
             bool first = true;
             for (const E& x : v)
@@ -1437,9 +1881,90 @@ namespace psio {
       void encode_document(const T& v, writer& w)
       {
          if constexpr (constexpr std::size_t bound = text_bound<Fmt, T>(); bound != 0)
-            (void)w.reserve(bound);
+            w.hint(bound);
          encode_value<Fmt, int_mode::natural>(v, w);
          w.finish();
+      }
+
+      // What a writer that does not fail fast ended with.
+      inline codec_status writer_status(const writer& w, std::size_t at)
+      {
+         if (w.err.empty())
+            return codec_ok();
+         if (w.has_invariant)
+            return codec_status{w.invariant};
+         return codec_fail(w.err, static_cast<std::uint32_t>(at), w.format);
+      }
+
+      // The exact length of the text of `v`, in `size`: the walk of the
+      // writer with nothing written, so every check runs and a value
+      // without a text fails as it does when it is written.
+      template <typename Fmt, typename T>
+      codec_status measure_document(const T& v, std::size_t& size, bool fail_fast)
+      {
+         writer w{writer::count_only{}, Fmt::name, fail_fast};
+         encode_document<Fmt>(v, w);
+         size = w.size();
+         return writer_status(w, 0);
+      }
+
+      // Writes the text of `v` to [dst, dst + size), `size` being what
+      // measure_document gave for the same value. Nothing is written
+      // outside the span whatever the value is by now.
+      template <typename Fmt, typename T>
+      codec_status write_document(const T& v, char* dst, std::size_t size, bool fail_fast)
+      {
+         writer w{dst, size, Fmt::name, fail_fast};
+         encode_document<Fmt>(v, w);
+         if (auto st = writer_status(w, 0); !st.ok())
+            return st;
+         if (!w.exact())
+         {
+            const codec_error error{"json: the value changed between sizing and writing", 0,
+                                    Fmt::name};
+            if (fail_fast)
+               ::psio::codec_abort(error);
+            return codec_status{error};
+         }
+         return codec_ok();
+      }
+
+      // What json_sizing::automatic is.
+#if defined(PSIO_JSON_SIZING)
+      inline constexpr ::psio::json_sizing default_sizing = ::psio::json_sizing::PSIO_JSON_SIZING;
+#elif defined(__wasm__)
+      inline constexpr ::psio::json_sizing default_sizing = ::psio::json_sizing::exact;
+#else
+      inline constexpr ::psio::json_sizing default_sizing = ::psio::json_sizing::growth;
+#endif
+
+      // Appends the text of `v` to `sink`. On failure (not fail-fast) the
+      // sink is restored.
+      template <typename Fmt, typename T, typename Sink>
+      codec_status append_document(const T& v, Sink& sink, ::psio::json_sizing how, bool fail_fast)
+      {
+         const std::size_t start = sink.size();
+         if (how == ::psio::json_sizing::automatic)
+            how = default_sizing;
+         if (how == ::psio::json_sizing::growth)
+         {
+            writer w{sink, Fmt::name, fail_fast};
+            encode_document<Fmt>(v, w);
+            auto st = writer_status(w, start);
+            if (!st.ok())
+               sink.resize(start);
+            return st;
+         }
+         std::size_t size = 0;
+         if (auto st = measure_document<Fmt>(v, size, fail_fast); !st.ok())
+            return st;
+         if (sink.capacity() - start < size)
+            sink.reserve(start + size);
+         set_sink_size(sink, start + size, false);
+         auto st = write_document<Fmt>(v, sink.data() + start, size, fail_fast);
+         if (!st.ok())
+            sink.resize(start);
+         return st;
       }
 
       // Reads one value of any shape from `c` and writes its compact text
@@ -2678,31 +3203,53 @@ namespace psio {
          using preferred_presentation_category = ::psio::text_category;
 
          // ── encode ──────────────────────────────────────────────────────
-         template <typename T>
-         friend void tag_invoke(decltype(::psio::encode), Derived, const T& v,
-                                std::string& sink)
+         //
+         // Appended to a std::string or a std::vector<char> (an HTTP body).
+         template <typename T, typename Sink>
+            requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+         friend void tag_invoke(decltype(::psio::encode), Derived, const T& v, Sink& sink)
          {
-            writer w{sink, Derived::name};
-            encode_document<Derived>(v, w);
-         }
-
-         // The same into a std::vector<char> (an HTTP body): appended.
-         template <typename T>
-         friend void tag_invoke(decltype(::psio::encode), Derived, const T& v,
-                                std::vector<char>& sink)
-         {
-            writer w{sink, Derived::name};
-            encode_document<Derived>(v, w);
+            if constexpr (default_sizing == ::psio::json_sizing::growth)
+            {
+               writer w{sink, Derived::name};
+               encode_document<Derived>(v, w);
+            }
+            else
+               (void)append_document<Derived>(v, sink, default_sizing, true);
          }
 
          template <typename T>
          friend std::string tag_invoke(decltype(::psio::encode), Derived,
                                        const T& v)
          {
-            std::string out;
-            writer      w{out, Derived::name};
-            encode_document<Derived>(v, w);
-            return out;
+            if constexpr (default_sizing == ::psio::json_sizing::growth)
+            {
+               constexpr std::size_t bound = text_bound<Derived, T>();
+               if constexpr (bound != 0 && bound <= 64)
+               {
+                  // A small text of bounded length is written on the
+                  // stack: the string is made once, at its length.
+                  char   text[bound + writer::worst_case];
+                  writer w{text, sizeof(text), Derived::name};
+                  encode_document<Derived>(v, w);
+                  if (!w.overflowed()) [[likely]]
+                     return std::string(text, w.size());
+               }
+               // The first extent is made with the string (a string just
+               // made and resized out of line is read back before its
+               // stores have settled: a measurable part of a small text).
+               // (a bounded text gets its bound: one allocation)
+               std::string out(bound > 128 && bound <= 1024 ? bound : std::size_t{128}, '\0');
+               writer      w{out, writer::room_from{0}, Derived::name};
+               encode_document<Derived>(v, w);
+               return out;
+            }
+            else
+            {
+               std::string out;
+               (void)append_document<Derived>(v, out, default_sizing, true);
+               return out;
+            }
          }
 
          // ── decode (fail-fast) ──────────────────────────────────────────
@@ -2728,16 +3275,15 @@ namespace psio {
 
          // ── size_of ─────────────────────────────────────────────────────
          //
-         // JSON has no compile-time-constant size; we produce the string
-         // and return its length.
+         // The exact length of the text, measured: the writer's walk with
+         // nothing written (no buffer for the text is made).
          template <typename T>
          friend std::size_t tag_invoke(decltype(::psio::size_of), Derived,
                                        const T& v)
          {
-            std::string tmp;
-            writer      w{tmp, Derived::name};
-            encode_document<Derived>(v, w);
-            return tmp.size();
+            std::size_t size = 0;
+            (void)measure_document<Derived>(v, size, true);
+            return size;
          }
 
          // ── validate / validate_strict ──────────────────────────────────
@@ -2777,6 +3323,12 @@ namespace psio {
             return out;
          }
       };
+
+      // What a json_ref holds: a reference to an lvalue, the value of an
+      // rvalue.
+      template <typename V>
+      using held_t = std::conditional_t<std::is_lvalue_reference_v<V>,
+                                        const std::remove_cvref_t<V>&, std::remove_cvref_t<V>>;
 
       template <typename Fmt>
       concept json_family =
@@ -2960,17 +3512,136 @@ namespace psio {
    // std::vector<char>. On failure `out` is restored.
    template <detail::json_impl::json_family Fmt, typename T, typename Sink>
       requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
-   [[nodiscard]] codec_status encode_json_checked(Fmt, const T& value, Sink& out)
+   [[nodiscard]] codec_status encode_json_checked(Fmt, const T& value, Sink& out,
+                                                  json_sizing how = json_sizing::automatic)
    {
-      const std::size_t           start = out.size();
-      detail::json_impl::writer w{out, Fmt::name, false};
-      detail::json_impl::encode_document<Fmt>(value, w);
-      if (w.err.empty())
-         return codec_ok();
-      out.resize(start);
-      if (w.has_invariant)
-         return codec_status{w.invariant};
-      return codec_fail(w.err, static_cast<std::uint32_t>(start), Fmt::name);
+      return detail::json_impl::append_document<Fmt>(value, out, how, false);
+   }
+
+   // The length of the text of `value`, in `size`: what `json_size` /
+   // `ijson_size` return, without throwing or aborting for a value that has
+   // no text.
+   template <detail::json_impl::json_family Fmt, typename T>
+   [[nodiscard]] codec_status json_size_checked(Fmt, const T& value, std::size_t& size)
+   {
+      return detail::json_impl::measure_document<Fmt>(value, size, false);
+   }
+
+   // `to_json` / `to_ijson` with the sizing named (json_sizing above):
+   //
+   //    auto text = psio::to_ijson(value, psio::json_sizing::exact);   // one allocation: the text
+   //    psio::to_ijson(value, body, psio::json_sizing::exact);         // appended; `body` grown once
+   template <typename T>
+   [[nodiscard]] std::string to_json(const T& value, json_sizing how)
+   {
+      std::string out;
+      (void)detail::json_impl::append_document<json>(value, out, how, true);
+      return out;
+   }
+   template <typename T>
+   [[nodiscard]] std::string to_ijson(const T& value, json_sizing how)
+   {
+      std::string out;
+      (void)detail::json_impl::append_document<ijson>(value, out, how, true);
+      return out;
+   }
+   template <typename T, typename Sink>
+      requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+   void to_json(const T& value, Sink& out, json_sizing how)
+   {
+      (void)detail::json_impl::append_document<json>(value, out, how, true);
+   }
+   template <typename T, typename Sink>
+      requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+   void to_ijson(const T& value, Sink& out, json_sizing how)
+   {
+      (void)detail::json_impl::append_document<ijson>(value, out, how, true);
+   }
+
+   // ── The text of a value as a member of a packed value ──────────────────
+   //
+   // A member that is "the JSON text of a value" — the body of an HTTP reply
+   // inside the arguments of an action inside a call — can be given the
+   // text, or the VALUE: `psio::json_of(value)` / `psio::ijson_of(value)`
+   // are sources of a byte list (std::vector<char>) whose content is
+   // `to_json(value)` / `to_ijson(value)`, as `psio::packed(value)`
+   // (pssz.hpp) is of one whose content is `to_pssz(value)`. The PSSZ
+   // encoder sizes the text (`json_size`) and writes it straight into the
+   // buffer of the enclosing value: the text never has a buffer of its own.
+   //
+   //    struct Reply   { std::string type; std::vector<char> body; };   // the wire type
+   //    template <typename B> struct ReplyOf { std::string type; B body; };
+   //    psio::to_pssz(ReplyOf{"application/json", psio::ijson_of(trace)})
+   //       == psio::to_pssz(Reply{"application/json", to_ijson_bytes(trace)})
+   //
+   // An lvalue is referred to and must outlive the encode; an rvalue is
+   // moved into the source. A value without a text (a string that is not
+   // UTF-8, a non-finite float, a violated bound or invariant) fails the
+   // enclosing encode before anything is written. The text is measured
+   // once, when the source is first checked or sized, and the length is
+   // kept: make the source where it is packed, and do not change the value
+   // in between (a text of another length is refused when it is written,
+   // through psio::codec_abort; nothing is written out of bounds).
+   template <detail::json_impl::json_family Fmt, typename Held>
+   class json_ref
+   {
+      Held                held_;
+      mutable std::size_t size_     = 0;
+      mutable bool        measured_ = false;
+
+    public:
+      using source_type = std::remove_cvref_t<Held>;
+      using format_type = Fmt;
+      // (what the PSSZ encoder looks for: pssz.hpp, in_place_text)
+      using psio_in_place_text = Fmt;
+
+      template <typename V>
+         requires std::constructible_from<Held, V&&>
+      constexpr explicit json_ref(V&& value) : held_(std::forward<V>(value))
+      {
+      }
+      [[nodiscard]] constexpr const source_type& source() const noexcept { return held_; }
+
+      // Whether the value has a text; measures it.
+      [[nodiscard]] codec_status check() const
+      {
+         if (measured_)
+            return codec_ok();
+         auto st   = detail::json_impl::measure_document<Fmt>(held_, size_, false);
+         measured_ = st.ok();
+         return st;
+      }
+      // The number of bytes it writes: the length of the text.
+      [[nodiscard]] std::size_t size() const
+      {
+         if (!measured_)
+         {
+            (void)detail::json_impl::measure_document<Fmt>(held_, size_, true);
+            measured_ = true;
+         }
+         return size_;
+      }
+      // Writes the text to [dst, dst + size()).
+      void write(char* dst) const
+      {
+         (void)detail::json_impl::write_document<Fmt>(held_, dst, size(), true);
+      }
+   };
+   template <detail::json_impl::json_family Fmt, typename Held>
+   struct wire_type<json_ref<Fmt, Held>>
+   {
+      using type = std::vector<char>;
+   };
+
+   template <typename V>
+   [[nodiscard]] constexpr auto json_of(V&& value)
+   {
+      return json_ref<json, detail::json_impl::held_t<V>>{std::forward<V>(value)};
+   }
+   template <typename V>
+   [[nodiscard]] constexpr auto ijson_of(V&& value)
+   {
+      return json_ref<ijson, detail::json_impl::held_t<V>>{std::forward<V>(value)};
    }
 
    // ── Pretty printing ────────────────────────────────────────────────────

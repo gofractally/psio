@@ -464,6 +464,18 @@ namespace psio {
       template <typename S>
       concept in_place_source = requires { typename S::psio_in_place_type; };
 
+      // A value that stands for its own text (psio::json_of, psio::ijson_of;
+      // json.hpp): the member it is written as is a byte list, and its
+      // content is that text, measured first (`check`, `size`) and written
+      // straight into the enclosing value (`write`).
+      template <typename S>
+      concept in_place_text = requires(const S& v, char* dst) {
+         typename S::psio_in_place_text;
+         { v.check() } -> std::same_as<codec_status>;
+         { v.size() } -> std::convertible_to<std::size_t>;
+         v.write(dst);
+      };
+
       // A view given as a value: validated bytes of a T in the view's
       // format.
       template <typename S>
@@ -1101,6 +1113,10 @@ namespace psio {
             else
                return check_encode_as<typename S::psio_in_place_type>(value.source(), 0, {});
          }
+         else if constexpr (in_place_text<S>)
+            // The text is made here, so the value is checked here: a value
+            // without a text has no encoding.
+            return value.check();
          else if constexpr (view_source<S> || is_c_string_v<S>)
             // A view is over validated bytes; a C string is its characters.
             return codec_ok();
@@ -1398,6 +1414,8 @@ namespace psio {
             // The inner value: always the automatic profile, standing alone.
             return size_of_as<0, true, typename S::psio_in_place_type, no_ann, P>(v.source(),
                                                                                  check);
+         else if constexpr (in_place_text<S>)
+            return v.size();
          else if constexpr (is_c_string_v<S>)
             return ::psio::detail::c_string_view(v).size();
          else if constexpr (view_source<S>)
@@ -1679,6 +1697,29 @@ namespace psio {
             // Straight into the enclosing value's buffer: every offset the
             // inner value writes is relative to a position inside it.
             encode_as<0, true, typename S::psio_in_place_type, Sink, no_ann>(v.source(), s);
+            return;
+         }
+         else if constexpr (in_place_text<S>)
+         {
+            // Straight into the enclosing value's buffer where the sink
+            // is one (every encoder that returns or appends to a buffer).
+            const std::size_t n = v.size();
+            if constexpr (std::is_same_v<Sink, ::psio::size_stream>)
+               s.size += n;
+            else if constexpr (std::is_same_v<Sink, ::psio::fast_buf_stream> ||
+                               std::is_same_v<Sink, ::psio::fixed_buf_stream>)
+            {
+               if (n > static_cast<std::size_t>(s.end - s.pos))
+                  ::psio::codec_abort(::psio::codec_error{"stream overrun", 0, "pssz"});
+               v.write(s.pos);
+               s.pos += n;
+            }
+            else
+            {
+               const std::unique_ptr<char[]> text(new char[n ? n : 1]);
+               v.write(text.get());
+               s.write(text.get(), n);
+            }
             return;
          }
          else if constexpr (is_c_string_v<S>)

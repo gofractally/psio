@@ -6,7 +6,101 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
-### After the Rust FlatBuffers pass (gofractally/psio#8) — tip of this note
+### After the JSON sink pass (gofractally/psio#11) — tip of this note
+
+Branch `codex/json-sink` (worktree `~/psio-json-sink`), from `2c64a24`.
+User documentation: `docs/json.md` "Where the text goes: capacity, exact
+size, in place"; `docs/helpers.md` "Packing in place".
+
+**Cause.** The JSON writer (`json_impl::writer`) kept the sink's *size* as
+the extent of its buffer and grew to `max(needed, 2 × size, 128)`: capacity
+the caller had reserved was never looked at, so a sink reserved for the
+whole text was reallocated as soon as twice its size passed the
+reservation. 4.19 MB of text into a vector reserved for 4.5 MiB ended with
+9.4 MB of capacity after a peak of 14.2 MB in two allocations.
+
+**What exists now** (`cpp/include/psio/json.hpp`).
+
+* The writer has three destinations behind one interface: a sink (a
+  `std::string` or `std::vector<char>`), a span of exactly the text's size,
+  and nothing (the text is measured). A sink that came with capacity is
+  written into it and reallocated only for text that does not fit: a
+  worst-case reservation (a number's 48 bytes) that the capacity is short
+  of is formatted in a scratch buffer inside the writer and copied. Past
+  the capacity, doubling. A `std::vector<char>` takes its capacity by
+  doubling too (its new bytes get a value: 7 bytes of text do not touch a
+  64 MiB reservation).
+* `psio::json_size(v)` / `ijson_size(v)` measure: the writer's walk with
+  nothing written, no buffer. `psio::json_size_checked(fmt, v, size)` is
+  the `codec_status` form. Hex and integers are measured without being
+  formatted (`decimal_digits`), strings by a scan (`count_string`).
+* `psio::json_sizing { automatic, exact, growth }`, the last argument of
+  `to_json` / `to_ijson` (both forms) and `encode_json_checked`. `exact`
+  measures, reserves once, writes into the span. `automatic` is `exact` on
+  WebAssembly and `growth` elsewhere; `PSIO_JSON_SIZING` overrides.
+* `psio::json_of(v)` / `psio::ijson_of(v)` (`psio::json_ref<Fmt, Held>`): a
+  source of a byte list holding the text, written in place by the PSSZ
+  encoder (`pssz.hpp`: the `in_place_text` concept — `check()`, `size()`,
+  `write(dst)` — beside `in_place_source`; `pssz.hpp` does not include
+  `json.hpp`). The length is measured once and kept in the source.
+* GraphQL's executor used the writer's `n` member to take back a failed
+  field; it uses `size()` / `truncate(mark)` now.
+* Rust (`rust/psio/src/json.rs`): `encode_into` / `to_json_into` /
+  `to_ijson_into` and `Encode::encode_into` made the text in a `String` of
+  its own and copied it; they write into the sink's buffer now
+  (`Writer::appending`), so reserved capacity is used and there is one
+  buffer. No exact-size pass and no in-place source in Rust: `json_size`
+  still makes the text.
+
+**Measured** (arm64, Apple M-series, Homebrew clang 22).
+
+| | before | after |
+|---|---|---|
+| the reproduction: 4.19 MB of text into a vector reserved for 4.5 MiB | capacity 9.4 MB, peak 14.2 MB, 2 allocations | capacity 4.5 MiB, peak 4.5 MiB, 1 allocation (the reservation) |
+| the same text, nothing reserved, `growth` | peak 12.6 MB, 4 allocations | the same (amortised doubling) |
+| the same text, `exact` | — | peak 4.19 MB, 1 allocation |
+| the reply of a trace inside an action, as psibase's `sendReply` packs it (reserve 2.125 × the packed trace, text, action around it) | peak 13.38 MB (6.4 × the packed trace) in 5 allocations: the reserved body, its reallocation to twice that, the action | peak 8.66 MB (4.1 ×): the reserved body is not reallocated |
+| the same with `psio::ijson_of(trace)` as the body | — | peak 4.19 MB (2.0 ×: the text, which is twice the bytes): the action, nothing else of size |
+
+Encode time, `-O2`, text appended to an empty `std::string` (before →
+`growth` → `exact`): two 1 MiB byte lists as hex, 4.19 MB: 0.47 → 0.47 →
+0.38 ms; 20,000 records of numbers, 1.68 MB: 0.83 → 0.81 → 1.45 ms; 20,000
+records of strings with escapes, 2.44 MB: 0.88 → 0.85 → 1.67 ms; one
+83-byte record: 37 → 39 → 73 ns; a record of eight `uint32`: 28 → 33 ns
+(`growth`); a `uint32`: 11 → 7 ns (a text with a small constant bound is
+written on the stack and the string made once). The
+second walk costs what the first does for numbers and short strings; it
+costs nothing for hex.
+
+Two things found while measuring, both in the writer's hot path and both
+kept out by layout, not by algorithm: a 16-byte load of `(p_, end_)` right
+after an 8-byte store of `p_` is not store-forwarded on this CPU (+40% on a
+list of integers until the two members were separated), and a `std::string`
+that is default-constructed and then resized in an out-of-line function is
+read back before its stores have settled (+8 ns per call until the first
+extent was made with the string).
+
+**Decisions to review.**
+
+1. `automatic` is `exact` under `__wasm__`: every `to_json` / `to_ijson` in
+   a guest walks the value twice (up to 2× the time for numeric text) and
+   allocates once. Chosen because a guest's memory is fixed and its
+   allocator typically does not give a buffer back, so a doubling sink
+   keeps every buffer it outgrew; `-DPSIO_JSON_SIZING=growth` restores one
+   walk.
+2. A `json_ref` remembers the length it measured. A value changed between
+   sizing and writing is refused (`psio::codec_abort`), never written out
+   of bounds; the alternative (no memory) measures once per enclosing
+   layer.
+3. `psio::json_of` writes a `std::vector<char>` member only (the wire of an
+   HTTP body). A `std::string` member holding JSON text has no source.
+
+**Not done.** Rust: an exact-size pass and `PackedRef`-style in-place text
+(the `Writer` owns a `Vec<u8>`; a counting mode would touch every
+`write_json`). JavaScript and Python build the text as a native string
+(`valueToJson`; `"".join`): there is no sink and nothing to reserve.
+
+### After the Rust FlatBuffers pass (gofractally/psio#8)
 
 State: Rust has the FlatBuffers verifier, the views and the C++ mapping.
 Commits on top of `ed796dd`: `e50809b` (verifier, mapping, derives, views,

@@ -258,7 +258,7 @@ namespace psio::graphql
                   continue;
                written |= std::uint64_t{1} << f->group;
             }
-            if (++e.fields > e.lim.max_response_fields || e.w.n > e.lim.max_response_bytes)
+            if (++e.fields > e.lim.max_response_fields || e.w.size() > e.lim.max_response_bytes)
                return e.abort("Response is larger than the limit allows.");
             e.w.append(std::string_view{pool + f->key + skip, f->key_len - skip});
             skip = 0;
@@ -302,7 +302,7 @@ namespace psio::graphql
          std::string message = cat("Cannot represent value: ", what);
          e.w.err           = {};
          e.w.has_invariant = false;
-         e.w.n   = mark;
+         e.w.truncate(mark);
          e.fail_field(f, std::move(message));
          return true;
       }
@@ -310,7 +310,7 @@ namespace psio::graphql
       template <typename L>
       bool write_leaf(exec& e, const L& v, const plan_field& f)
       {
-         const std::size_t mark = e.w.n;
+         const std::size_t mark = e.w.size();
          if constexpr (std::is_same_v<L, std::string_view>)
             ji::write_string(e.w, v, true);
          else if constexpr (std::is_same_v<L, page_cursor>)
@@ -338,7 +338,7 @@ namespace psio::graphql
       template <typename L, typename V>
       bool write_leaf_view(exec& e, const V& v, const plan_field& f)
       {
-         const std::size_t mark = e.w.n;
+         const std::size_t mark = e.w.size();
          if constexpr (requires { v.view_(); })
          {
             ji::write_string(e.w, v.view_(), true);
@@ -409,12 +409,12 @@ namespace psio::graphql
       template <typename S>
       bool write_nullable_inner(exec& e, S& inner, const plan_field& f, std::uint32_t set)
       {
-         const std::size_t mark = e.w.n;
+         const std::size_t mark = e.w.size();
          if (write(e, inner, f, set))
             return true;
          if (e.aborted)
             return false;
-         e.w.n = mark;  // the value failed: null stops here
+         e.w.truncate(mark);  // the value failed: null stops here
          e.null();
          return true;
       }
@@ -427,7 +427,7 @@ namespace psio::graphql
          std::size_t i = 0;
          for (auto&& item : s)
          {
-            if (++e.fields > e.lim.max_response_fields || e.w.n > e.lim.max_response_bytes)
+            if (++e.fields > e.lim.max_response_fields || e.w.size() > e.lim.max_response_bytes)
             {
                e.path.pop_back();
                return e.abort("Response is larger than the limit allows.");
@@ -810,12 +810,12 @@ namespace psio::graphql
       inline void write_error(exec& e, const error& err)
       {
          e.w.append(std::string_view{"{\"message\":"});
-         const std::size_t mark = e.w.n;
+         const std::size_t mark = e.w.size();
          ji::write_string(e.w, err.message, false);
          if (!e.w.err.empty())
          {
             e.w.err = {};
-            e.w.n   = mark;
+            e.w.truncate(mark);
             e.w.append(std::string_view{"\"(error message is not valid UTF-8)\""});
          }
          if (err.line)
@@ -1147,10 +1147,10 @@ namespace psio::graphql
          if (prepare(e, req))
          {
             e.w.append(std::string_view{"\"data\":"});
-            const std::size_t mark = e.w.n;
+            const std::size_t mark = e.w.size();
             if (!run_root())
             {
-               e.w.n = mark;
+               e.w.truncate(mark);
                e.null();
             }
             if (!e.errors.empty())

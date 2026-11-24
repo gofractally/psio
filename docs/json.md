@@ -678,6 +678,88 @@ auto st = psio::encode_json_checked(psio::ijson{}, reply, body);   // restored o
 PSIO's stream sinks (`stream.hpp`) are not JSON sinks; write to a vector
 and hand it over.
 
+#### Where the text goes: capacity, exact size, in place
+
+**Capacity is used.** A sink that already has capacity is written into it:
+text that fits what the caller reserved never reallocates (a number's
+widest form does not count against the room that is left: it is formatted
+aside and copied when only the worst case is short). Past the capacity the
+sink grows by doubling, one buffer at a time. A `std::vector<char>` takes
+its capacity as it is needed, so a few bytes of text do not touch a large
+reservation.
+
+**The size of a text.** `psio::json_size(v)` / `psio::ijson_size(v)` (and
+`psio::json_size_checked(psio::ijson{}, v, size)`, a `codec_status`) are the
+exact length of the text, **measured without making it**: the writer's own
+walk with nothing written, so every check runs and a value without a text
+fails as it does when it is written. Byte lists (hex) and integers are
+measured without being formatted, strings by one scan for escapes; a
+float is formatted to be measured.
+
+**How the sink is given room** is `psio::json_sizing`, the last argument of
+`to_json` / `to_ijson` (both forms) and of `encode_json_checked`:
+
+```cpp
+auto text = psio::to_ijson(value, psio::json_sizing::exact);     // one allocation: the text
+psio::to_ijson(value, body, psio::json_sizing::exact);           // appended; `body` grown once, exactly
+auto st = psio::encode_json_checked(psio::ijson{}, value, body, psio::json_sizing::growth);
+```
+
+| | walks | allocations | peak memory | time |
+|---|---|---|---|---|
+| `exact` | two: measure, then write | one, of exactly the text (none when the sink has the capacity) | the text | up to 2x for text made of numbers and short strings; 0.8x for large hex / byte lists |
+| `growth` | one | amortised doubling once the capacity is used | up to 3x the text while a buffer is copied to its double; up to 2x held at the end | the baseline |
+| `automatic` (default) | `exact` on WebAssembly, `growth` elsewhere | | | |
+
+A guest with a fixed memory and an allocator that does not give memory back
+wants `exact`: a doubling sink leaves every buffer it outgrew behind. A
+server wants `growth`: the allocator returns the buffers, and the second
+walk costs time. `-DPSIO_JSON_SIZING=exact` (or `growth`), the same in every
+translation unit, sets what `automatic` means for a whole program. The text
+is the same in every case. `exact` appended to a sink with too little
+capacity reserves exactly the sum: for many appends to one sink reserve
+once, or use `growth`.
+
+Measured (arm64, clang 22 -O2, text appended to an empty `std::string`):
+
+| value | text | `growth` | `exact` |
+|---|---:|---:|---:|
+| two 1 MiB byte lists and a number (hex) | 4.19 MB | 0.47 ms, 4 allocations, peak 12.6 MB | 0.38 ms, 1 allocation, peak 4.19 MB |
+| 20 000 records of integers, a float, a bool | 1.68 MB | 0.81 ms, 1 allocation, peak 2.2 MB | 1.45 ms, 1 allocation, peak 1.68 MB |
+| 20 000 records of strings with escapes | 2.44 MB | 0.85 ms, 16 allocations, peak 6.7 MB | 1.67 ms, 1 allocation, peak 2.44 MB |
+
+**A text as a member of a packed value.** `psio::json_of(value)` /
+`psio::ijson_of(value)` are sources of a byte list (`std::vector<char>`)
+whose content is `to_json(value)` / `to_ijson(value)` — what
+`psio::packed(value)` is for PSSZ bytes
+([helpers.md](helpers.md#packing-in-place-a-value-as-its-packed-bytes)).
+The PSSZ encoder measures the text and writes it straight into the buffer
+of the value around it: an HTTP reply whose body is the JSON of a large
+value, inside an action, inside a call, is one buffer.
+
+```cpp
+struct HttpReply { std::string contentType; std::vector<char> body; };       // the wire type
+template <typename Body> struct ReplyOf { std::string_view contentType; Body body; };
+static_assert(psio::packs_as<ReplyOf<psio::json_ref<psio::ijson, const Trace&>>, HttpReply>);
+
+auto bytes = psio::to_pssz(ReplyOf{"application/json", psio::ijson_of(trace)});
+// == psio::to_pssz(HttpReply{"application/json", <the bytes of psio::to_ijson(trace)>})
+```
+
+The type is `psio::json_ref<Fmt, Held>` (`s.size()`, `s.check()`,
+`s.write(dst)`); write `auto` or make the member a template parameter. An
+lvalue is referred to and must outlive the encode; an rvalue is held. A
+value without a text fails the enclosing `to_pssz` (a `codec_status` from
+`encode_pssz_checked`) before anything is written. The text is measured
+once, when the source is first checked or sized, and the length is kept:
+make the source where it is packed and do not change the value in between
+(a text of another length is refused when it is written, through
+`psio::codec_abort`; nothing is written outside the bytes it was sized as).
+Measured (`cpp/tests/json_sink_tests.cpp`, 4.19 MB of text under a reply,
+its argument tuple and an action): 4 194 458 bytes — the result — in 1
+allocation; making the text first, exactly sized, and moving it through
+the layers peaks at 8 388 884 bytes.
+
 ### Pretty printing
 
 `psio::format_json(text)` lays any JSON text out for a person — one member
@@ -837,7 +919,9 @@ and a parent project's `simdjson::simdjson` target is used as is.
 ### Writing
 
 The writer formats into the tail of the output string through a raw pointer
-(one capacity check per value, the size set once at the end). Each member
+(one capacity check per value, the size set once at the end; the same code
+writes into a span of exactly the text's size, or only measures: "Where the
+text goes" above). Each member
 key is a literal built at compile time — separator, quoted and escaped name,
 colon (`,"name":`). A value whose text has a small constant bound (numbers,
 bool, and optionals, fixed arrays, tuples and records of them) reserves once,

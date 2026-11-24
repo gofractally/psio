@@ -195,6 +195,27 @@ fn json_and_ijson_names() {
     psio::to_ijson_into(&value, &mut sink).unwrap();
     assert_eq!(sink, format!("x{json}{ijson}"));
 
+    // The text is written into the sink's own buffer: capacity the caller
+    // reserved is used, and text that fits it never reallocates.
+    let mut reserved = String::with_capacity(1 + json.len());
+    reserved.push('x');
+    let (data, capacity) = (reserved.as_ptr(), reserved.capacity());
+    psio::to_json_into(&value, &mut reserved).unwrap();
+    assert_eq!(reserved, format!("x{json}"));
+    assert_eq!((reserved.as_ptr(), reserved.capacity()), (data, capacity));
+    let mut bytes: Vec<u8> = Vec::with_capacity(2 + ijson.len());
+    bytes.extend_from_slice(b"y=");
+    let (data, capacity) = (bytes.as_ptr(), bytes.capacity());
+    assert_eq!(psio::Encode::<psio::IJson>::encode_into(&value, &mut bytes).unwrap(), ijson.len());
+    assert_eq!(bytes, format!("y={ijson}").into_bytes());
+    assert_eq!((bytes.as_ptr(), bytes.capacity()), (data, capacity));
+    // A value without a text leaves the sink as it was, capacity included.
+    let mut kept = String::with_capacity(64);
+    kept.push_str("kept");
+    let data = kept.as_ptr();
+    assert!(psio::to_json_into(&f64::NAN, &mut kept).is_err());
+    assert_eq!((kept.as_str(), kept.as_ptr(), kept.capacity()), ("kept", data, 64));
+
     // Text is a &str, String, &[u8] or Vec<u8>.
     assert_eq!(psio::from_json::<Account>(&json).unwrap(), value);
     assert_eq!(psio::from_json::<Account>(json.as_bytes()).unwrap(), value);
