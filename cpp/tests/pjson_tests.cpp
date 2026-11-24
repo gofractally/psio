@@ -90,9 +90,11 @@ TEST_CASE("pjson round-trip: scalars", "[pjson][roundtrip]")
    CHECK(rt(pjson_value{true}) == pjson_value{true});
    CHECK(rt(pjson_value{false}) == pjson_value{false});
 
-   for (std::int64_t i : {0LL, 1LL, 15LL, 16LL, -1LL, 12345678901234LL,
-                          std::numeric_limits<std::int64_t>::max(),
-                          std::numeric_limits<std::int64_t>::min()})
+   // (std::int64_t is long on LP64 Linux and long long on macOS: the list
+   // names its element type instead of mixing LL literals with int64_t)
+   for (std::int64_t i : std::initializer_list<std::int64_t>{
+           0, 1, 15, 16, -1, 12345678901234, std::numeric_limits<std::int64_t>::max(),
+           std::numeric_limits<std::int64_t>::min()})
    {
       auto v = rt(pjson_value{i});
       REQUIRE(v.holds<std::int64_t>());
