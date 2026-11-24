@@ -1753,7 +1753,8 @@ type** — the mirror of the argument helpers
 | `psio::method_result_to_pssz<T, I>(value)`, `method_result_append_pssz<T, I>(out, value)` | the callee's side: the bytes of the result, its bounds checked |
 | `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates as the `returns(...)` type, then decodes |
 | `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes bytes already validated |
-| `psio::validate_method_result<T, I>(bytes)` | a `codec_status` |
+| `psio::validate_method_result<T, I>(bytes)` | a `codec_status`. It refuses exactly what the checked decode refuses — the `sorted` / `unique` / `unique_keys` of `returns(...)` included ([5.13](#513-sorted-unique-unique_keys)) — so bytes it accepts may be viewed or decoded as trusted |
+| `psio::method_result_buffer<T, I>`, `psio::shared_method_result<T, I>` | a result held packed, owned or shared: the `psio::pssz_buffer` / `psio::shared_pssz` of a result (`B{value}`, `B{bytes}` validating as the result, `view()`, `unpack()`); `psio::method_args_buffer<T, I>` / `shared_method_args<T, I>` for the arguments |
 | `psio::validated_method_result_view<T, I>(bytes)` | validates, then views in place: a `psio::checked_view` of `psio::method_result_trusted_view<T, I>`; `psio::method_result_view<T, I>` is the safe view |
 | `psio::encode_method_result` / `decode_method_result<T, I>(…, out)` | the same operations returning a `codec_status` instead of failing through `psio::codec_abort`; `psio::check_method_result<T, I>(value)` only checks |
 | `psio::method_result_t<T, I>` | the type a result is encoded as: `X` for a method that returns a `psio::pssz_view<X>`, `void` for one that returns nothing |
@@ -2007,7 +2008,12 @@ violates one (`sorted: elements are not in order`,
 `unique_keys: two elements have the same key`), and every checking reader
 — pssz `validate_pssz`, `validate_strict`, `from_pssz`, the checked and
 fail-fast decodes; json; key — rejects bytes or text that hold one. Not the
-trusted decode, not views.
+trusted decode, not views. The same holds on a method parameter
+(`validate_method_args`, `invoke_method_pssz`) and in `returns(...)`
+(`validate_method_result`, `validated_method_result_view`,
+`decode_method_result`, `method_result_from_pssz`): a validator and the
+checked decode of the same name accept the same set (test
+`cpp/tests/validate_decode_parity_tests.cpp`).
 
 **Schema IR.** **Not in the Schema IR**: a schema-driven reader of the same
 schema does not know the constraint. Treat it as a typed-codec check until

@@ -4987,6 +4987,108 @@ namespace psio {
          encode_value<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
          return out;
       }
+
+      // ── A value at an annotated position, standing alone ───────────────
+      //
+      // The codec of an R whose position carries A (a method's result under
+      // returns(...)): the widths A selects, and the value checks `specs`
+      // states — A's own tuple before normalisation, so that an order spec
+      // standing alone (`returns(sorted)`, which changes no byte and leaves
+      // A empty) is still checked. One implementation for the writer, the
+      // validator and the checked decode, so that they accept the same set.
+
+      // Whether `specs` asks for a check that only the materialised value
+      // can answer (sorted / unique / unique_keys, at the position or below
+      // it): the rule validate_shape applies to a record member.
+      template <typename R, typename Specs>
+      inline constexpr bool order_checked_at_v =
+         ann::has_order_specs_deep_v<Specs> && ann::has_value_checks_v<R, Specs>;
+
+      template <typename R, typename A, typename S, typename Specs>
+      [[nodiscard]] codec_status encode_at(const S& value, std::vector<char>& out,
+                                           const Specs& specs, const char* length_message)
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         if (auto status = check_encode_as<R>(value, 0, {}); !status.ok())
+            return status;
+         if (auto status = ann::check_value(checkable(value), specs, length_message, "pssz");
+             !status.ok())
+            return status;
+         size_check        check;
+         const std::size_t total = size_of_as<W, true, R, A, size_check*>(value, &check);
+         enforce_max_dynamic<R>(total, &check);
+         if (check.failure)
+            return codec_fail(check.failure, 0, "pssz");
+         if (total > std::numeric_limits<std::size_t>::max() - out.size())
+            return codec_fail("pssz: encoded size overflow", 0, "pssz");
+         const std::size_t start = out.size();
+         out.resize(start + total);
+         ::psio::fast_buf_stream sink(out.data() + start, total);
+         encode_as<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
+         return codec_ok();
+      }
+
+      // The structure, bounds, utf8 and invariants: everything the bytes
+      // answer in place.
+      template <typename R, typename A>
+      [[nodiscard]] codec_status validate_shape_at(std::span<const char> bytes) noexcept
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         if (auto cap = check_max_dynamic<R>(bytes); !cap.ok())
+            return cap;
+         validate_flags flags;
+         return validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+      }
+      template <typename R, typename A>
+      [[nodiscard]] R decode_at(std::span<const char> bytes)
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         R                     out{};
+         decode_into<W, true, R, A>(bytes, 0, bytes.size(), out);
+         return out;
+      }
+      // Everything a checking reader refuses. The order specs compare whole
+      // elements, so they are checked on the value materialised from the
+      // accepted bytes, as for a record member (validate_shape).
+      template <typename R, typename A, typename Specs>
+      [[nodiscard]] codec_status validate_at(std::span<const char> bytes, const Specs& specs,
+                                             const char* length_message) noexcept
+      {
+         auto status = validate_shape_at<R, A>(bytes);
+         if constexpr (order_checked_at_v<R, Specs>)
+            if (status.ok())
+               status = ann::check_value(decode_at<R, A>(bytes), specs, length_message, "pssz");
+         return status;
+      }
+      // validate_at, then the value: one decode whatever `specs` holds.
+      template <typename R, typename A, typename Specs>
+      [[nodiscard]] codec_status decode_checked_at(std::span<const char> bytes, R& out,
+                                                   const Specs& specs,
+                                                   const char*  length_message)
+      {
+         if (auto status = validate_shape_at<R, A>(bytes); !status.ok())
+            return status;
+         R value = decode_at<R, A>(bytes);
+         if constexpr (order_checked_at_v<R, Specs>)
+            if (auto status = ann::check_value(value, specs, length_message, "pssz");
+                !status.ok())
+               return status;
+         out = std::move(value);
+         return codec_ok();
+      }
+
+      inline constexpr const char* method_result_length_message =
+         "psio: return value length_bound violated";
+      // The compile-time checks of returns(...) (check_method_result's).
+      template <typename T, std::size_t I, typename R>
+      constexpr void method_result_specs_ok()
+      {
+         static_assert(ann::tree_ok<R, ::psio::detail::method_result_holder<T, I>>(),
+                       "psio: a returns(...) annotation does not fit the method's return type");
+         static_assert(::psio::detail::length_bounds_consistent(
+                          ::psio::method_result_annotations<T, I>),
+                       PSIO_LENGTH_BOUND_CONFLICT_MSG);
+      }
    }  // namespace detail::pssz_impl
 
    // Appends the encoding of the result of method I of T, or says why the
@@ -4999,24 +5101,9 @@ namespace psio {
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
-      using A      = pz::method_result_ann<T, I>;
-      constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto status = pz::check_encode_as<R>(value, 0, {}); !status.ok())
-         return status;
-      if (auto status = ::psio::check_method_result<T, I>(pz::checkable(value), "pssz");
-          !status.ok())
-         return status;
-      pz::size_check    check;
-      const std::size_t total =
-         pz::size_of_as<W, true, R, A, pz::size_check*>(value, &check);
-      pz::enforce_max_dynamic<R>(total, &check);
-      if (check.failure)
-         return codec_fail(check.failure, 0, "pssz");
-      const std::size_t start = out.size();
-      out.resize(start + total);
-      ::psio::fast_buf_stream sink(out.data() + start, total);
-      pz::encode_as<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
-      return codec_ok();
+      pz::method_result_specs_ok<T, I, R>();
+      return pz::encode_at<R, pz::method_result_ann<T, I>>(
+         value, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
    }
 
    // ── Encoding a source AS a type ───────────────────────────────────────
@@ -5191,8 +5278,12 @@ namespace psio {
    template <typename T, std::size_t I>
    using method_result_t = detail::pssz_impl::method_result_t<T, I>;
 
-   // Checks `bytes` as the result of method I of T. A method that returns
-   // nothing has no result bytes: only the empty span is its result.
+   // Checks `bytes` as the result of method I of T: everything
+   // decode_method_result / method_result_from_pssz refuse, the
+   // `sorted` / `unique` / `unique_keys` of returns(...) included — bytes
+   // this accepts may be read through a view, or decoded as trusted. A
+   // method that returns nothing has no result bytes: only the empty span
+   // is its result.
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status validate_method_result(std::span<const char> bytes) noexcept
    {
@@ -5204,31 +5295,23 @@ namespace psio {
                                            "pssz");
       else
       {
-         using A                 = pz::method_result_ann<T, I>;
-         constexpr std::size_t W = pz::method_result_width_v<T, I>;
-         if (auto cap = pz::check_max_dynamic<R>(bytes); !cap.ok())
-            return cap;
-         pz::validate_flags flags;
-         return pz::validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+         pz::method_result_specs_ok<T, I, R>();
+         return pz::validate_at<R, pz::method_result_ann<T, I>>(
+            bytes, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
       }
    }
 
-   // Validates and decodes the result of method I of T.
+   // Validates and decodes the result of method I of T. It accepts exactly
+   // what validate_method_result accepts; `out` is unchanged otherwise.
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status decode_method_result(std::span<const char> bytes,
                                                    detail::pssz_impl::method_result_t<T, I>& out)
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
-      using A      = pz::method_result_ann<T, I>;
-      constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto status = validate_method_result<T, I>(bytes); !status.ok())
-         return status;
-      out = R{};
-      pz::decode_into<W, true, R, A>(bytes, 0, bytes.size(), out);
-      // sorted / unique in returns(...) compare whole elements: checked on
-      // the value, like a record member's.
-      return ::psio::check_method_result<T, I>(out, "pssz");
+      pz::method_result_specs_ok<T, I, R>();
+      return pz::decode_checked_at<R, pz::method_result_ann<T, I>>(
+         bytes, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
    }
 
    // ── A result in one call ──────────────────────────────────────────────
@@ -5284,11 +5367,7 @@ namespace psio {
       using R      = pz::method_result_t<T, I>;
       if constexpr (!std::is_void_v<R>)
       {
-         using A                 = pz::method_result_ann<T, I>;
-         constexpr std::size_t W = pz::method_result_width_v<T, I>;
-         R                     out{};
-         pz::decode_into<W, true, R, A>(bytes.bytes, 0, bytes.bytes.size(), out);
-         return out;
+         return pz::decode_at<R, pz::method_result_ann<T, I>>(bytes.bytes);
       }
    }
    template <typename T, std::size_t I>

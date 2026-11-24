@@ -878,6 +878,7 @@ struct Token {
 | `reflect<T>::method_params<I>` | how the method **takes** them: `std::tuple<remove_cvref_t<parameter>...>`. Above: `(psio::pssz_view<Account>, std::uint64_t, std::string_view)` |
 | `psio::validate_method_args<T, I>(bytes)` | `codec_status`: are the bytes that argument tuple |
 | `psio::method_args_view<T, I>` | the read view of the argument tuple (`get<N>()`, structured bindings); correct under the method's cap, where the view of the plain `std::tuple` reads wrong offsets |
+| `psio::method_args_buffer<T, I>`, `psio::shared_method_args<T, I>` | the argument tuple held packed, owned / shared: `psio::pssz_buffer` / `psio::shared_pssz` of `method_arg_tuple<I>` |
 | `psio::method_params_from_pssz<T, I>(psio::trusted{bytes})` | a `method_params<I>`: each argument as the method declares it |
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
@@ -943,11 +944,12 @@ auto view  = psio::validated_method_result_view<Directory, 0>(bytes); // validat
 | `psio::method_result_append_pssz<T, I>(out, value)` | the same, appended |
 | `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates the bytes as the `returns(...)` type and decodes; fails through `psio::codec_abort` |
 | `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes without validating |
-| `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method |
+| `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method. It accepts exactly what `decode_method_result` / `method_result_from_pssz` accept, the `sorted` / `unique` / `unique_keys` of `returns(...)` included |
 | `psio::validated_method_result_view<T, I>(bytes)` | validates, then hands back the trusted view in a `psio::checked_view` (`ok()`, `error()`, `*r`, `r->…`) |
 | `psio::method_result_view<T, I>`, `psio::method_result_trusted_view<T, I>` | the safe / trusted read view of a result. Where `returns(...)` narrows an offset width these read the result's own offsets; `psio::pssz_view<ReturnType>` would not |
 | `psio::encode_method_result<T, I>(value, out)`, `psio::decode_method_result<T, I>(bytes, out)` | the write and the validating read returning a `codec_status` instead of failing |
 | `psio::check_method_result<T, I>(value)` | only checks a value against `returns(...)` |
+| `psio::method_result_buffer<T, I>`, `psio::shared_method_result<T, I>` | a result held packed, owned / shared ([below](#a-result-held-packed)) |
 
 **An empty optional result is zero bytes** when its payload cannot be empty
 (`std::optional<Entry>`, `std::optional<std::uint32_t>`:
@@ -960,6 +962,47 @@ selector byte — `None` is `00`, a present value `01` and its encoding — and
 no bytes are not a result of such a method. A method that returns nothing
 has no result bytes: `validate_method_result` accepts exactly the empty
 span, and `method_result_from_pssz` returns `void`.
+
+#### A result held packed
+
+`psio::method_result_buffer<T, I>` and `psio::shared_method_result<T, I>`
+are to a method's result what `psio::pssz_buffer<X>` and
+`psio::shared_pssz<X>` are to an `X`
+([Packed values](#packed-values-nestedt-f_buffert-shared_ft)): bytes that
+*are* a result of the method, owned or shared, with every member of that
+table.
+
+```cpp
+psio::shared_method_result<Directory, 0> r{bytes};   // validate_method_result, then holds them
+auto copy = r;                                       // same bytes, no copy
+r->size();  r.view()[1];                             // psio::method_result_trusted_view<Directory, 0>
+std::vector<std::string> names = r.unpack();         // read with the result's own offset widths
+auto mine = psio::method_result_buffer<Directory, 0>::from(names);   // method_result_to_pssz
+```
+
+| | Is |
+|---|---|
+| `B{value}`, `B::from(value)`, `B::from_checked(value, out)` | `method_result_to_pssz` / `encode_method_result`: the value is checked against `returns(...)` |
+| `B{bytes}`, `B::checked(bytes, out)`, `b.validate()` | `validate_method_result` |
+| `b.view()`, `*b`, `b->` | `psio::method_result_trusted_view<T, I>`; `psio::as_view(b)` is `psio::method_result_view<T, I>` |
+| `b.unpack()` | `method_result_from_pssz<T, I>(psio::trusted{…})`; `b.decode_checked(out)` is `decode_method_result` |
+
+They are `psio::buffer<psio::method_result_t<T, I>, psio::pssz_method_result<T, I>, Store>`:
+the format tag `psio::pssz_method_result<T, I>` is the codec of the result as
+`returns(...)` types it. It is never `psio::pssz`, also when `returns(...)`
+changes no byte, so `psio::pssz_buffer<ReturnType>` — which validates the
+return type and knows nothing of `returns(...)` — is a different type. (A
+`psio::buffer` spelled with a result view's own format,
+`psio::buffer<R, psio::method_result_view<T, I>::format_type>`, has
+`unpack()` too; prefer the names above.) Not for a method that returns
+nothing.
+
+The arguments need no tag of their own, their tuple type carries the
+method's cap and annotations: `psio::method_args_buffer<T, I>` and
+`psio::shared_method_args<T, I>` are `psio::pssz_buffer` / `psio::shared_pssz`
+of `reflect<T>::method_arg_tuple<I>`, and
+`psio::method_args_trusted_view<T, I>` is the trusted form of
+`psio::method_args_view<T, I>`.
 
 **In a schema.** `psio::SchemaBuilder::insert_interface<T>()` gives each
 `Func` the bounded result type. A schema that lists functions without the
