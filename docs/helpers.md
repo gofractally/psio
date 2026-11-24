@@ -454,6 +454,9 @@ The three packed-value types for PSSZ differ only in who owns the bytes:
 | `psio::pssz_buffer<T>` | a `std::vector<char>` | copies the bytes | `psio::as_mutable_view(b)` |
 | `psio::shared_pssz<T>` | a share of immutable bytes | shares them | none |
 
+To write such a member from the value itself, without a buffer of its own,
+see [Packing in place](#packing-in-place-a-value-as-its-packed-bytes).
+
 As a **member of a reflected record** (or an element of a list, the payload
 of an optional, an alternative of a variant) all three are the same thing
 to every format — `psio::detail::is_nested` holds for each:
@@ -655,6 +658,8 @@ bytes that type writes, without copying what it refers to:
 | `std::tuple` / `std::pair` of references or of sources (`std::tie(a, b)`, `std::forward_as_tuple(...)`) | the tuple / pair of the values |
 | `std::vector<S>`, `std::optional<S>` of a source | the vector / optional of what `S` is encoded as |
 | `psio::view<X, F>` (any view, given as a value) | `X` |
+| `psio::nested_of(v)`, `psio::nested_as<X>(v)`, `psio::method_args_nested<T, I>(args...)` | `psio::nested<X>`: the value, written in place ([below](#packing-in-place-a-value-as-its-packed-bytes)) |
+| `psio::packed(v)`, `psio::packed_as<X>(v)`, `psio::method_args_packed<T, I>(args...)` | `std::vector<char>` holding the encoding: the value, written in place |
 | a reflected record with members of the kinds above | the record with owning members (same layout, same widths, same bounds) |
 
 ```cpp
@@ -798,6 +803,11 @@ Everything else is false: another member count, order or integer size, a
 tuple against a record, other bounds, a type with a binary adapter against
 anything but itself. The relation is symmetric.
 
+Recursive types are compared like any other: a record that holds a list of
+itself, or a list of variants one of whose alternatives is the record (a
+trace of actions that hold traces), packs as the record of references with
+the same shape. `psio::pssz_evolves_from` takes them too.
+
 ```cpp
 struct TxSuccessView { Checksum256 id; BlockNum blockNum; psio::pssz_view<const TransactionTrace> trace; };
 PSIO_REFLECT(TxSuccessView, id, blockNum, trace)
@@ -817,6 +827,83 @@ elements — and each argument of `psio::method_args_to_pssz` is written as it
 stands when `psio::packs_as<Argument, Parameter>` and converted implicitly
 otherwise. So a record of views is an argument for a parameter of the owning
 record type.
+
+### Packing in place: a value as its packed bytes
+
+A member that is *the packed bytes of a value* — a `psio::nested<X>`, a
+`psio::shared_pssz<X>`, or a plain byte list that holds an encoding, as the
+arguments inside an action do — can be given the bytes, or the **value**.
+The encoder sizes a value before it writes the first byte, so a value is
+written straight into the buffer of the message around it: no buffer per
+layer, however deep the layers go.
+
+```cpp
+struct Middle { std::uint32_t tag; psio::nested<Inner> inner; };     // the wire types
+struct Outer  { std::uint32_t tag; psio::nested<Middle> middle; };
+
+template <typename I> struct MiddleOf { std::uint32_t tag; I inner; };   // the same, holding a source
+template <typename M> struct OuterOf  { std::uint32_t tag; M middle; };
+PSIO_REFLECT(...)                                                    // each as usual
+
+// Two steps per layer: three buffers of the payload's size live at once.
+auto a = psio::to_pssz(Outer{1, psio::nested<Middle>::from(Middle{2, psio::nested<Inner>::from(inner)})});
+// In place: one allocation, the result.
+auto b = psio::to_pssz(OuterOf{1, psio::nested_of(MiddleOf{2, psio::nested_of(inner)})});
+// a == b
+```
+
+| Source | Is written as | From |
+|--------|---------------|------|
+| `psio::nested_of(value)` | a `psio::nested<X>` (also a `psio::shared_pssz<X>` / `psio::pssz_buffer<X>` member: the same wire), `X` = `psio::wire_type_t` of the value | the value, or any source of it (a view, a record of references) |
+| `psio::nested_as<X>(source)` | a `psio::nested<X>` for the `X` named: a method's argument tuple, any type the source `psio::packs_as` | a `psio::pssz_source_of<Source, X>` |
+| `psio::packed(value)`, `psio::packed_as<X>(source)` | a `std::vector<char>` whose content is the encoding (`to_pssz(value)`, `to_pssz_as<X>(source)`) | the same |
+| `psio::method_args_packed<T, I>(args...)` | a `std::vector<char>` holding the argument tuple of method `I` of `T`: what `psio::method_args_to_pssz<T, I>(args...)` returns, not yet written | the arguments, taken and converted as `method_args_to_pssz` takes them |
+| `psio::method_args_nested<T, I>(args...)` | a `psio::nested<reflect<T>::method_arg_tuple<I>>` | the same |
+
+The types are `psio::nested_ref<X, Held>` and `psio::packed_ref<X, Held>`
+(`s.source()`, `s.size()`); write `auto`, or make the member a template
+parameter as above.
+
+- **Same bytes.** The encoding is byte for byte that of the two-step form;
+  a record holding such a source `psio::packs_as` the record with the
+  owning member, so it is accepted by `psio::to_pssz_as`, as a method
+  argument for the owning record, and by anything constrained on
+  `packs_as`. `validate_pssz<Source>` validates the wire type.
+- **Lifetime.** An lvalue is referred to and must outlive the encode; an
+  rvalue is moved into the source. Layers can therefore be built in one
+  expression, or returned from a function, without dangling:
+  `psio::method_args_packed<T, I>(view, true)` holds the view and the
+  `bool`, and refers to nothing else.
+- **Checks.** The inner value is checked where it is encoded — its bounds,
+  `utf8`, invariants, caps — exactly as `psio::nested<X>::from(value)` checks
+  it, before anything is written: a value with no encoding fails the
+  enclosing `to_pssz` (a `codec_status` from `encode_pssz_checked`). The
+  depth limit counts through a `nested_of` layer as a reader's does (a
+  byte list from `packed` starts a value of its own). A length bound on
+  the member counts the bytes written.
+- **PSSZ only.** These are sources for the PSSZ encoder; the key and text
+  encoders do not take them. There is no in-place form yet for a member that is the
+  *text* of a value (a JSON body inside a packed reply): that text is
+  still made first.
+
+A call inside a call — an action whose arguments are another action — is
+then one buffer:
+
+```cpp
+struct Action { AccountNumber sender, service; MethodNumber method; std::vector<char> rawData; };
+template <typename Args>                       // Action, holding a source of its arguments
+struct ActionOf { AccountNumber sender, service; MethodNumber method; Args rawData; };
+static_assert(psio::packs_as<ActionOf<psio::packed_ref<X>>, Action>);
+
+auto exec = ActionOf{me, transact, "execTrx"_m, psio::method_args_packed<Transact, I>(trxView, true)};
+auto post = ActionOf{me, xrun, "post"_m,
+                     psio::method_args_packed<XRun, J>(mode, std::move(exec), timeout, callback)};
+auto bytes = psio::to_pssz(post);              // one allocation: the packed call
+```
+
+Measured (`cpp/tests/pssz_in_place_tests.cpp`, a 1 MiB payload under three
+layers): the two-step form peaks at 3 145 788 bytes in 3 allocations, the
+in-place form at 1 048 608 bytes — the result — in 1.
 
 ## Sinks and sources
 
@@ -878,11 +965,13 @@ struct Token {
 | `reflect<T>::method_params<I>` | how the method **takes** them: `std::tuple<remove_cvref_t<parameter>...>`. Above: `(psio::pssz_view<Account>, std::uint64_t, std::string_view)` |
 | `psio::validate_method_args<T, I>(bytes)` | `codec_status`: are the bytes that argument tuple |
 | `psio::method_args_view<T, I>` | the read view of the argument tuple (`get<N>()`, structured bindings); correct under the method's cap, where the view of the plain `std::tuple` reads wrong offsets |
+| `psio::method_args_buffer<T, I>`, `psio::shared_method_args<T, I>` | the argument tuple held packed, owned / shared: `psio::pssz_buffer` / `psio::shared_pssz` of `method_arg_tuple<I>` |
 | `psio::method_params_from_pssz<T, I>(psio::trusted{bytes})` | a `method_params<I>`: each argument as the method declares it |
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
 | `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result ([the result as `returns(...)` types it](#the-result-of-a-method)); a `codec_status` |
 | `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::method_args_packed<T, I>(args...)`, `psio::method_args_nested<T, I>(args...)` | the same arguments as a *source* of those bytes, for a member of an enclosing message: written in place, no buffer of their own ([above](#packing-in-place-a-value-as-its-packed-bytes)) |
 | `psio::method_arguments<T, I, Args...>` | concept: `args...` can be passed to the method |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
 
@@ -943,11 +1032,12 @@ auto view  = psio::validated_method_result_view<Directory, 0>(bytes); // validat
 | `psio::method_result_append_pssz<T, I>(out, value)` | the same, appended |
 | `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates the bytes as the `returns(...)` type and decodes; fails through `psio::codec_abort` |
 | `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes without validating |
-| `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method |
+| `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method. It accepts exactly what `decode_method_result` / `method_result_from_pssz` accept, the `sorted` / `unique` / `unique_keys` of `returns(...)` included |
 | `psio::validated_method_result_view<T, I>(bytes)` | validates, then hands back the trusted view in a `psio::checked_view` (`ok()`, `error()`, `*r`, `r->…`) |
 | `psio::method_result_view<T, I>`, `psio::method_result_trusted_view<T, I>` | the safe / trusted read view of a result. Where `returns(...)` narrows an offset width these read the result's own offsets; `psio::pssz_view<ReturnType>` would not |
 | `psio::encode_method_result<T, I>(value, out)`, `psio::decode_method_result<T, I>(bytes, out)` | the write and the validating read returning a `codec_status` instead of failing |
 | `psio::check_method_result<T, I>(value)` | only checks a value against `returns(...)` |
+| `psio::method_result_buffer<T, I>`, `psio::shared_method_result<T, I>` | a result held packed, owned / shared ([below](#a-result-held-packed)) |
 
 **An empty optional result is zero bytes** when its payload cannot be empty
 (`std::optional<Entry>`, `std::optional<std::uint32_t>`:
@@ -960,6 +1050,47 @@ selector byte — `None` is `00`, a present value `01` and its encoding — and
 no bytes are not a result of such a method. A method that returns nothing
 has no result bytes: `validate_method_result` accepts exactly the empty
 span, and `method_result_from_pssz` returns `void`.
+
+#### A result held packed
+
+`psio::method_result_buffer<T, I>` and `psio::shared_method_result<T, I>`
+are to a method's result what `psio::pssz_buffer<X>` and
+`psio::shared_pssz<X>` are to an `X`
+([Packed values](#packed-values-nestedt-f_buffert-shared_ft)): bytes that
+*are* a result of the method, owned or shared, with every member of that
+table.
+
+```cpp
+psio::shared_method_result<Directory, 0> r{bytes};   // validate_method_result, then holds them
+auto copy = r;                                       // same bytes, no copy
+r->size();  r.view()[1];                             // psio::method_result_trusted_view<Directory, 0>
+std::vector<std::string> names = r.unpack();         // read with the result's own offset widths
+auto mine = psio::method_result_buffer<Directory, 0>::from(names);   // method_result_to_pssz
+```
+
+| | Is |
+|---|---|
+| `B{value}`, `B::from(value)`, `B::from_checked(value, out)` | `method_result_to_pssz` / `encode_method_result`: the value is checked against `returns(...)` |
+| `B{bytes}`, `B::checked(bytes, out)`, `b.validate()` | `validate_method_result` |
+| `b.view()`, `*b`, `b->` | `psio::method_result_trusted_view<T, I>`; `psio::as_view(b)` is `psio::method_result_view<T, I>` |
+| `b.unpack()` | `method_result_from_pssz<T, I>(psio::trusted{…})`; `b.decode_checked(out)` is `decode_method_result` |
+
+They are `psio::buffer<psio::method_result_t<T, I>, psio::pssz_method_result<T, I>, Store>`:
+the format tag `psio::pssz_method_result<T, I>` is the codec of the result as
+`returns(...)` types it. It is never `psio::pssz`, also when `returns(...)`
+changes no byte, so `psio::pssz_buffer<ReturnType>` — which validates the
+return type and knows nothing of `returns(...)` — is a different type. (A
+`psio::buffer` spelled with a result view's own format,
+`psio::buffer<R, psio::method_result_view<T, I>::format_type>`, has
+`unpack()` too; prefer the names above.) Not for a method that returns
+nothing.
+
+The arguments need no tag of their own, their tuple type carries the
+method's cap and annotations: `psio::method_args_buffer<T, I>` and
+`psio::shared_method_args<T, I>` are `psio::pssz_buffer` / `psio::shared_pssz`
+of `reflect<T>::method_arg_tuple<I>`, and
+`psio::method_args_trusted_view<T, I>` is the trusted form of
+`psio::method_args_view<T, I>`.
 
 **In a schema.** `psio::SchemaBuilder::insert_interface<T>()` gives each
 `Func` the bounded result type. A schema that lists functions without the

@@ -174,7 +174,14 @@ psio_method_arg_convert_compile_fail(too_many MAC_FAIL_TOO_MANY
 
 # psio::packs_as<U, T>: "a U packs as a T" at compile time; to_pssz_as and
 # method arguments constrained by it.
+# Validation and decode accept the same set: every validating entry point
+# and checked decode of the helper families, run on the same inputs.
+psio_add_test(psio_validate_decode_parity_tests validate_decode_parity_tests.cpp)
 psio_add_test(psio_pssz_packs_as_tests pssz_packs_as_tests.cpp)
+# Packing in place (psio::nested_of / packed / method_args_packed): byte
+# identity with the two-step encoding, and the heap it takes (this binary
+# replaces operator new to count).
+psio_add_test(psio_pssz_in_place_tests pssz_in_place_tests.cpp)
 add_test(NAME psio_pssz_packs_as_control_compiles
          COMMAND ${PSIO_MVP_FAIL_COMMAND} ${CMAKE_CURRENT_SOURCE_DIR}/pssz_packs_as_fail.cpp)
 function(psio_packs_as_compile_fail NAME DEFINE MESSAGE)

@@ -13,6 +13,11 @@
 //   psio::view<X, Fmt>                       X   (view.hpp)
 //   psio::buffer<X, pssz, Store>             psio::nested<X>   (pssz_view.hpp:
 //                                            pssz_buffer<X>, shared_pssz<X>)
+//   psio::nested_ref<X, ...>                 psio::nested<X>, written in
+//   psio::packed_ref<X, ...>                 place; std::vector<char>
+//                                            holding the encoding of an X,
+//                                            written in place (pssz.hpp
+//                                            "Packing in place")
 //
 // and a container of such sources as the container of what they encode as:
 //

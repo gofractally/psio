@@ -335,13 +335,13 @@ namespace psio::detail::pssz_impl
    // different order. Sets and maps of the same types are one value kind
    // whatever container holds them; a map is not the plain list of its
    // entries (which need not be sorted).
-   template <typename Old, typename New>
+   template <typename Old, typename New, typename Seen>
    consteval bool assoc_evolves() noexcept
    {
       if constexpr (::psio::detail::is_map_v<Old> && ::psio::detail::is_map_v<New>)
          return std::is_same_v<::psio::detail::assoc_key_t<Old>,
                                ::psio::detail::assoc_key_t<New>> &&
-                layout_evolves<typename Old::mapped_type, typename New::mapped_type>();
+                layout_evolves<typename Old::mapped_type, typename New::mapped_type, Seen>();
       else if constexpr (::psio::detail::is_set_v<Old> && ::psio::detail::is_set_v<New>)
          return std::is_same_v<::psio::detail::assoc_key_t<Old>,
                                ::psio::detail::assoc_key_t<New>>;

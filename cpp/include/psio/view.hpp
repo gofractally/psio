@@ -1506,11 +1506,13 @@ namespace psio {
    };
 
    // ── Construct a view from a buffer ────────────────────────────────────
+   // (The view's format is the buffer's, or the one its codec tag is
+   // viewed as: buffer.hpp buffer_view_format.)
    template <typename T, typename Fmt, storage S>
-   [[nodiscard]] view<T, Fmt, storage::const_borrow>
+   [[nodiscard]] view<T, detail::buffer_view_format_t<Fmt, T>, storage::const_borrow>
    as_view(const buffer<T, Fmt, S>& b) noexcept
    {
-      return view<T, Fmt, storage::const_borrow>{bytes(b)};
+      return view<T, detail::buffer_view_format_t<Fmt, T>, storage::const_borrow>{bytes(b)};
    }
 
    // ── Validate once, then read trusted ──────────────────────────────────

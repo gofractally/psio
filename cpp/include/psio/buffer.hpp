@@ -120,6 +120,24 @@ namespace psio {
          { Fmt::template decode<T>(b) } -> std::same_as<T>;
       };
 
+      // The format of the views of a buffer of format Fmt: Fmt itself,
+      // unless the tag is a codec that is viewed as another format
+      // (`Fmt::view_format<T>`: psio::pssz_method_result, whose views are
+      // those of the result's position).
+      template <typename Fmt, typename T>
+      struct buffer_view_format
+      {
+         using type = Fmt;
+      };
+      template <typename Fmt, typename T>
+         requires requires { typename Fmt::template view_format<T>; }
+      struct buffer_view_format<Fmt, T>
+      {
+         using type = typename Fmt::template view_format<T>;
+      };
+      template <typename Fmt, typename T>
+      using buffer_view_format_t = typename buffer_view_format<Fmt, T>::type;
+
       // A T that could be mistaken for the bytes of an encoding: for it the
       // value constructor is left out (use B::from(value)).
       template <typename T>
@@ -186,10 +204,11 @@ namespace psio {
          // (A format whose views have one kind hands that out.)
          [[nodiscard]] auto view() const noexcept
          {
-            if constexpr (requires { requires view_layout::traits<Fmt>::trusted_views; })
-               return ::psio::view<T, Fmt, storage::trusted_borrow>{trusted{self().bytes()}};
+            using VF = buffer_view_format_t<Fmt, T>;
+            if constexpr (requires { requires view_layout::traits<VF>::trusted_views; })
+               return ::psio::view<T, VF, storage::trusted_borrow>{trusted{self().bytes()}};
             else
-               return ::psio::view<T, Fmt, storage::const_borrow>{self().bytes()};
+               return ::psio::view<T, VF, storage::const_borrow>{self().bytes()};
          }
          [[nodiscard]] auto get() const noexcept { return view(); }
          [[nodiscard]] auto operator*() const noexcept { return view(); }

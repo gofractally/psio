@@ -51,9 +51,41 @@ namespace psio {
    // of the view of such a member and of what it holds. Views name it; it is
    // not a codec tag. A position whose annotations change no width is viewed
    // as plain `psio::pssz`.
+   //
+   // It also carries what `psio::buffer<T, pssz_at<A>>` needs to hold such a
+   // value packed (encode, validate, decode with the widths, bounds and
+   // order specs of A), so the buffer of a view's format can be unpacked.
+   // For a method's result use `psio::method_result_buffer<T, I>` /
+   // `psio::shared_method_result<T, I>` (below), which also know what
+   // returns(...) states when it narrows nothing.
    template <typename A>
    struct pssz_at
    {
+      template <typename T>
+      [[nodiscard]] static codec_status encode_checked(const T& value, std::vector<char>& out)
+      {
+         return detail::pssz_impl::encode_at<T, A>(value, out, A::value,
+                                                   "pssz: member length_bound violated");
+      }
+      template <typename T>
+      [[nodiscard]] static std::vector<char> encode(const T& value)
+      {
+         std::vector<char> out;
+         if (auto status = encode_checked(value, out); !status.ok())
+            ::psio::codec_abort(status.error());
+         return out;
+      }
+      template <typename T>
+      [[nodiscard]] static codec_status validate(std::span<const char> bytes) noexcept
+      {
+         return detail::pssz_impl::validate_at<T, A>(bytes, A::value,
+                                                     "pssz: member length_bound violated");
+      }
+      template <typename T>
+      [[nodiscard]] static T decode(std::span<const char> bytes)
+      {
+         return detail::pssz_impl::decode_at<T, A>(bytes);
+      }
    };
 }  // namespace psio
 
@@ -1492,6 +1524,9 @@ namespace psio {
    template <typename T, std::size_t I>
    using method_args_view =
       view<typename reflect<T>::template method_arg_tuple<I>, pssz, storage::const_borrow>;
+   template <typename T, std::size_t I>
+   using method_args_trusted_view =
+      view<typename reflect<T>::template method_arg_tuple<I>, pssz, storage::trusted_borrow>;
 
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status validate_method_args(std::span<const char> bytes) noexcept
@@ -1618,6 +1653,71 @@ namespace psio {
    template <typename T, std::size_t I>
    using method_result_trusted_view =
       view<method_result_t<T, I>, detail::method_result_format<T, I>, storage::trusted_borrow>;
+
+   // ── A result held packed ──────────────────────────────────────────────
+   //
+   // The counterpart of `psio::pssz_buffer<X>` / `psio::shared_pssz<X>` for
+   // the result of method I of T (buffer.hpp, docs/helpers.md "Packed
+   // values"): bytes that ARE a result of the method, owned or shared.
+   //
+   //   method_result_buffer<T, I>    owning
+   //   shared_method_result<T, I>    reference-counted, immutable
+   //
+   //   B{value} / B::from(value)     psio::method_result_to_pssz
+   //   B{bytes} / B::checked(...)    psio::validate_method_result
+   //   b.view() / *b / b->           psio::method_result_trusted_view<T, I>
+   //   psio::as_view(b)              psio::method_result_view<T, I>
+   //   b.unpack()                    psio::method_result_from_pssz(trusted)
+   //   b.decode_checked(out)         psio::decode_method_result
+   //
+   // `pssz_method_result<T, I>` is the buffer's format tag: the codec of
+   // the result as returns(...) types it. It is always this tag — also for
+   // a method whose returns(...) changes no byte — so that what the buffer
+   // validates is the method's result and not merely its return type.
+   template <typename T, std::size_t I>
+   struct pssz_method_result
+   {
+      using result_type = method_result_t<T, I>;
+      template <typename R>
+      using view_format = detail::method_result_format<T, I>;
+
+      template <std::same_as<result_type> R>
+      [[nodiscard]] static codec_status encode_checked(const R& value, std::vector<char>& out)
+      {
+         return ::psio::encode_method_result<T, I>(value, out);
+      }
+      template <std::same_as<result_type> R>
+      [[nodiscard]] static std::vector<char> encode(const R& value)
+      {
+         return ::psio::method_result_to_pssz<T, I>(value);
+      }
+      template <std::same_as<result_type> R>
+      [[nodiscard]] static codec_status validate(std::span<const char> bytes) noexcept
+      {
+         return ::psio::validate_method_result<T, I>(bytes);
+      }
+      template <std::same_as<result_type> R>
+      [[nodiscard]] static R decode(std::span<const char> bytes)
+      {
+         return ::psio::method_result_from_pssz<T, I>(trusted{bytes});
+      }
+   };
+   template <typename T, std::size_t I>
+   using method_result_buffer =
+      buffer<method_result_t<T, I>, pssz_method_result<T, I>, storage::owning>;
+   template <typename T, std::size_t I>
+   using shared_method_result =
+      buffer<method_result_t<T, I>, pssz_method_result<T, I>, storage::shared>;
+
+   // The same for the arguments: these ARE `psio::pssz_buffer` /
+   // `psio::shared_pssz` of the argument tuple, whose type carries the
+   // method's cap and parameter annotations.
+   template <typename T, std::size_t I>
+   using method_args_buffer =
+      buffer<typename reflect<T>::template method_arg_tuple<I>, pssz, storage::owning>;
+   template <typename T, std::size_t I>
+   using shared_method_args =
+      buffer<typename reflect<T>::template method_arg_tuple<I>, pssz, storage::shared>;
 
    template <typename T, std::size_t I>
    [[nodiscard]] checked_view<method_result_t<T, I>, detail::method_result_format<T, I>>

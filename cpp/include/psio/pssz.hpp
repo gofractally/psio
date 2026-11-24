@@ -222,7 +222,13 @@ namespace psio {
       template <std::size_t W, bool Auto, typename T, typename A>
       codec_status assoc_validate(std::span<const char> src, std::size_t pos, std::size_t end,
                                   std::size_t depth, validate_flags* flags) noexcept;
-      template <typename Old, typename New>
+      // The pairs of reflected types a layout comparison is in the middle
+      // of (layout_evolves below): what lets it compare recursive types.
+      template <typename... Pairs>
+      struct evolve_seen
+      {
+      };
+      template <typename Old, typename New, typename Seen>
       consteval bool assoc_evolves() noexcept;
       template <std::size_t W, bool Auto, typename T, typename A>
       codec_status exact_assoc_distinct(std::span<const char> src, std::size_t pos,
@@ -449,6 +455,14 @@ namespace psio {
       inline constexpr bool is_c_string_v =
          std::is_same_v<S, const char*> || std::is_same_v<S, char*> ||
          (std::is_array_v<S> && std::is_same_v<std::remove_extent_t<S>, char>);
+
+      // A value that stands for its own packed bytes (psio::nested_of,
+      // psio::packed, psio::method_args_packed: "Packing in place" below):
+      // the member it is written as is a nested value or a byte list, and
+      // its content is the automatic-profile encoding of `v.source()` as
+      // `S::psio_in_place_type`, written straight into the enclosing value.
+      template <typename S>
+      concept in_place_source = requires { typename S::psio_in_place_type; };
 
       // A view given as a value: validated bytes of a T in the view's
       // format.
@@ -1069,6 +1083,24 @@ namespace psio {
             return codec_fail("pssz: max depth exceeded", 0, "pssz");
          if constexpr (is_ref_wrapper_v<S>)
             return check_encode_as<T>(value.get(), depth, bounds);
+         else if constexpr (in_place_source<S>)
+         {
+            // The value is encoded here, so it is checked here, in full —
+            // what psio::nested<X>::from(value) / psio::to_pssz(value)
+            // check when the bytes are made first. A nested member is a
+            // node at `depth` and the inner root the node below it
+            // (nested_impl::pssz_check_encode); a byte list is a leaf, and
+            // what it holds is a value of its own.
+            if constexpr (S::psio_in_place_descends)
+            {
+               if (depth + 1 > kMaxValidationDepth)
+                  return codec_fail("pssz: max depth exceeded", 0, "pssz");
+               return check_encode_as<typename S::psio_in_place_type>(value.source(), depth + 1,
+                                                                      {});
+            }
+            else
+               return check_encode_as<typename S::psio_in_place_type>(value.source(), 0, {});
+         }
          else if constexpr (view_source<S> || is_c_string_v<S>)
             // A view is over validated bytes; a C string is its characters.
             return codec_ok();
@@ -1351,12 +1383,21 @@ namespace psio {
                 typename P = std::nullptr_t>
       std::size_t size_of_v(const T& v, P check = nullptr);
 
+      template <std::size_t LegacyW, bool Auto, typename T, typename A, typename P, typename S>
+      std::size_t size_of_as(const S& value, P check);
+      template <std::size_t LegacyW, bool Auto, typename T, typename Sink, typename A, typename S>
+      void encode_as(const S& v, Sink& s);
+
       // T: the wire type; v: a source of it (see "Sources").
       template <std::size_t W, bool Auto, typename T, typename A, typename P, typename S>
       std::size_t size_of_v_impl(const S& v, P check)
       {
          if constexpr (is_ref_wrapper_v<S>)
             return size_of_v_impl<W, Auto, T, A, P>(v.get(), check);
+         else if constexpr (in_place_source<S>)
+            // The inner value: always the automatic profile, standing alone.
+            return size_of_as<0, true, typename S::psio_in_place_type, no_ann, P>(v.source(),
+                                                                                 check);
          else if constexpr (is_c_string_v<S>)
             return ::psio::detail::c_string_view(v).size();
          else if constexpr (view_source<S>)
@@ -1631,6 +1672,13 @@ namespace psio {
          if constexpr (is_ref_wrapper_v<S>)
          {
             encode_value_impl<W, Auto, T, Sink, A>(v.get(), s);
+            return;
+         }
+         else if constexpr (in_place_source<S>)
+         {
+            // Straight into the enclosing value's buffer: every offset the
+            // inner value writes is relative to a position inside it.
+            encode_as<0, true, typename S::psio_in_place_type, Sink, no_ann>(v.source(), s);
             return;
          }
          else if constexpr (is_c_string_v<S>)
@@ -4089,7 +4137,33 @@ namespace psio {
    //   static_assert(psio::pssz_evolves_from<AccountV1, AccountV2>);
    namespace detail::pssz_impl
    {
+      // `Seen`: the pairs of reflected types whose comparison is under way
+      // on the path to this one. A type may contain itself (a record that
+      // holds a list of itself, directly or through a variant of records
+      // that hold it); the comparison of such a pair comes back to the pair,
+      // and the answer there is "as far as the rest goes": the layouts
+      // agree unless a member compared elsewhere on the way says otherwise.
+      // (Asking the function for its own value while it is being evaluated
+      // is not a constant expression, hence the list rather than plain
+      // recursion; each revisit is a distinct specialization.)
       template <typename Old, typename New>
+      struct evolve_pair
+      {
+      };
+      template <typename Seen, typename Old, typename New>
+      inline constexpr bool evolve_seen_v = false;
+      template <typename... Ps, typename Old, typename New>
+      inline constexpr bool evolve_seen_v<evolve_seen<Ps...>, Old, New> =
+         (std::is_same_v<Ps, evolve_pair<Old, New>> || ...);
+      template <typename Seen, typename Old, typename New>
+      struct evolve_push;
+      template <typename... Ps, typename Old, typename New>
+      struct evolve_push<evolve_seen<Ps...>, Old, New>
+      {
+         using type = evolve_seen<Ps..., evolve_pair<Old, New>>;
+      };
+
+      template <typename Old, typename New, typename Seen = evolve_seen<>>
       consteval bool layout_evolves() noexcept;
 
       template <typename T, typename A>
@@ -4307,7 +4381,7 @@ namespace psio {
          return true;
       }
 
-      template <Record Old, Record New>
+      template <Record Old, Record New, typename Seen>
       consteval bool record_evolves() noexcept
       {
          using RO = record_traits<Old>;
@@ -4332,7 +4406,7 @@ namespace psio {
                             ? std::is_same_v<typename RO::template member_type<Is>,
                                              typename RN::template member_type<Is>>
                             : (layout_evolves<typename RO::template member_type<Is>,
-                                              typename RN::template member_type<Is>>() &&
+                                              typename RN::template member_type<Is>, Seen>() &&
                                member_annotations_evolve<Old, New, Is>()))) &&
                        ...);
             }(std::make_index_sequence<NO>{});
@@ -4343,11 +4417,27 @@ namespace psio {
          }
       }
 
-      template <typename Old, typename New>
+      // What the comparisons below a reflected type are made under: the
+      // pair itself joins the list.
+      template <typename Old, typename New, typename Seen>
+      struct evolve_below
+      {
+         using type = Seen;
+      };
+      template <typename Old, typename New, typename Seen>
+         requires(::psio::Reflected<Old> && ::psio::Reflected<New>)
+      struct evolve_below<Old, New, Seen> : evolve_push<Seen, Old, New>
+      {
+      };
+
+      template <typename Old, typename New, typename Seen>
       consteval bool layout_evolves() noexcept
       {
+         using Below = typename evolve_below<Old, New, Seen>::type;
          if constexpr (std::is_same_v<Old, New>)
             return true;
+         else if constexpr (evolve_seen_v<Seen, Old, New>)
+            return true;   // a recursive type, back at itself
          else if constexpr (::psio::is_transparent_v<Old> || ::psio::is_transparent_v<New>)
          {
             // A transparent type keeps its identity: it evolves only from a
@@ -4357,7 +4447,7 @@ namespace psio {
                // the type: member_annotations_evolve's rules).
                return ::psio::reflect<Old>::name == ::psio::reflect<New>::name &&
                       layout_evolves<::psio::transparent_inner_t<Old>,
-                                     ::psio::transparent_inner_t<New>>() &&
+                                     ::psio::transparent_inner_t<New>, Below>() &&
                       annotation_widths_agree<::psio::transparent_inner_t<Old>,
                                               ann::transparent_ann<Old, no_ann>,
                                               ::psio::transparent_inner_t<New>,
@@ -4396,7 +4486,7 @@ namespace psio {
             else
                return []<std::size_t... Is>(std::index_sequence<Is...>) {
                   return (layout_evolves<std::variant_alternative_t<Is, Old>,
-                                         std::variant_alternative_t<Is, New>>() &&
+                                         std::variant_alternative_t<Is, New>, Below>() &&
                           ...);
                }(std::make_index_sequence<std::variant_size_v<Old>>{});
          }
@@ -4405,27 +4495,27 @@ namespace psio {
             return false;
          else if constexpr (is_psio_box_v<Old> && is_psio_box_v<New>)
             return layout_evolves<typename is_psio_box<Old>::elem,
-                                  typename is_psio_box<New>::elem>();
+                                  typename is_psio_box<New>::elem, Below>();
          else if constexpr (is_nested_v<Old> && is_nested_v<New>)
             return layout_evolves<typename is_nested<Old>::inner,
-                                  typename is_nested<New>::inner>();
+                                  typename is_nested<New>::inner, Below>();
          else if constexpr (is_assoc_v<Old> || is_assoc_v<New>)
-            return assoc_evolves<Old, New>();
+            return assoc_evolves<Old, New, Below>();
          else if constexpr (is_std_optional_v<Old> && is_std_optional_v<New>)
             return optional_uses_selector_v<typename Old::value_type> ==
                       optional_uses_selector_v<typename New::value_type> &&
-                   layout_evolves<typename Old::value_type, typename New::value_type>();
+                   layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          else if constexpr (is_std_vector_v<Old> && is_std_vector_v<New>)
-            return layout_evolves<typename Old::value_type, typename New::value_type>();
+            return layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          else if constexpr (is_std_array_v<Old> && is_std_array_v<New>)
          {
             if constexpr (std::tuple_size_v<Old> != std::tuple_size_v<New>)
                return false;
             else
-               return layout_evolves<typename Old::value_type, typename New::value_type>();
+               return layout_evolves<typename Old::value_type, typename New::value_type, Below>();
          }
          else if constexpr (Record<Old> && Record<New>)
-            return record_evolves<Old, New>();
+            return record_evolves<Old, New, Below>();
          else
             return false;
       }
@@ -4987,6 +5077,108 @@ namespace psio {
          encode_value<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
          return out;
       }
+
+      // ── A value at an annotated position, standing alone ───────────────
+      //
+      // The codec of an R whose position carries A (a method's result under
+      // returns(...)): the widths A selects, and the value checks `specs`
+      // states — A's own tuple before normalisation, so that an order spec
+      // standing alone (`returns(sorted)`, which changes no byte and leaves
+      // A empty) is still checked. One implementation for the writer, the
+      // validator and the checked decode, so that they accept the same set.
+
+      // Whether `specs` asks for a check that only the materialised value
+      // can answer (sorted / unique / unique_keys, at the position or below
+      // it): the rule validate_shape applies to a record member.
+      template <typename R, typename Specs>
+      inline constexpr bool order_checked_at_v =
+         ann::has_order_specs_deep_v<Specs> && ann::has_value_checks_v<R, Specs>;
+
+      template <typename R, typename A, typename S, typename Specs>
+      [[nodiscard]] codec_status encode_at(const S& value, std::vector<char>& out,
+                                           const Specs& specs, const char* length_message)
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         if (auto status = check_encode_as<R>(value, 0, {}); !status.ok())
+            return status;
+         if (auto status = ann::check_value(checkable(value), specs, length_message, "pssz");
+             !status.ok())
+            return status;
+         size_check        check;
+         const std::size_t total = size_of_as<W, true, R, A, size_check*>(value, &check);
+         enforce_max_dynamic<R>(total, &check);
+         if (check.failure)
+            return codec_fail(check.failure, 0, "pssz");
+         if (total > std::numeric_limits<std::size_t>::max() - out.size())
+            return codec_fail("pssz: encoded size overflow", 0, "pssz");
+         const std::size_t start = out.size();
+         out.resize(start + total);
+         ::psio::fast_buf_stream sink(out.data() + start, total);
+         encode_as<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
+         return codec_ok();
+      }
+
+      // The structure, bounds, utf8 and invariants: everything the bytes
+      // answer in place.
+      template <typename R, typename A>
+      [[nodiscard]] codec_status validate_shape_at(std::span<const char> bytes) noexcept
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         if (auto cap = check_max_dynamic<R>(bytes); !cap.ok())
+            return cap;
+         validate_flags flags;
+         return validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+      }
+      template <typename R, typename A>
+      [[nodiscard]] R decode_at(std::span<const char> bytes)
+      {
+         constexpr std::size_t W = width_for<R, A>();
+         R                     out{};
+         decode_into<W, true, R, A>(bytes, 0, bytes.size(), out);
+         return out;
+      }
+      // Everything a checking reader refuses. The order specs compare whole
+      // elements, so they are checked on the value materialised from the
+      // accepted bytes, as for a record member (validate_shape).
+      template <typename R, typename A, typename Specs>
+      [[nodiscard]] codec_status validate_at(std::span<const char> bytes, const Specs& specs,
+                                             const char* length_message) noexcept
+      {
+         auto status = validate_shape_at<R, A>(bytes);
+         if constexpr (order_checked_at_v<R, Specs>)
+            if (status.ok())
+               status = ann::check_value(decode_at<R, A>(bytes), specs, length_message, "pssz");
+         return status;
+      }
+      // validate_at, then the value: one decode whatever `specs` holds.
+      template <typename R, typename A, typename Specs>
+      [[nodiscard]] codec_status decode_checked_at(std::span<const char> bytes, R& out,
+                                                   const Specs& specs,
+                                                   const char*  length_message)
+      {
+         if (auto status = validate_shape_at<R, A>(bytes); !status.ok())
+            return status;
+         R value = decode_at<R, A>(bytes);
+         if constexpr (order_checked_at_v<R, Specs>)
+            if (auto status = ann::check_value(value, specs, length_message, "pssz");
+                !status.ok())
+               return status;
+         out = std::move(value);
+         return codec_ok();
+      }
+
+      inline constexpr const char* method_result_length_message =
+         "psio: return value length_bound violated";
+      // The compile-time checks of returns(...) (check_method_result's).
+      template <typename T, std::size_t I, typename R>
+      constexpr void method_result_specs_ok()
+      {
+         static_assert(ann::tree_ok<R, ::psio::detail::method_result_holder<T, I>>(),
+                       "psio: a returns(...) annotation does not fit the method's return type");
+         static_assert(::psio::detail::length_bounds_consistent(
+                          ::psio::method_result_annotations<T, I>),
+                       PSIO_LENGTH_BOUND_CONFLICT_MSG);
+      }
    }  // namespace detail::pssz_impl
 
    // Appends the encoding of the result of method I of T, or says why the
@@ -4999,24 +5191,9 @@ namespace psio {
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
-      using A      = pz::method_result_ann<T, I>;
-      constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto status = pz::check_encode_as<R>(value, 0, {}); !status.ok())
-         return status;
-      if (auto status = ::psio::check_method_result<T, I>(pz::checkable(value), "pssz");
-          !status.ok())
-         return status;
-      pz::size_check    check;
-      const std::size_t total =
-         pz::size_of_as<W, true, R, A, pz::size_check*>(value, &check);
-      pz::enforce_max_dynamic<R>(total, &check);
-      if (check.failure)
-         return codec_fail(check.failure, 0, "pssz");
-      const std::size_t start = out.size();
-      out.resize(start + total);
-      ::psio::fast_buf_stream sink(out.data() + start, total);
-      pz::encode_as<W, true, R, ::psio::fast_buf_stream, A>(value, sink);
-      return codec_ok();
+      pz::method_result_specs_ok<T, I, R>();
+      return pz::encode_at<R, pz::method_result_ann<T, I>>(
+         value, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
    }
 
    // ── Encoding a source AS a type ───────────────────────────────────────
@@ -5144,6 +5321,130 @@ namespace psio {
                                                                                     nullptr);
    }
 
+   // ── Packing in place ──────────────────────────────────────────────────
+   //
+   // A member that is "the packed bytes of a value" — a psio::nested<X>, a
+   // psio::shared_pssz<X>, or a plain byte list (std::vector<char>) that
+   // holds an encoding, as the arguments inside an action do — can be
+   // written from bytes that already exist, or from the VALUE: the encoder
+   // sizes a value before it writes the first byte, so the inner value is
+   // written straight into the buffer of the enclosing one. No inner buffer
+   // is made, however deep the layers go.
+   //
+   //   nested_of(value)             a source of psio::nested<X>: the member
+   //   nested_as<X>(source)         is validated as an X by readers
+   //   packed(value)                a source of std::vector<char>: a byte
+   //   packed_as<X>(source)         list whose content is to_pssz(value)
+   //   method_args_nested<T, I>(args...)   the same for the argument tuple
+   //   method_args_packed<T, I>(args...)   of method I of T, from the
+   //                                       arguments as a call takes them
+   //                                       (method_args_to_pssz)
+   //
+   // They are sources (wire_type.hpp), like a std::string_view for a
+   // std::string: a record that declares such a member packs as
+   // (psio::packs_as) the record with the owning member, is accepted as a
+   // method argument for it, and writes exactly the bytes of the two-step
+   // form — to_pssz(Outer{nested<X>::from(x)}) == to_pssz(OuterRef{nested_of(x)}).
+   // `X` is the wire type of the value (psio::wire_type_t), or the type
+   // named with `_as` (a method's argument tuple, which a source cannot
+   // spell).
+   //
+   // An lvalue is referred to, not copied, and must outlive the encode; an
+   // rvalue is moved into the source, so the layers can be built in one
+   // expression and returned from a function:
+   //
+   //   psio::to_pssz(CallRef{id, psio::nested_of(ActionRef{sender, psio::packed(args)})});
+   //
+   // The value is checked where it is encoded — its bounds, invariants and
+   // caps, as psio::nested<X>::from(value) checks them — so a value with no
+   // encoding fails the enclosing encode, before anything is written.
+   namespace detail::pssz_impl
+   {
+      // What an in-place source holds: a reference to an lvalue, the value
+      // of an rvalue.
+      template <typename V>
+      using in_place_held_t =
+         std::conditional_t<std::is_lvalue_reference_v<V>, const std::remove_cvref_t<V>&,
+                            std::remove_cvref_t<V>>;
+
+      template <typename X, typename Held>
+      class in_place
+      {
+         Held held_;
+
+       public:
+         using source_type = std::remove_cvref_t<Held>;
+         static_assert(source_of_v<X, source_type>,
+                       "psio: the value is not a source of the type it is packed as "
+                       "(psio::pssz_source_of<Source, X>)");
+         // The type the walk lays the source out as (to_pssz_as).
+         using psio_in_place_type = encode_as_t<X, source_type>;
+         using value_type         = X;
+
+         template <typename V>
+            requires std::constructible_from<Held, V&&>
+         constexpr explicit in_place(V&& value) : held_(std::forward<V>(value))
+         {
+         }
+         [[nodiscard]] constexpr const source_type& source() const noexcept { return held_; }
+         // The number of bytes it writes: the size of the encoding.
+         [[nodiscard]] std::size_t size() const { return pssz_size_as<X>(held_); }
+      };
+   }  // namespace detail::pssz_impl
+
+   // A source of psio::nested<X>: the value, written in place.
+   template <typename X, typename Held = const X&>
+   class nested_ref : public detail::pssz_impl::in_place<X, Held>
+   {
+    public:
+      static constexpr bool psio_in_place_descends = true;
+      using detail::pssz_impl::in_place<X, Held>::in_place;
+   };
+   // A source of a byte list (std::vector<char>) that holds the encoding of
+   // an X: the value, written in place.
+   template <typename X, typename Held = const X&>
+   class packed_ref : public detail::pssz_impl::in_place<X, Held>
+   {
+    public:
+      static constexpr bool psio_in_place_descends = false;
+      using detail::pssz_impl::in_place<X, Held>::in_place;
+   };
+   template <typename X, typename Held>
+   struct wire_type<nested_ref<X, Held>>
+   {
+      using type = nested<X>;
+   };
+   template <typename X, typename Held>
+   struct wire_type<packed_ref<X, Held>>
+   {
+      using type = std::vector<char>;
+   };
+
+   template <typename V>
+   [[nodiscard]] constexpr auto nested_of(V&& value)
+   {
+      return nested_ref<wire_type_t<V>, detail::pssz_impl::in_place_held_t<V>>{
+         std::forward<V>(value)};
+   }
+   template <typename X, typename V>
+      requires pssz_source_of<V, X>
+   [[nodiscard]] constexpr auto nested_as(V&& value)
+   {
+      return nested_ref<X, detail::pssz_impl::in_place_held_t<V>>{std::forward<V>(value)};
+   }
+   template <typename V>
+   [[nodiscard]] constexpr auto packed(V&& value)
+   {
+      return packed_ref<wire_type_t<V>, detail::pssz_impl::in_place_held_t<V>>{
+         std::forward<V>(value)};
+   }
+   template <typename X, typename V>
+      requires pssz_source_of<V, X>
+   [[nodiscard]] constexpr auto packed_as(V&& value)
+   {
+      return packed_ref<X, detail::pssz_impl::in_place_held_t<V>>{std::forward<V>(value)};
+   }
+
    // Whether `args...` can be passed to method I of T: as many as the
    // method takes, each a source of its parameter or implicitly convertible
    // to it — what an ordinary call `obj.method(args...)` accepts.
@@ -5185,14 +5486,87 @@ namespace psio {
       return out;
    }
 
+   // The arguments of a call as a member written in place ("Packing in
+   // place" above): what method_args_to_pssz<T, I>(args...) returns as
+   // bytes, as a source of those bytes — of a std::vector<char>
+   // (method_args_packed) or of a psio::nested<method_arg_tuple<I>>
+   // (method_args_nested). Arguments are taken as method_args_to_pssz takes
+   // them; an lvalue that is written as it stands is referred to, anything
+   // else (an rvalue, a converted argument) is held.
+   namespace detail::pssz_impl
+   {
+      template <typename P, typename Arg>
+      using arg_held_t =
+         std::conditional_t<arg_is_source_v<P, Arg>, in_place_held_t<Arg>, P>;
+      // The element: the argument itself (referred to, or moved in), or
+      // the parameter copy-initialized from it — never an explicit
+      // conversion (arg_source).
+      template <typename P, typename Arg>
+      constexpr arg_held_t<P, Arg> arg_held(Arg&& arg)
+      {
+         if constexpr (arg_is_source_v<P, Arg> && std::is_lvalue_reference_v<Arg>)
+            return arg;
+         else
+            return std::forward<Arg>(arg);
+      }
+      template <typename T, std::size_t I, typename... Args>
+      struct method_args_held
+      {
+         using Tuple = typename reflect<T>::template method_arg_tuple<I>;
+         static_assert(sizeof...(Args) >= std::tuple_size_v<Tuple>,
+                       "psio::method_args_packed: too few arguments passed to the method");
+         static_assert(sizeof...(Args) <= std::tuple_size_v<Tuple>,
+                       "psio::method_args_packed: too many arguments passed to the method");
+         template <typename Seq>
+         struct with;
+         template <std::size_t... Ns>
+         struct with<std::index_sequence<Ns...>>
+         {
+            static_assert(
+               (method_argument_for<std::tuple_element_t<Ns, Tuple>, Args> && ... && true),
+               "psio::method_args_packed: an argument is neither a source of its parameter's "
+               "type nor implicitly convertible to it (see psio::method_args_to_pssz)");
+            using type = std::tuple<arg_held_t<std::tuple_element_t<Ns, Tuple>, Args>...>;
+         };
+         using type = typename with<std::index_sequence_for<Args...>>::type;
+      };
+   }  // namespace detail::pssz_impl
+
+   template <typename T, std::size_t I, typename... Args>
+   [[nodiscard]] constexpr auto method_args_packed(Args&&... args)
+   {
+      using Tuple = typename reflect<T>::template method_arg_tuple<I>;
+      using Held  = typename detail::pssz_impl::method_args_held<T, I, Args...>::type;
+      return [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         return packed_ref<Tuple, Held>{
+            Held{detail::pssz_impl::arg_held<std::tuple_element_t<Ns, Tuple>, Args>(
+               std::forward<Args>(args))...}};
+      }(std::index_sequence_for<Args...>{});
+   }
+   template <typename T, std::size_t I, typename... Args>
+   [[nodiscard]] constexpr auto method_args_nested(Args&&... args)
+   {
+      using Tuple = typename reflect<T>::template method_arg_tuple<I>;
+      using Held  = typename detail::pssz_impl::method_args_held<T, I, Args...>::type;
+      return [&]<std::size_t... Ns>(std::index_sequence<Ns...>) {
+         return nested_ref<Tuple, Held>{
+            Held{detail::pssz_impl::arg_held<std::tuple_element_t<Ns, Tuple>, Args>(
+               std::forward<Args>(args))...}};
+      }(std::index_sequence_for<Args...>{});
+   }
+
    // The type the result of method I of T is encoded as: X for a method
    // that returns a psio::pssz_view<X> (wire_type.hpp); void for a method
    // that returns nothing.
    template <typename T, std::size_t I>
    using method_result_t = detail::pssz_impl::method_result_t<T, I>;
 
-   // Checks `bytes` as the result of method I of T. A method that returns
-   // nothing has no result bytes: only the empty span is its result.
+   // Checks `bytes` as the result of method I of T: everything
+   // decode_method_result / method_result_from_pssz refuse, the
+   // `sorted` / `unique` / `unique_keys` of returns(...) included — bytes
+   // this accepts may be read through a view, or decoded as trusted. A
+   // method that returns nothing has no result bytes: only the empty span
+   // is its result.
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status validate_method_result(std::span<const char> bytes) noexcept
    {
@@ -5204,31 +5578,23 @@ namespace psio {
                                            "pssz");
       else
       {
-         using A                 = pz::method_result_ann<T, I>;
-         constexpr std::size_t W = pz::method_result_width_v<T, I>;
-         if (auto cap = pz::check_max_dynamic<R>(bytes); !cap.ok())
-            return cap;
-         pz::validate_flags flags;
-         return pz::validate_value<W, true, R, A>(bytes, 0, bytes.size(), 0, &flags);
+         pz::method_result_specs_ok<T, I, R>();
+         return pz::validate_at<R, pz::method_result_ann<T, I>>(
+            bytes, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
       }
    }
 
-   // Validates and decodes the result of method I of T.
+   // Validates and decodes the result of method I of T. It accepts exactly
+   // what validate_method_result accepts; `out` is unchanged otherwise.
    template <typename T, std::size_t I>
    [[nodiscard]] codec_status decode_method_result(std::span<const char> bytes,
                                                    detail::pssz_impl::method_result_t<T, I>& out)
    {
       namespace pz = detail::pssz_impl;
       using R      = pz::method_result_t<T, I>;
-      using A      = pz::method_result_ann<T, I>;
-      constexpr std::size_t W = pz::method_result_width_v<T, I>;
-      if (auto status = validate_method_result<T, I>(bytes); !status.ok())
-         return status;
-      out = R{};
-      pz::decode_into<W, true, R, A>(bytes, 0, bytes.size(), out);
-      // sorted / unique in returns(...) compare whole elements: checked on
-      // the value, like a record member's.
-      return ::psio::check_method_result<T, I>(out, "pssz");
+      pz::method_result_specs_ok<T, I, R>();
+      return pz::decode_checked_at<R, pz::method_result_ann<T, I>>(
+         bytes, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
    }
 
    // ── A result in one call ──────────────────────────────────────────────
@@ -5284,11 +5650,7 @@ namespace psio {
       using R      = pz::method_result_t<T, I>;
       if constexpr (!std::is_void_v<R>)
       {
-         using A                 = pz::method_result_ann<T, I>;
-         constexpr std::size_t W = pz::method_result_width_v<T, I>;
-         R                     out{};
-         pz::decode_into<W, true, R, A>(bytes.bytes, 0, bytes.bytes.size(), out);
-         return out;
+         return pz::decode_at<R, pz::method_result_ann<T, I>>(bytes.bytes);
       }
    }
    template <typename T, std::size_t I>
