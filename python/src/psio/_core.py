@@ -397,6 +397,10 @@ def _check_attributes(values: Sequence[Mapping[str, Any]], site: str, caps: bool
             if name != "lengthBound" and value not in ("number", "string"):
                 _schema("pssz IR: malformed integer form attribute")
             continue
+        # What the numbered formats (protobuf, Cap'n Proto, FlatBuffers) read of a member: its field
+        # number, a scalar's default, that it is retired.  None of them is in a PSSZ byte or in the text.
+        if site == "record_member" and name in ("field", "default", "deprecated"):
+            continue
         # An untagged variant: the same bytes as any variant; in text the bare value of the alternative.
         if site == "variant" and name == "untagged":
             continue

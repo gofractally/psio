@@ -29,6 +29,10 @@
 //                                      record; explicit: the top-level type)
 //   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //           jsonInt / ijsonInt = "number" | "string"   (pssz_ir_json.hpp)
+//           field = "N", default = "text", deprecated   accepted and not
+//                                      read: what protobuf, Cap'n Proto and
+//                                      FlatBuffers need of a member
+//                                      (fbs_layout.hpp, capnp_layout.hpp)
 //   Variant member  (none: its name is the alternative's label, the key of
 //                   its tagged text form — variant_label.hpp)
 //   Variant  untagged                  text: the bare value of the alternative
@@ -307,6 +311,12 @@ inline codec_status attributes(const std::vector<schema_types::Attribute> &value
             return fail("pssz IR: malformed integer form attribute");
          continue;
       }
+      // What the numbered formats read (schema_builder.hpp; fbs_layout.hpp,
+      // capnp_layout.hpp): the member's field number, a retired member, a
+      // scalar's default. None of them is in a PSSZ byte or in the text.
+      if (site == attribute_site::record_member &&
+          (name == "field" || name == "default" || name == "deprecated"))
+         continue;
       // An untagged variant (untagged.hpp): the same bytes as any variant;
       // in text the bare value of the alternative (pssz_ir_json.hpp).
       if (site == attribute_site::variant && name == "untagged")

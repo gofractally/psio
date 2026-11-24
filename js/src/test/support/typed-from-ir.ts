@@ -390,6 +390,15 @@ export class TypedFixture implements TypeSource {
           const inherent = direct.type === 'Custom' && direct.value.id === 'utf8' &&
             direct.value.type.value.type === 'BoundedList' && a.value === `max=${direct.value.type.value.value.maxCount}`;
           if (!inherent) o.lengthBound = bound;
+        } else if (a.name === 'field') o.number = Number(a.value);
+        else if (a.name === 'deprecated') o.deprecated = a.value === '' ? true : a.value!;
+        else if (a.name === 'default') {
+          // The text back as the value a declaration states.
+          const scalar = this.resolved(m.type).value;
+          const floats: { [text: string]: number } = { nan: NaN, inf: Infinity, '-inf': -Infinity, '-0': -0 };
+          if (scalar.type === 'Custom' && scalar.value.id === 'bool') o.default = a.value === 'true';
+          else if (scalar.type === 'Float') o.default = floats[a.value!] ?? Number(a.value);
+          else o.default = BigInt(a.value!);
         } else return unsupported(`member attribute ${a.name}`);
       }
       fields[m.name] = Object.keys(o).length ? field(def, o) : def;

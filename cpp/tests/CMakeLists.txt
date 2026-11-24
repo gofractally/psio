@@ -900,6 +900,39 @@ if(CapnProto_FOUND)
    target_include_directories(psio_capnp_interop_tests PRIVATE ${PSIO_CAPNP_INTEROP_DIR})
    target_link_libraries(psio_capnp_interop_tests PRIVATE CapnProto::capnp)
    message(STATUS "psio_capnp_interop_tests: CapnProto found — enabled")
+
+   # Schemas against the official compiler: the layout psio computes from
+   # `.capnp` text (hand-written, emitted from reflected types, generated) is
+   # the one in the compiler's CodeGeneratorRequest; `capnp` is run by the
+   # test.
+   find_program(PSIO_CAPNP capnp)
+   get_target_property(PSIO_CAPNP_INCLUDES CapnProto::capnp INTERFACE_INCLUDE_DIRECTORIES)
+   list(GET PSIO_CAPNP_INCLUDES 0 PSIO_CAPNP_INCLUDE)
+   psio_add_test(psio_capnp_schema_tests capnp_schema_tests.cpp)
+   target_compile_definitions(psio_capnp_schema_tests PRIVATE
+      PSIO_CAPNP="${PSIO_CAPNP}"
+      PSIO_CAPNP_INCLUDE="${PSIO_CAPNP_INCLUDE}"
+      PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp")
+   target_link_libraries(psio_capnp_schema_tests PRIVATE CapnProto::capnp)
+
+   # The schema psio emits for the reflected types of capnp_shapes.hpp,
+   # compiled by `capnp compile`: messages are exchanged through it.
+   add_executable(psio_capnp_schema_emit capnp_schema_emit.cpp)
+   target_link_libraries(psio_capnp_schema_emit PRIVATE psio)
+   target_compile_features(psio_capnp_schema_emit PRIVATE cxx_std_23)
+   add_custom_command(
+      OUTPUT ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp.h
+             ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp.c++
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${PSIO_CAPNP_INTEROP_DIR}
+      COMMAND psio_capnp_schema_emit ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp
+      COMMAND ${PSIO_CAPNP} compile -I${PSIO_CAPNP_INCLUDE} -oc++:${PSIO_CAPNP_INTEROP_DIR}
+              --src-prefix=${PSIO_CAPNP_INTEROP_DIR} ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp
+      DEPENDS psio_capnp_schema_emit
+      COMMENT "capnp compile on psio::emit_capnp of tests/capnp_shapes.hpp")
+   psio_add_test(psio_capnp_schema_interop_tests capnp_schema_interop_tests.cpp
+      ${PSIO_CAPNP_INTEROP_DIR}/emitted.capnp.c++)
+   target_include_directories(psio_capnp_schema_interop_tests PRIVATE ${PSIO_CAPNP_INTEROP_DIR})
+   target_link_libraries(psio_capnp_schema_interop_tests PRIVATE CapnProto::capnp CapnProto::capnp-json)
 else()
    message(STATUS "psio_capnp_interop_tests: CapnProto not found — skipping")
 endif()
@@ -932,6 +965,23 @@ else()
    message(STATUS "psio_flatbuf_fuzz_tests_sanitized: sanitizers do not link — skipping")
 endif()
 
+# The schema-text parsers (fbs_parser.hpp, capnp_parser.hpp) on arbitrary
+# text: every prefix and every byte of the test schemas, random edits, random
+# bytes, inputs built to exhaust a parser. Again with the sanitizers.
+psio_add_test(psio_schema_text_fuzz_tests schema_text_fuzz_tests.cpp)
+target_compile_definitions(psio_schema_text_fuzz_tests PRIVATE
+   PSIO_FLATBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf"
+   PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp")
+if(PSIO_HAVE_ASAN_UBSAN)
+   psio_add_test(psio_schema_text_fuzz_tests_sanitized schema_text_fuzz_tests.cpp)
+   target_compile_definitions(psio_schema_text_fuzz_tests_sanitized PRIVATE
+      PSIO_FLATBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf"
+      PSIO_CAPNP_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/capnp")
+   target_compile_options(psio_schema_text_fuzz_tests_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_schema_text_fuzz_tests_sanitized PRIVATE -fsanitize=address,undefined)
+endif()
+
 # Shared cross-language FlatBuffers fixture (conformance/flatbuf-vectors.json):
 # buffers of known values, and buffers a verifier must refuse.
 set(PSIO_FLATBUF_VECTORS ${CMAKE_SOURCE_DIR}/conformance/flatbuf-vectors.json)
@@ -961,6 +1011,33 @@ if(flatbuffers_FOUND AND PSIO_FLATC)
       PSIO_FLATBUF_INTEROP_FBS="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf/interop.fbs")
    target_link_libraries(psio_flatbuf_interop_tests PRIVATE flatbuffers::flatbuffers)
    message(STATUS "psio_flatbuf_interop_tests: flatbuffers found — enabled")
+
+   # Schemas against the official compiler: the layout psio computes from
+   # `.fbs` text (hand-written, emitted from reflected types, generated) is
+   # the one in flatc's binary schema; flatc is run by the test.
+   psio_add_test(psio_fbs_schema_tests fbs_schema_tests.cpp)
+   target_compile_definitions(psio_fbs_schema_tests PRIVATE
+      PSIO_FLATC="${PSIO_FLATC}"
+      PSIO_FLATBUF_SCHEMA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/flatbuf")
+   target_link_libraries(psio_fbs_schema_tests PRIVATE flatbuffers::flatbuffers)
+
+   # The schema psio emits for the reflected types of flatbuf_shapes.hpp,
+   # compiled by flatc: buffers are exchanged with the generated code.
+   add_executable(psio_fbs_schema_emit fbs_schema_emit.cpp)
+   target_link_libraries(psio_fbs_schema_emit PRIVATE psio)
+   target_compile_features(psio_fbs_schema_emit PRIVATE cxx_std_23)
+   add_custom_command(
+      OUTPUT ${PSIO_FLATBUF_INTEROP_DIR}/emitted.fbs ${PSIO_FLATBUF_INTEROP_DIR}/emitted_generated.h
+      COMMAND ${CMAKE_COMMAND} -E make_directory ${PSIO_FLATBUF_INTEROP_DIR}
+      COMMAND psio_fbs_schema_emit ${PSIO_FLATBUF_INTEROP_DIR}/emitted.fbs
+      COMMAND ${PSIO_FLATC} --cpp --gen-object-api --gen-mutable --scoped-enums
+              -o ${PSIO_FLATBUF_INTEROP_DIR} ${PSIO_FLATBUF_INTEROP_DIR}/emitted.fbs
+      DEPENDS psio_fbs_schema_emit
+      COMMENT "flatc on psio::emit_fbs of tests/flatbuf_shapes.hpp")
+   psio_add_test(psio_flatbuf_schema_interop_tests flatbuf_schema_interop_tests.cpp
+      ${PSIO_FLATBUF_INTEROP_DIR}/emitted_generated.h)
+   target_include_directories(psio_flatbuf_schema_interop_tests PRIVATE ${PSIO_FLATBUF_INTEROP_DIR})
+   target_link_libraries(psio_flatbuf_schema_interop_tests PRIVATE flatbuffers::flatbuffers)
 else()
    message(STATUS "psio_flatbuf_interop_tests: flatbuffers / flatc not found — skipping")
 endif()

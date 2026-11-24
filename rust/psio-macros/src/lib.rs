@@ -58,6 +58,10 @@ pub fn derive_pssz_unpack(input: TokenStream) -> TokenStream { pssz_macro::deriv
 /// attributes `jsonInt` / `ijsonInt`. A variant's `#[psio(name = "...")]` is
 /// its enumerator name, or its label when it is an alternative (the name of
 /// the alternative in the schema and the key of its tagged text form).
+/// A member's `#[psio(field = N)]`, `#[psio(deprecated)]` and
+/// `#[psio(default = value)]` become its attributes `field`, `deprecated` and
+/// `default` (a scalar's text; nothing for zero), in that order after the
+/// others: what the numbered formats read of a member.
 #[proc_macro_derive(ToPsszSchema, attributes(psio, pssz, json, serde))]
 pub fn derive_to_pssz_schema(input: TokenStream) -> TokenStream { pssz_macro::derive_schema(input) }
 

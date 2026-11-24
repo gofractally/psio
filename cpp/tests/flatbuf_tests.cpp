@@ -761,31 +761,31 @@ TEST_CASE("flatbuf: the layout of a parsed .fbs schema is the codec's", "[flatbu
    const auto schema  = psio::parse_fbs(text.str());
    const auto layouts = psio::fbs_layout(schema);
 
-   same_layout<Vec3>(layouts, "vec3");
-   same_layout<Mixed>(layouts, "mixed");
-   same_layout<Point>(layouts, "point");
-   same_layout<Profile>(layouts, "profile");
-   same_layout<Item>(layouts, "item");
-   same_layout<Card>(layouts, "card");
-   same_layout<Order>(layouts, "order");
-   same_layout<Tree>(layouts, "tree");
-   same_layout<Scalars>(layouts, "scalars");
-   same_layout<Defaults>(layouts, "defaults");
-   same_layout<Renumbered>(layouts, "renumbered");      // (id: N)
-   same_layout<WithDeprecated>(layouts, "with_deprecated");
-   same_layout<Sparse>(layouts, "sparse");
+   same_layout<Vec3>(layouts, "Vec3");
+   same_layout<Mixed>(layouts, "Mixed");
+   same_layout<Point>(layouts, "Point");
+   same_layout<Profile>(layouts, "Profile");
+   same_layout<Item>(layouts, "Item");
+   same_layout<Card>(layouts, "Card");
+   same_layout<Order>(layouts, "Order");
+   same_layout<Tree>(layouts, "Tree");
+   same_layout<Scalars>(layouts, "Scalars");
+   same_layout<Defaults>(layouts, "Defaults");
+   same_layout<Renumbered>(layouts, "Renumbered");      // (id: N)
+   same_layout<WithDeprecated>(layouts, "WithDeprecated");
+   same_layout<Sparse>(layouts, "Sparse");
 
-   const auto* order = layouts.find("order");
+   const auto* order = layouts.find("Order");
    REQUIRE(order != nullptr);
    CHECK(order->field("color")->size == 1);     // enum Color : ubyte
    CHECK(order->field("mixed")->size == 48);    // an inline struct
    CHECK(order->field("mixed")->align == 8);
    CHECK(order->field("payment")->is_union);
    CHECK(order->field("customer")->size == 4);  // an offset
-   CHECK(layouts.find("with_deprecated")->field("old")->deprecated);
+   CHECK(layouts.find("WithDeprecated")->field("old")->deprecated);
    // A map entry: `key`, then `value`.
-   CHECK(layouts.find("stock_entry")->field("key")->slot == 0);
-   CHECK(layouts.find("stock_entry")->field("value")->slot == 1);
+   CHECK(layouts.find("StockEntry")->field("key")->slot == 0);
+   CHECK(layouts.find("StockEntry")->field("value")->slot == 1);
 }
 
 TEST_CASE("flatbuf: schema layout rules", "[flatbuf][schema]")
@@ -803,7 +803,7 @@ TEST_CASE("flatbuf: schema layout rules", "[flatbuf][schema]")
         head:ubyte (id: 0);
       }
    )"));
-   const auto* s = layouts.find("s");
+   const auto* s = layouts.find("S");
    REQUIRE(s != nullptr);
    REQUIRE(s->is_struct);
    CHECK(s->field("e")->offset == 0);     // short
@@ -815,7 +815,7 @@ TEST_CASE("flatbuf: schema layout rules", "[flatbuf][schema]")
    CHECK(s->align == 8);
 
    // With explicit ids a union's id is its value; the type byte is at id - 1.
-   const auto* t = layouts.find("t");
+   const auto* t = layouts.find("T");
    REQUIRE(t != nullptr);
    CHECK(t->field("head")->slot == 0);
    CHECK(t->field("u")->slot == 1);

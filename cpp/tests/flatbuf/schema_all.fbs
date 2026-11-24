@@ -1,0 +1,127 @@
+// Everything psio::parse_fbs keeps: fbs_schema_tests.cpp compares the layout
+// psio computes from this text with flatc's binary schema, and requires
+// emit_fbs(parse_fbs(text)) to declare the same.
+include "elsewhere.fbs";
+
+attribute "priority";
+attribute "audit";
+
+namespace all.types;
+
+enum Color : ubyte { red, green, blue }
+enum Level : short { low = -2, mid = 0, high = 0x10, top }
+enum Wide : ulong { none = 0, big = 18446744073709551615 }
+enum Flags : ushort (bit_flags) { read, write, exec = 4, admin = 15 }
+enum Plain : int { a, b, c = 100 }
+
+struct Vec3 { x:float; y:float; z:float; }
+
+struct Aligned (force_align: 16) {
+  tag:ubyte;
+  at:Vec3;
+  level:Level;
+}
+
+struct Packed {
+  a:ubyte;
+  b:ulong;
+  c:ushort;
+  d:[int:3];
+  v:[Vec3:2];
+  e:bool;
+  colors:[Color:5];
+  al:Aligned;
+}
+
+table Card { number:string (required); cvv:ushort; }
+table Wire { iban:string; }
+
+/// A documented union.
+union Payment { Card, Wire }
+union Aliased { first:Card, second:Card, Wire = 7, other.space.Far }
+
+table Entry { key:string (key); value:uint; }
+table Row { id:uint (key); item:Card; }
+
+table Defaults {
+  i8:byte = -5;
+  u8:ubyte = 250;
+  i16:short = -300;
+  u16:ushort = 0xFFFF;
+  i32:int = -70000;
+  u32:uint = 4000000000;
+  i64:long = -9000000000000000000;
+  u64:ulong = 18446744073709551615;
+  f:float = 1.5;
+  d:double = -2.25e-3;
+  not_a_number:double = nan;
+  infinite:float = -inf;
+  plus:double = +inf;
+  on:bool = true;
+  off:bool = false;
+  color:Color = blue;
+  level:Level = top;
+  flags:Flags = write;
+  zero:int = 0;
+  name:string = "anon";
+  maybe_i:int = null;
+  maybe_f:double = null;
+  maybe_b:bool = null;
+  maybe_e:Color = null;
+}
+
+table Everything (audit) {
+  id:ulong;
+  owner:Card;
+  cards:[Card];
+  total:double;
+  note:string;
+  payment:Payment;
+  position:Vec3;
+  packed:Packed;
+  path:[Vec3];
+  tags:[string];
+  color:Color = green;
+  entries:[Entry];
+  rows:[Row];
+  blob:[ubyte] (nested_flatbuffer: "Card");
+  flags:[bool];
+  colors:[Color];
+  many:[Payment];
+  aliased:Aliased;
+  old:int (deprecated);
+  score:float (priority: 3, audit);
+  hashed:uint (hash: "fnv1a_32");
+  far:other.space.Far;
+  self:Everything;
+}
+
+table Renumbered {
+  c:int (id: 2);
+  u:Payment (id: 4);
+  a:string (id: 0);
+  b:long (id: 1);
+  last:[Payment] (id: 6);
+  gone:short (id: 7, deprecated);
+}
+
+table InOrder {
+  a:int (id: 0);
+  u:Payment (id: 2);
+  b:int (id: 3);
+}
+
+namespace other.space;
+
+table Far { near:all.types.Vec3; value:int = 7; more:[Far]; kind:all.types.Color; }
+enum Local : byte { x = -1, y }
+table UsesLocal { l:Local = y; f:Far; }
+
+rpc_service Ledger {
+  Pay(all.types.Card):Far;
+  Refund(Far):Far (streaming: "server");
+}
+
+root_type all.types.Everything;
+file_identifier "ALL1";
+file_extension "all";

@@ -61,6 +61,12 @@ interface FieldShape {
   position?: Position;
   jsonInt?: IntText;
   ijsonInt?: IntText;
+  /** The member's stated field number (the attribute `field`). */
+  number?: number;
+  /** The version text of a retired member (the attribute `deprecated`). */
+  deprecated?: string;
+  /** The member's default as written; its text is the attribute `default`. */
+  default?: boolean | number | bigint;
   /** `sorted` / `unique` / `uniqueKeys` of the member and below it (typed-only). */
   order?: OrderTree;
 }
@@ -178,6 +184,23 @@ export interface FieldOptions extends PositionOptions {
   jsonInt?: IntText;
   /** The form of the member's integers in I-JSON. */
   ijsonInt?: IntText;
+  /**
+   * The member's field number in the numbered formats (protobuf, Cap'n
+   * Proto, FlatBuffers) when it is not its 1-based position in the record.
+   * A record member's only; no effect on its PSSZ bytes, key or text.
+   */
+  number?: number;
+  /**
+   * The default of a scalar member (a bool, an integer, a float, an enum —
+   * its integer value) in the numbered formats. Zero is the absence of one.
+   * A record member's only; no effect on its PSSZ bytes, key or text.
+   */
+  default?: boolean | number | bigint;
+  /**
+   * The member is retired: `true`, or the version that retired it. A record
+   * member's only; no effect on its PSSZ bytes, key or text.
+   */
+  deprecated?: boolean | string;
 }
 
 /** Options of `variant`. */
@@ -632,6 +655,14 @@ class Builder {
     }
     if (field.jsonInt) member.attributes.push(attribute('jsonInt', field.jsonInt));
     if (field.ijsonInt) member.attributes.push(attribute('ijsonInt', field.ijsonInt));
+    // What the numbered formats read of a record member, in the order C++
+    // `build_record_member` writes them.
+    if (field.number !== undefined) member.attributes.push(attribute('field', String(field.number)));
+    if (field.deprecated !== undefined) member.attributes.push(attribute('deprecated', field.deprecated));
+    if (field.default !== undefined) {
+      const text = defaultText(direct, field.default, `member "${field.name}"`);
+      if (text !== '') member.attributes.push(attribute('default', text));
+    }
     return member;
   }
 
@@ -1179,7 +1210,7 @@ export function transparent<T, V>(name: string, member: TypeDef<T, V> | Field<T,
     // The bounds that make a type a bounded type; anything else a member
     // can say has no place in a type (docs/pssz-spec.md 5.10).
     const where = `the member of transparent type "${name}"`;
-    for (const key of ['lengthBound', 'jsonInt', 'ijsonInt'] as const)
+    for (const key of ['lengthBound', 'jsonInt', 'ijsonInt', 'number', 'default', 'deprecated'] as const)
       if (member.options[key] !== undefined)
         schemaError(`typed schema: ${where}: ${key} is a record member's (use max / utf8 / element / keys / values / at, or an invariant)`);
     if (orderOf(member.options, where)) schemaError(`typed schema: ${where}: sorted / unique / uniqueKeys are a record member's (use an invariant)`);
@@ -1286,6 +1317,91 @@ function memberNames(members: object, what: string): string[] {
   return names;
 }
 
+// The text of a scalar default (the member attribute `default`; C++
+// `schema_scalar_text`): empty for zero, else `true`, a decimal integer (an
+// enum is its value), or the shortest decimal text that reads back as the
+// same float (`nan`, `inf`, `-inf`, `-0` for those values).
+function defaultText(shape: Shape, value: boolean | number | bigint, where: string): string {
+  const fail = (what: string): never => schemaError(`typed schema: ${where}: ${what}`);
+  switch (shape.k) {
+    case 'bool':
+      if (typeof value !== 'boolean') fail('the default of a bool is true or false');
+      return value ? 'true' : '';
+    case 'float':
+      if (typeof value !== 'number') fail('the default of a float is a number');
+      return floatText(value as number, shape.mantissa === 24);
+    case 'int': case 'char': case 'enum': {
+      const type = shape.k === 'enum' ? resolve(shape.under).shape : shape;
+      const [bits, signed] = type.k === 'int' ? [type.bits, type.signed] : [8, false];
+      if (bits > 64) fail('default applies to a scalar member (an integer of at most 64 bits)');
+      if (typeof value === 'boolean' || (typeof value === 'number' && !Number.isSafeInteger(value)))
+        fail('the default of an integer or an enum is an integer');
+      const n = BigInt(value);
+      const [low, high] = signed ? [-(1n << BigInt(bits - 1)), (1n << BigInt(bits - 1)) - 1n] : [0n, (1n << BigInt(bits)) - 1n];
+      if (n < low || n > high) fail('the default is out of the range of the member\'s type');
+      return n === 0n ? '' : n.toString();
+    }
+    default:
+      return fail('default applies to a scalar member (a bool, an integer, a float or an enum)');
+  }
+}
+
+// The shortest digits that read back as the same float, as a plain decimal
+// or with an exponent (`1e+20`), whichever is shorter (a plain decimal on a
+// tie): what C++ `std::to_chars` writes.
+function floatText(value: number, single: boolean): string {
+  if (single) value = Math.fround(value);
+  if (Number.isNaN(value)) return 'nan';
+  if (value === Infinity) return 'inf';
+  if (value === -Infinity) return '-inf';
+  if (value === 0) return Object.is(value, -0) ? '-0' : '';
+  const sign = value < 0 ? '-' : '';
+  const magnitude = Math.abs(value);
+  let scientific = magnitude.toExponential();
+  if (single)
+    for (let precision = 0; precision < 9; ++precision) {
+      scientific = magnitude.toExponential(precision);
+      if (Math.fround(Number(scientific)) === magnitude) break;
+    }
+  const [mantissa, power] = scientific.split('e');
+  const digits = mantissa.replace('.', '');
+  const exponent = Number(power);
+  const count = digits.length;
+  const scientificLength = count + (count > 1 ? 1 : 0) + 2 + Math.max(2, String(Math.abs(exponent)).length);
+  const fixedLength = exponent >= count - 1 ? exponent + 1 : exponent >= 0 ? count + 1 : count + 1 - exponent;
+  if (fixedLength > scientificLength)
+    return `${sign}${digits[0]}${count > 1 ? '.' : ''}${digits.slice(1)}e${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(2, '0')}`;
+  // A whole number: every digit of its exact value.
+  if (exponent >= count - 1) return sign + BigInt(magnitude).toString();
+  if (exponent >= 0) return `${sign}${digits.slice(0, exponent + 1)}.${digits.slice(exponent + 1)}`;
+  return `${sign}0.${'0'.repeat(-exponent - 1)}${digits}`;
+}
+
+// The record-member options of the numbered formats, checked.
+function numberedOf(o: FieldOptions, where: string): Pick<FieldShape, 'number' | 'deprecated' | 'default'> {
+  const out: Pick<FieldShape, 'number' | 'deprecated' | 'default'> = {};
+  if (o.number !== undefined) {
+    if (!bound32(o.number)) schemaError(`typed schema: ${where}: number (the field number) must be a 32-bit unsigned integer`);
+    out.number = o.number;
+  }
+  if (o.deprecated !== undefined && o.deprecated !== false) {
+    if (o.deprecated !== true && typeof o.deprecated !== 'string')
+      schemaError(`typed schema: ${where}: deprecated is true or the version text`);
+    out.deprecated = o.deprecated === true ? '' : o.deprecated;
+  }
+  if (o.default !== undefined) {
+    if (typeof o.default !== 'boolean' && typeof o.default !== 'number' && typeof o.default !== 'bigint')
+      schemaError(`typed schema: ${where}: default is a boolean, a number or a bigint`);
+    out.default = o.default;
+  }
+  return out;
+}
+// They are a record member's: not a parameter's, a result's or a type's.
+function notNumbered(f: Pick<FieldShape, 'number' | 'deprecated' | 'default'>, where: string): void {
+  for (const key of ['number', 'deprecated', 'default'] as const)
+    if (f[key] !== undefined) schemaError(`typed schema: ${where}: ${key} belongs to record members`);
+}
+
 function intText(x: unknown, what: string): IntText | undefined {
   if (x !== undefined && x !== 'number' && x !== 'string') schemaError(`typed schema: ${what} is "number" or "string"`);
   return x as IntText | undefined;
@@ -1299,7 +1415,8 @@ function positionOf(o: PositionOptions, where: string, top = false, depth = 0): 
   if (typeof o !== 'object' || o === null) schemaError(`typed schema: ${where}: bounds must be an object`);
   if (depth > 64) schemaError(`typed schema: ${where}: bounds nested too deep`);
   const allowed = top
-    ? ['max', 'utf8', 'element', 'keys', 'values', 'at', 'sorted', 'unique', 'uniqueKeys', 'lengthBound', 'jsonInt', 'ijsonInt']
+    ? ['max', 'utf8', 'element', 'keys', 'values', 'at', 'sorted', 'unique', 'uniqueKeys', 'lengthBound', 'jsonInt', 'ijsonInt',
+      'number', 'default', 'deprecated']
     : ['max', 'utf8', 'element', 'keys', 'values', 'at', 'sorted', 'unique', 'uniqueKeys'];
   for (const key of Object.keys(o))
     if (!allowed.includes(key))
@@ -1412,6 +1529,7 @@ function fieldShapes(fields: { [name: string]: MemberInput }, what: string): Fie
       return {
         name: key, type: f.type, lengthBound: b, position, order,
         jsonInt: intText(o.jsonInt, 'jsonInt'), ijsonInt: intText(o.ijsonInt, 'ijsonInt'),
+        ...numberedOf(o, where),
       };
     }
     return { name: key, type: isDef(f, `${what} "${key}"`) };
@@ -1490,6 +1608,7 @@ function parameterShapes(parameters: MethodParameters, maxFields: unknown): { fi
     if (f.lengthBound && (f.lengthBound.exact !== undefined || f.lengthBound.min !== undefined))
       schemaError(`typed schema: ${where}: a parameter's length bound is max (the Schema IR has no place for exact / min)`);
     if (f.jsonInt || f.ijsonInt) schemaError(`typed schema: ${where}: jsonInt / ijsonInt belong to record members`);
+    notNumbered(f, where);
   }
   return { fields, named: !Array.isArray(parameters) };
 }
@@ -1583,6 +1702,7 @@ export function method<P extends MethodParameters, R extends Parameter | undefin
   if (returns !== undefined) {
     result = { ...fieldShapes({ result: returns as MemberInput }, 'method')[0], name: '' };
     if (result.jsonInt || result.ijsonInt) schemaError('typed schema: a method result: jsonInt / ijsonInt belong to record members');
+    notNumbered(result, 'a method result');
   }
   return new MethodDef(argumentTuple(parameters, { maxDynamicData, maxFields }) as never, result, { maxDynamicData, maxFields });
 }

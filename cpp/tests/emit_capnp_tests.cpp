@@ -1,207 +1,414 @@
-// Tests for psio/emit_capnp.hpp — Schema IR → Cap'n Proto schema text.
+// psio::emit_capnp — Schema IR → `.capnp` text. That `capnp compile`
+// accepts the text and lays it out as psio does is capnp_schema_tests.cpp;
+// that messages go both ways through the compiled schema is
+// capnp_schema_interop_tests.cpp. Here: what the text says.
 
+#include <psio/capnp_parser.hpp>
 #include <psio/emit_capnp.hpp>
 #include <psio/schema_builder.hpp>
 
 #include <catch.hpp>
 
 #include <cstdint>
+#include <map>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <variant>
+#include <vector>
+
+using namespace psio::schema_types;
+
+namespace emit_capnp_test
+{
+   enum class Kind : std::uint16_t
+   {
+      plain,
+      fancy
+   };
+   PSIO_REFLECT_ENUM(Kind, plain, fancy)
+
+   enum class Wide : std::uint32_t
+   {
+      a = 0,
+      b = 7
+   };
+   PSIO_REFLECT_ENUM(Wide, a, b)
+
+   struct Leaf
+   {
+      std::string name;
+   };
+   PSIO_REFLECT(Leaf, name)
+
+   struct Record
+   {
+      std::uint64_t                                    id        = 0;
+      std::int32_t                                     level     = -3;
+      double                                           unit_cost = 0.5;
+      bool                                             live      = true;
+      Kind                                             kind      = Kind::fancy;
+      Wide                                             wide      = Wide::b;
+      std::optional<std::uint16_t>                     score;
+      std::optional<std::string>                       note;
+      std::variant<std::monostate, std::uint32_t, Leaf> pick;
+      std::vector<Leaf>                                leaves;
+      std::vector<std::uint8_t>                        blob;
+      std::vector<std::vector<bool>>                   grid;
+   };
+   PSIO_REFLECT(Record, id, level, unit_cost, live, kind, wide, score, note, pick, leaves, blob, grid)
+
+   struct Numbered
+   {
+      std::int32_t                             c = 0;
+      std::variant<std::int8_t, std::string>   u;
+      std::string                              a;
+   };
+   PSIO_REFLECT(Numbered, attr(c, field<3>), attr(u, field<2>), attr(a, field<1>))
+}  // namespace emit_capnp_test
 
 namespace
 {
-   bool contains(std::string_view hay, std::string_view needle)
+   AnyType text_type()
    {
-      return hay.find(needle) != std::string_view::npos;
+      return AnyType{Custom{Box<AnyType>{List{Box<AnyType>{Int{8, false}}}}, "string"}};
    }
-}
-
-using psio::AnyType;
-using psio::Func;
-using psio::Interface;
-using psio::Member;
-using psio::Package;
-using psio::Resource;
-using psio::Schema;
-using psio::schema_types::Box;
-using psio::schema_types::Custom;
-using psio::schema_types::Int;
-using psio::schema_types::List;
-using psio::schema_types::Object;
-using psio::schema_types::Tuple;
-using psio::schema_types::Type;
-using psio::schema_types::Variant;
-
-// ─── File header + struct + primitive fields ─────────────────────────
-
-TEST_CASE("emit_capnp: file id + struct with primitives", "[emit_capnp]")
-{
-   Schema s;
-   s.package = Package{.name    = "test:pkg",
-                       .version = "1.0.0",
-                       .attributes = {{"capnp_id",
-                                       std::string{"@0xdeadbeef00000001"}}}};
-   s.insert("point",
-            AnyType{Object{.members = {
-                              Member{.name = "x",
-                                     .type = Box<AnyType>{Int{32, true}}},
-                              Member{.name = "y",
-                                     .type = Box<AnyType>{Int{32, true}}}}}});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "@0xdeadbeef00000001;"));
-   CHECK(contains(text, "struct Point {"));
-   CHECK(contains(text, "x @0 :Int32;"));
-   CHECK(contains(text, "y @1 :Int32;"));
-}
-
-TEST_CASE("emit_capnp: snake_case identifiers convert to Pascal/camel",
-          "[emit_capnp]")
-{
-   Schema s;
-   s.insert("wall_clock_state",
-            AnyType{Object{.members = {
-                              Member{.name = "high_res_time",
-                                     .type = Box<AnyType>{Int{64, false}}}}}});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "struct WallClockState {"));
-   CHECK(contains(text, "highResTime @0 :UInt64;"));
-}
-
-// ─── Variant → struct with anonymous union ───────────────────────────
-
-TEST_CASE("emit_capnp: Variant emits struct with anonymous union",
-          "[emit_capnp]")
-{
-   Schema s;
-   s.insert("status",
-            AnyType{Variant{.members = {
-                               Member{.name = "ok",
-                                      .type = Box<AnyType>{Tuple{}}},
-                               Member{.name = "err",
-                                      .type = Box<AnyType>{Int{32, false}}}}}});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "struct Status {"));
-   CHECK(contains(text, "union {"));
-   CHECK(contains(text, "ok @0 :Void;"));
-   CHECK(contains(text, "err @1 :UInt32;"));
-}
-
-// ─── List, Text, Data ────────────────────────────────────────────────
-
-TEST_CASE("emit_capnp: list / text / data type spellings", "[emit_capnp]")
-{
-   Schema s;
-   s.insert(
-      "blob",
-      AnyType{Object{
-         .members = {
-            // string field
-            Member{.name = "name",
-                   .type = Box<AnyType>{Custom{
-                      Box<AnyType>{List{Box<AnyType>{Int{8, false}}}},
-                      "string"}}},
-            // raw byte array → Data
-            Member{.name = "payload",
-                   .type = Box<AnyType>{Custom{
-                      Box<AnyType>{List{Box<AnyType>{Int{8, false}}}},
-                      "hex"}}},
-            // List of u32
-            Member{.name = "ids",
-                   .type = Box<AnyType>{
-                      List{Box<AnyType>{Int{32, false}}}}}}}});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "name @0 :Text;"));
-   CHECK(contains(text, "payload @1 :Data;"));
-   CHECK(contains(text, "ids @2 :List(UInt32);"));
-}
-
-// ─── Resource → interface ────────────────────────────────────────────
-
-TEST_CASE("emit_capnp: Resource emits as interface with methods",
-          "[emit_capnp]")
-{
-   Schema s;
-   Resource r;
-   r.name    = "pollable";
-   r.methods = {
-      Func{.name = "ready",
-           .params = {},
-           .result = Box<AnyType>{Custom{Box<AnyType>{Int{1, false}}, "bool"}}},
-      Func{.name = "block"}};
-   s.insert("pollable", AnyType{r});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "interface Pollable {"));
-   CHECK(contains(text, "ready @0 () -> (result :Bool);"));
-   CHECK(contains(text, "block @1 ();"));
-}
-
-// ─── User-supplied ordinals via Attribute carrier ────────────────────
-
-TEST_CASE("emit_capnp: explicit ordinal attribute overrides auto",
-          "[emit_capnp]")
-{
-   Schema s;
-   s.insert(
-      "evolved",
-      AnyType{Object{
-         .members = {
-            Member{.name = "old_field",
-                   .type = Box<AnyType>{Int{32, false}},
-                   .attributes = {{"ordinal", std::string{"3"}}}},
-            Member{.name = "new_field",
-                   .type = Box<AnyType>{Int{32, false}},
-                   .attributes = {{"ordinal", std::string{"7"}}}}}}});
-
-   auto text = psio::emit_capnp(s);
-
-   CHECK(contains(text, "oldField @3 :UInt32;"));
-   CHECK(contains(text, "newField @7 :UInt32;"));
-}
-
-// ─── SchemaBuilder → emit_capnp pipeline ─────────────────────────────
-
-namespace test_capnp_emit
-{
-   struct datetime
+   Member field(std::string name, AnyType type, std::vector<Attribute> attrs = {})
    {
-      std::uint64_t seconds = 0;
+      return Member{std::move(name), Box<AnyType>{std::move(type)}, std::move(attrs)};
+   }
+   Schema schema_of(std::vector<Member> types)
+   {
+      Schema s;
+      s.package.attributes.push_back({"capnp_id", "0x8000000000000001"});
+      s.types = std::move(types);
+      return s;
+   }
+   std::string error_of(const Schema& s)
+   {
+      try
+      {
+         psio::emit_capnp(s);
+      }
+      catch (const std::runtime_error& e)
+      {
+         CHECK(std::string_view{e.what()}.starts_with("emit_capnp: "));
+         return e.what();
+      }
+      FAIL("emitted");
+      return {};
+   }
+}  // namespace
+
+TEST_CASE("emit_capnp: a reflected record, as the codec lays it out", "[emit_capnp]")
+{
+   psio::SchemaBuilder b;
+   b.insert<emit_capnp_test::Record>("Record");
+   b.insert<emit_capnp_test::Numbered>("Numbered");
+   auto s = b.build();
+   s.package.attributes.push_back({"capnp_id", "0x8000000000000001"});
+   CHECK(psio::emit_capnp(s) == R"(@0x8000000000000001;
+
+using Json = import "/capnp/compat/json.capnp";
+
+struct Record {
+  id @0 :UInt64;
+  level @1 :Int32 = -3;
+  unitCost @2 :Float64 = 0.5 $Json.name("unit_cost");
+  live @3 :Bool = true;
+  kind @4 :UInt16 = 1;
+  wide @5 :UInt32 = 7;
+  score :union {
+    none @6 :Void;
+    some @7 :UInt16;
+  }
+  note @8 :Text;
+  pick :union {
+    alt0 @9 :Void $Json.name("0");
+    uint32 @10 :UInt32;
+    leaf @11 :Leaf $Json.name("Leaf");
+  }
+  leaves @12 :List(Leaf);
+  blob @13 :Data;
+  grid @14 :List(List(Bool));
+}
+
+struct Leaf {
+  name @0 :Text;
+}
+
+struct Numbered {
+  c @3 :Int32;
+  u :union {
+    int8 @1 :Int8;
+    string @2 :Text;
+  }
+  a @0 :Text;
+}
+
+)");
+}
+
+TEST_CASE("emit_capnp: enums", "[emit_capnp]")
+{
+   Schema s = schema_of({});
+   // An enum over UInt16 with the values 0, 1, ... is a Cap'n Proto enum.
+   s.types.push_back(field("Color", AnyType{Enum{Box<AnyType>{Int{16, false}},
+                                                 {{"red", 0}, {"dark_blue", 1}}}}));
+   // Its enumerants may be listed in another order than their ordinals.
+   s.types.push_back(field("Shuffled", AnyType{Enum{Box<AnyType>{Int{16, false}},
+                                                    {{"second", 1}, {"first", 0}}}}));
+   // Any other enum is its integer on the wire.
+   s.types.push_back(field("Sparse", AnyType{Enum{Box<AnyType>{Int{16, false}}, {{"a", 0}, {"b", 5}}}}));
+   s.types.push_back(field("Narrow", AnyType{Enum{Box<AnyType>{Int{8, false}}, {{"a", 0}, {"b", 1}}}}));
+   // A variant whose alternatives have no value (a WIT enum).
+   s.types.push_back(field("Units", AnyType{Variant{{field("north", AnyType{Tuple{}}),
+                                                     field("south", AnyType{Tuple{}})},
+                                                    {}}}));
+   s.types.push_back(field(
+      "T", AnyType{Object{{field("c", AnyType{Type{"Color"}}, {{"default", "1"}}),
+                           field("h", AnyType{Type{"Shuffled"}}, {{"default", "1"}}),
+                           field("s", AnyType{Type{"Sparse"}}, {{"default", "5"}}),
+                           field("n", AnyType{Type{"Narrow"}}, {{"default", "1"}}),
+                           field("u", AnyType{Type{"Units"}}, {{"default", "1"}}),
+                           field("cs", AnyType{List{Box<AnyType>{Type{"Color"}}}})},
+                          {}}}));
+   CHECK(psio::emit_capnp(s) == R"(@0x8000000000000001;
+
+using Json = import "/capnp/compat/json.capnp";
+
+enum Color {
+  red @0;
+  darkBlue @1 $Json.name("dark_blue");
+}
+
+enum Shuffled {
+  second @1;
+  first @0;
+}
+
+enum Units {
+  north @0;
+  south @1;
+}
+
+struct T {
+  c @0 :Color = darkBlue;
+  h @1 :Shuffled = second;
+  s @2 :UInt16 = 5;
+  n @3 :UInt8 = 1;
+  u @4 :Units = south;
+  cs @5 :List(Color);
+}
+
+)");
+}
+
+TEST_CASE("emit_capnp: unions and groups", "[emit_capnp]")
+{
+   const Variant shape{{field("circle", AnyType{Float{11, 53}}, {{"ordinal", "1"}}),
+                        field("label", text_type(), {{"ordinal", "2"}}),
+                        field("box", AnyType{Object{{field("w", AnyType{Int{32, false}}, {{"ordinal", "3"}}),
+                                                     field("h", AnyType{Int{32, false}}, {{"ordinal", "4"}})},
+                                                    {}}})},
+                       {}};
+   Schema s = schema_of({});
+   s.types.push_back(field(
+      "T",
+      AnyType{Object{
+         {field("id", AnyType{Int{64, false}}, {{"ordinal", "0"}}),
+          field("", AnyType{shape}),  // the unnamed union
+          field("pos", AnyType{Object{{field("x", AnyType{Int{16, true}}, {{"ordinal", "5"}}),
+                                       field("y", AnyType{Int{16, true}}, {{"ordinal", "6"}})},
+                                      {}}}),
+          // A union with an ordinal of its own.
+          field("retro", AnyType{Variant{{field("a", AnyType{Int{8, false}}, {{"ordinal", "7"}}),
+                                          field("b", text_type(), {{"ordinal", "9"}})},
+                                         {{"ordinal", "8"}}}}),
+          field("maybe", AnyType{Option{Box<AnyType>{Int{32, true}}}}, {{"ordinal", "10"}})},
+         {}}}));
+   // A variant that is a named type: the struct that holds only the union.
+   s.types.push_back(field("Either", AnyType{Variant{{field("left", AnyType{Int{32, true}}),
+                                                      field("right", text_type())},
+                                                     {}}}));
+   CHECK(psio::emit_capnp(s) == R"(@0x8000000000000001;
+
+struct T {
+  id @0 :UInt64;
+  union {
+    circle @1 :Float64;
+    label @2 :Text;
+    box :group {
+      w @3 :UInt32;
+      h @4 :UInt32;
+    }
+  }
+  pos :group {
+    x @5 :Int16;
+    y @6 :Int16;
+  }
+  retro @8! :union {
+    a @7 :UInt8;
+    b @9 :Text;
+  }
+  maybe :union {
+    none @10 :Void;
+    some @11 :Int32;
+  }
+}
+
+struct Either {
+  union {
+    left @0 :Int32;
+    right @1 :Text;
+  }
+}
+
+)");
+}
+
+TEST_CASE("emit_capnp: names, nesting, ids, declarations kept as written", "[emit_capnp]")
+{
+   Schema s;
+   s.package.name       = "my:pkg";
+   s.package.attributes = {{"capnp_decl", "const limit :UInt32 = 9;"}};
+   s.types.push_back(field("a::Config", AnyType{Object{{field("max_size", AnyType{Int{32, false}}),
+                                                         field("Mode", AnyType{Int{8, false}}),
+                                                         field("x", AnyType{Int{8, false}},
+                                                               {{"capnp_name", "renamed"}, {"$note", "\"n\""}})},
+                                                        {{"$note", "\"s\""},
+                                                         {"capnp_decl", "const zero :Int8 = 0;"}}}},
+                           {{"capnp_id", "0xdeadbeefdeadbeef"}}));
+   s.types.push_back(field("a::Config.Inner", AnyType{Object{{field("v", AnyType{Type{"a::Config"}})}, {}}}));
+   s.types.push_back(field("Alias", AnyType{Type{"a::Config.Inner"}}));
+   s.types.push_back(field("user", AnyType{Object{{field("inner", AnyType{Type{"a::Config.Inner"}}),
+                                                   field("by_alias", AnyType{Type{"Alias"}})},
+                                                  {}}}));
+   const auto text = psio::emit_capnp(s);
+   // Without a file id one is derived from the names: the same every time.
+   CHECK(text == psio::emit_capnp(s));
+   CHECK(text.starts_with("@0x"));
+   CHECK(text.substr(text.find('\n')) == R"(
+
+using Json = import "/capnp/compat/json.capnp";
+const limit :UInt32 = 9;
+
+struct AConfig @0xdeadbeefdeadbeef $note("s") {
+  maxSize @0 :UInt32 $Json.name("max_size");
+  mode @1 :UInt8 $Json.name("Mode");
+  renamed @2 :UInt8 $Json.name("x") $note("n");
+  const zero :Int8 = 0;
+  struct Inner {
+    v @0 :AConfig;
+  }
+}
+
+using Alias = AConfig.Inner;
+
+struct User {
+  inner @0 :AConfig.Inner;
+  byAlias @1 :Alias $Json.name("by_alias");
+}
+
+)");
+}
+
+TEST_CASE("emit_capnp: interfaces", "[emit_capnp]")
+{
+   Schema s = schema_of({});
+   s.types.push_back(field("Req", AnyType{Object{{field("q", text_type())}, {}}}));
+   Resource r;
+   r.name       = "Search";
+   r.attributes = {{"capnp_extends", "Base"}};
+   r.methods.push_back(Func{"find",
+                            {field("query", text_type()), field("limit", AnyType{Int{32, false}}, {{"default", "10"}})},
+                            Box<AnyType>{AnyType{Object{{field("hits", AnyType{List{Box<AnyType>{text_type()}}})}, {}}}},
+                            {{"ordinal", "0"}}});
+   r.methods.push_back(Func{"ping", {}, std::nullopt, {{"ordinal", "1"}}});
+   r.methods.push_back(Func{"one", {field("x", AnyType{Int{8, false}})}, Box<AnyType>{text_type()},
+                            {{"ordinal", "2"}}});
+   r.methods.push_back(Func{"whole", {field("params", AnyType{Type{"Req"}})},
+                            Box<AnyType>{AnyType{Type{"Req"}}},
+                            {{"ordinal", "3"}, {"capnp_params", "struct"}, {"capnp_results", "struct"}}});
+   r.methods.push_back(Func{"push", {field("chunk", text_type())}, std::nullopt,
+                            {{"ordinal", "4"}, {"capnp_results", "stream"}}});
+   s.types.push_back(field("Search", AnyType{r}));
+   // A reflected interface: positional parameters; a function Cap'n Proto
+   // cannot express is left out with a comment.
+   Interface api;
+   api.name = "api";
+   api.funcs.push_back(Func{"get_one", {field("0", AnyType{Int{32, false}})}, Box<AnyType>{text_type()}, {}});
+   api.funcs.push_back(Func{"bad", {field("m", AnyType{Custom{Box<AnyType>{List{Box<AnyType>{Int{8, false}}}}, "set"}})},
+                            std::nullopt, {}});
+   api.funcs.push_back(Func{"after", {}, std::nullopt, {}});
+   s.interfaces.push_back(api);
+   CHECK(psio::emit_capnp(s) == R"(@0x8000000000000001;
+
+using Json = import "/capnp/compat/json.capnp";
+
+struct Req {
+  q @0 :Text;
+}
+
+interface Search extends(Base) {
+  find @0 (query :Text, limit :UInt32 = 10) -> (hits :List(Text));
+  ping @1 ();
+  one @2 (x :UInt8) -> (result :Text);
+  whole @3 Req -> Req;
+  push @4 (chunk :Text) -> stream;
+}
+
+interface Api {
+  getOne @0 (arg0 :UInt32) -> (result :Text) $Json.name("get_one");
+  # bad: not Cap'n Proto (a set has no Cap'n Proto type)
+  after @1 ();
+}
+
+)");
+}
+
+TEST_CASE("emit_capnp: what Cap'n Proto does not have is an error", "[emit_capnp]")
+{
+   const auto with = [](AnyType type) {
+      return error_of(schema_of({field("T", AnyType{Object{{field("m", std::move(type))}, {}}})}));
    };
-   PSIO_REFLECT(datetime, seconds)
-}  // namespace test_capnp_emit
-using test_capnp_emit::datetime;
+   CHECK(with(AnyType{Custom{Box<AnyType>{List{Box<AnyType>{Int{8, false}}}}, "set"}}).find("a set has no") !=
+         std::string::npos);
+   CHECK(with(AnyType{Custom{Box<AnyType>{List{Box<AnyType>{Tuple{{Box<AnyType>{Int{8, false}},
+                                                                    Box<AnyType>{Int{8, false}}}}}}},
+                             "map"}})
+            .find("a map has no") != std::string::npos);
+   CHECK(with(AnyType{Tuple{{Box<AnyType>{Int{8, true}}}}}).find("tuple") != std::string::npos);
+   CHECK(with(AnyType{Int{128, false}}).find("128 bits") != std::string::npos);
+   CHECK(with(AnyType{Float{15, 113}}).find("float") != std::string::npos);
+   CHECK(with(AnyType{Option{Box<AnyType>{Option{Box<AnyType>{Int{8, true}}}}}}).find("optional") !=
+         std::string::npos);
+   CHECK(with(AnyType{List{Box<AnyType>{Option{Box<AnyType>{Int{8, true}}}}}}).find("list of unions") !=
+         std::string::npos);
+   CHECK(with(AnyType{Variant{{field("only", AnyType{Int{8, true}})}, {}}}).find("at least two") !=
+         std::string::npos);
+   CHECK(with(AnyType{Type{"Missing"}}).find("unknown type 'Missing'") != std::string::npos);
+   // Ordinals on some fields only; with a gap.
+   CHECK(error_of(schema_of({field("T", AnyType{Object{{field("a", AnyType{Int{8, true}}, {{"ordinal", "0"}}),
+                                                        field("b", AnyType{Int{8, true}})},
+                                                       {}}})}))
+            .find("every field has an ordinal or none") != std::string::npos);
+   CHECK(error_of(schema_of({field("T", AnyType{Object{{field("a", AnyType{Int{8, true}}, {{"ordinal", "1"}})},
+                                                       {}}})}))
+            .find("@0 is missing") != std::string::npos);
+}
 
-struct capnp_wall_clock
+TEST_CASE("emit_capnp: the text reads back, and is a fixed point", "[emit_capnp]")
 {
-   static datetime now();
-};
-
-PSIO_PACKAGE(capnp_clocks, "0.2.3");
-#undef  PSIO_CURRENT_PACKAGE_
-#define PSIO_CURRENT_PACKAGE_ PSIO_PACKAGE_TYPE_(capnp_clocks)
-
-PSIO_INTERFACE(capnp_wall_clock, types(datetime), funcs(func(now)))
-
-TEST_CASE("emit_capnp: SchemaBuilder pipeline produces well-formed text",
-          "[emit_capnp][pipeline]")
-{
-   auto schema = psio::SchemaBuilder{}
-                    .insert_interface<capnp_wall_clock>()
-                    .build();
-   auto text = psio::emit_capnp(schema);
-
-   CHECK(contains(text, "struct Datetime {"));
-   CHECK(contains(text, "seconds"));
-   CHECK(contains(text, "interface CapnpWallClock {"));
-   CHECK(contains(text, "now @0 ()"));
+   psio::SchemaBuilder b;
+   b.insert<emit_capnp_test::Record>("Record");
+   b.insert<emit_capnp_test::Numbered>("Numbered");
+   const auto text   = psio::emit_capnp(b.build());
+   const auto parsed = psio::parse_capnp(text);
+   CHECK(psio::emit_capnp(parsed) == text);
+   CHECK(psio::parse_capnp(psio::emit_capnp(parsed)) == parsed);
+   // The members have their C++ names again.
+   const auto& record = std::get<Object>(parsed.get("Record")->value);
+   CHECK(record.members[2].name == "unit_cost");
+   CHECK(*record.members[6].type == AnyType{Option{Box<AnyType>{Int{16, false}}}});
 }

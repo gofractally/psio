@@ -300,6 +300,8 @@ struct Wide {
     hash: Uint256,
     maybe: Option<u128>,
     list: Vec<i128>,
+    // C++ `Status status = Status::pending;`: the member's default.
+    #[psio(default = "Status::Pending")]
     status: Status,
 }
 

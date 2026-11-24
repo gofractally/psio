@@ -511,6 +511,19 @@ class TypedFixture:
                                 and a["value"] == f"max={direct.value['type']['value'].value['maxCount']}")
                     if not inherent:
                         specs.append(psio.length(**bound))
+                elif a["name"] == "field":
+                    specs.append(psio.number(int(a["value"])))
+                elif a["name"] == "deprecated":
+                    specs.append(psio.deprecated(a["value"]) if a["value"] else psio.deprecated)
+                elif a["name"] == "default":
+                    # The text back as the value a declaration states.
+                    scalar = self.resolved(m["type"])["value"]
+                    if scalar.type == "Custom" and scalar.value["id"] == "bool":
+                        specs.append(psio.default(a["value"] == "true"))
+                    elif scalar.type == "Float":
+                        specs.append(psio.default(float(a["value"])))
+                    else:
+                        specs.append(psio.default(int(a["value"])))
                 else:
                     raise Unsupported(f"member attribute {a['name']}")
             name = m["name"]

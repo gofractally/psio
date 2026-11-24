@@ -280,15 +280,109 @@ overlap objects.
 
 ## Schema
 
-`psio::fbs_layout(schema)` (`<psio/fbs_layout.hpp>`) computes the wire
-layout of a Schema IR — vtable slots (declaration order or `(id: N)`, two
-for a union, kept by a `deprecated` field) and struct offsets, sizes and
-alignments. For `cpp/tests/flatbuf/interop.fbs` parsed by `psio::parse_fbs`
-it equals the codec's compile-time layout (`psio::flatbuf::layout<T>`) for
-every shape and the constants `flatc` generates (both are tested).
-`parse_fbs` reads fixed arrays (`[T:N]`) and keeps an enum's underlying
-type for this. What the schema side does not do yet is in
-`docs/formats-migration-status.md` (F3).
+A type described once, by its reflection, has one FlatBuffers schema, and it
+is the schema of the bytes `psio::flatbuf` writes:
+
+```cpp
+psio::SchemaBuilder b;
+b.insert<Order>("Order");
+psio::Schema schema = b.build();
+schema.package.name = "shop";                              // namespace shop;
+schema.package.attributes.push_back({"fbs_root_type", "Order"});
+
+std::string text = psio::emit_fbs(schema);                 // .fbs text for flatc
+psio::Schema back = psio::parse_fbs(text);                 // .fbs text → Schema IR
+auto layouts = psio::fbs_layout(back);                     // slots, offsets, defaults
+layouts.find("Order")->field("total")->vtable_offset;
+```
+
+(`<psio/emit_fbs.hpp>`, `<psio/fbs_parser.hpp>`, `<psio/fbs_layout.hpp>`; the
+cases of `cpp/tests/emit_fbs_tests.cpp`, `fbs_parser_tests.cpp`,
+`fbs_schema_tests.cpp`.)
+
+**What is guaranteed, and how it is checked** (against `flatc` 25.12.19,
+wherever it and the library are installed):
+
+* **Export.** `flatc` accepts `emit_fbs` of a reflected type and generates
+  code with the codec's layout. `psio_flatbuf_schema_interop_tests` is built
+  from that generated code — the schema is written by `psio::emit_fbs` at
+  build time, nothing in it by hand: the `VT_` constants, struct sizes and
+  union discriminants are `psio::flatbuf::layout<T>`'s; a buffer psio writes
+  passes the generated verifier and reads field by field as the value; the
+  generated object API unpacks it and packs it back to **the same bytes**,
+  which psio decodes to the value; a member at its C++ initialiser is absent
+  from the buffer and the generated accessor returns the initialiser.
+* **Import.** The layout `fbs_layout(parse_fbs(text))` computes is the one
+  in the binary schema `flatc --binary --schema` writes for the text: field
+  ids, vtable and struct offsets, struct size and alignment (`force_align`),
+  scalar defaults, optional / required / key / deprecated, enum types and
+  values (`bit_flags`), union discriminants (aliases, explicit values),
+  root type, file identifier. On three hand-written schemas
+  (`cpp/tests/flatbuf/schema_all.fbs` has one of everything) and on 250
+  generated ones (`psio_fbs_schema_tests`).
+* **Round trip.** `emit_fbs(parse_fbs(text))` declares what `text` declares:
+  `flatc`'s binary schemas of the two agree on every type, field, attribute
+  and service (not on comments, and not on ids written out where they
+  repeat the declaration order). The emitted text is a fixed point:
+  `emit_fbs(parse_fbs(emit_fbs(s))) == emit_fbs(s)`, and
+  `parse_fbs(emit_fbs(p)) == p` for a schema `p` that `parse_fbs` produced.
+* **Untrusted text.** `parse_fbs` does not recurse, allocates in proportion
+  to the text and reports every malformed input as `psio::fbs_parse_error`
+  (line, column). `psio_schema_text_fuzz_tests` (and the same built with
+  AddressSanitizer and UndefinedBehaviorSanitizer): every prefix and every
+  byte of the test schemas, random edits and random bytes — 115,389 texts,
+  of which 6,686 were accepted and written back, each to a fixed point —
+  and inputs built to exhaust a parser (200,000 nested brackets, 32,765
+  fields, 20,000 chained types).
+
+**How a schema is read as FlatBuffers** (the header of `fbs_layout.hpp` is
+the full statement):
+
+| Schema IR | FlatBuffers |
+|---|---|
+| `Object` | `table`; with `definitionWillNotChange` and only fixed members, `struct` (the codec's rule) |
+| `Struct` | `struct` |
+| `Enum{Int, enumerators}` | `enum Name : type { a, b = 4 }` |
+| `Variant` of records | `union`; a first alternative `Tuple{}` (`std::monostate`) is `NONE`; a label that is not the type's name is an alias (`label:Type`) |
+| `Option<scalar or enum>` | `= null` |
+| `Option<anything else>` | the field |
+| `List`, `BoundedList`, bytes, `Nested` | `[T]` |
+| `Array` | `[T:N]` in a struct, `[T]` in a table |
+| a `set` | `[K]` |
+| a `map` | `[Owner_member]` with `table Owner_member { key:K (key); value:V; }` |
+
+Member attributes: `field` = N (the field number: `attr(m, field<N>)`; ids
+are assigned in ascending order of it and written as `(id: K)` only where
+that is not the declaration order), `default` (a scalar's default; the
+builder takes it from the member initialiser), `deprecated`, `required`,
+`key`. `force_align` on a struct. `fbs_root_type`, `fbs_file_identifier`,
+`fbs_file_extension`, `fbs_include` on the package. Any other metadata of a
+`.fbs` file is kept as an attribute of the same name and written back.
+
+A union, an enum or a map's entry table that has no name in the IR — the
+schema builder gives a name to records only — is named after the first
+member that uses it: `Order_payment`, `Order_stock`. An enum without
+`PSIO_REFLECT_ENUM` is its integer in the IR and in the schema (`color:ubyte
+= 1`), which is the same wire. So is a field of an enum that has no
+enumerator for the field's default (a C++ enum without a zero, left at
+zero): `flatc` refuses such a field, the integer says the same. Names are kept as written; `parse_fbs` no
+longer converts between `PascalCase` and `snake_case`.
+
+`emit_fbs` throws (`std::runtime_error`, "emit_fbs: …") for what FlatBuffers
+does not have: a vector of vectors, a tuple, a union of something that is
+not a table, an optional of an optional, an integer wider than 64 bits.
+
+**What the text cannot say** (so `parse_fbs(emit_fbs(s))` describes the same
+wire as `s`, record by record, but is not the same IR): that a vector is a
+set or a map (the entry table and its `(key)` remain), that a string or a
+table is `std::optional` (every such field may be absent in FlatBuffers),
+the length of a `std::array` in a table, bounds, `utf8`. The codec's check
+that a set's keys ascend therefore has no counterpart in the schema.
+
+Not done: `include` is kept and written back but not followed (the layout
+refuses a type the text does not declare); documentation comments and the
+metadata of enumerators are not kept; `nested_flatbuffer` is kept as
+metadata only. Rust, JS and Python have no `emit_fbs` / `parse_fbs`.
 
 ## Performance
 

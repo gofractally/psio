@@ -617,3 +617,109 @@ TEST_CASE("schema builder: a chosen name", "[schema][builder][names]")
             "sb_names::chosen::Config)");
    }
 }
+
+// ── What the numbered formats need of a member ───────────────────────────
+
+namespace test_sb_numbered
+{
+   enum class Mode : std::int8_t
+   {
+      off  = 0,
+      slow = -1,
+      fast = 5
+   };
+
+   struct Plain
+   {
+      std::uint32_t id    = 0;
+      std::int16_t  level = 0;
+      Mode          mode  = Mode::off;
+      double        ratio = 0;
+      bool          on    = false;
+      std::string   name;
+      std::uint32_t old = 0;
+      float         scale = 0;
+   };
+   PSIO_REFLECT(Plain, id, level, mode, ratio, on, name, old, scale)
+
+   // The same record on the wire of PSSZ, with what protobuf, Cap'n Proto
+   // and FlatBuffers read: field numbers, defaults, a retired member.
+   struct Numbered
+   {
+      std::uint32_t id    = 0;
+      std::int16_t  level = -7;
+      Mode          mode  = Mode::slow;
+      double        ratio = 0.5;
+      bool          on    = true;
+      std::string   name  = "not a scalar: no default";
+      std::uint32_t old   = 0;
+      float         scale = -0.0f;
+   };
+   PSIO_REFLECT(Numbered, attr(id, field<4>), level, mode, ratio, on, name,
+                attr(old, field<9> | deprecated_spec{.version = "2.1"}), scale)
+
+   struct Unit
+   {
+      std::variant<std::monostate, std::uint32_t> pick;
+   };
+   PSIO_REFLECT(Unit, pick)
+}  // namespace test_sb_numbered
+
+TEST_CASE("schema builder: field numbers, defaults and deprecation are member attributes",
+          "[schema][builder][numbered]")
+{
+   namespace st = psio::schema_types;
+   namespace ir = psio::pssz_ir;
+   using test_sb_numbered::Numbered;
+   using test_sb_numbered::Plain;
+
+   psio::SchemaBuilder b;
+   b.insert<Numbered>("Numbered");
+   b.insert<Plain>("Plain");
+   const psio::Schema schema = b.build();
+
+   const auto& numbered = std::get<st::Object>(schema.get("Numbered")->value).members;
+   using attrs = std::vector<st::Attribute>;
+   CHECK(numbered[0].attributes == attrs{{"field", "4"}});
+   CHECK(numbered[1].attributes == attrs{{"default", "-7"}});
+   CHECK(numbered[2].attributes == attrs{{"default", "-1"}});   // an enum: its value
+   CHECK(numbered[3].attributes == attrs{{"default", "0.5"}});
+   CHECK(numbered[4].attributes == attrs{{"default", "true"}});
+   CHECK(numbered[5].attributes.empty());
+   CHECK(numbered[6].attributes == attrs{{"field", "9"}, {"deprecated", "2.1"}});
+   CHECK(numbered[7].attributes == attrs{{"default", "-0"}});
+   // Nothing is written for what the defaults already say.
+   for (const auto& m : std::get<st::Object>(schema.get("Plain")->value).members)
+      CHECK(m.attributes.empty());
+
+   // No PSSZ byte depends on them: the schema-driven codec accepts the
+   // attributes and reads the same bytes; the two records are one type.
+   Numbered value;
+   value.id    = 7;
+   value.level = 300;
+   value.name  = "n";
+   const auto bytes = psio::encode(psio::pssz{}, value);
+   CHECK(ir::validate_pssz(schema, st::AnyType{st::Type{"Numbered"}}, std::span<const char>{bytes}).ok());
+   CHECK(ir::validate_pssz(schema, st::AnyType{st::Type{"Plain"}}, std::span<const char>{bytes}).ok());
+   CHECK(ir::equivalent(schema, "Numbered", schema, "Plain"));
+   CHECK(ir::evolves_from(schema, "Plain", schema, "Numbered"));
+   CHECK(ir::evolves_from(schema, "Numbered", schema, "Plain"));
+
+   // They mean something on a record member only.
+   psio::Schema misplaced = schema;
+   std::get<st::Object>(misplaced.types[0].type->value).attributes.push_back({"default", "1"});
+   CHECK_FALSE(ir::validate_pssz(misplaced, st::AnyType{st::Type{"Numbered"}},
+                                 std::span<const char>{bytes})
+                  .ok());
+
+   // std::monostate is the unit type.
+   psio::SchemaBuilder u;
+   u.insert<test_sb_numbered::Unit>("Unit");
+   const psio::Schema unit = u.build();
+   const auto&        pick = std::get<st::Object>(unit.get("Unit")->value).members[0];
+   const auto*        v    = std::get_if<st::Variant>(&pick.type->resolve(unit)->value);
+   REQUIRE(v != nullptr);
+   const auto* none = v->members[0].type->resolve(unit);
+   REQUIRE(none != nullptr);
+   CHECK(*none == st::AnyType{st::Tuple{}});
+}

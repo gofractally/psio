@@ -122,6 +122,112 @@ pointers.
   Single-segment messages only (a multi-segment one is compacted on
   construction). Union members cannot be switched through the editor yet.
 
+## Schema
+
+A type described once, by its reflection, has one Cap'n Proto schema, and
+it is the schema of the bytes `psio::capnp` writes:
+
+```cpp
+psio::SchemaBuilder b;
+b.insert<Order>("Order");
+psio::Schema schema = b.build();
+
+std::string text = psio::emit_capnp(schema);               // .capnp text for the compiler
+psio::Schema back = psio::parse_capnp(text);               // .capnp text → Schema IR
+auto layouts = psio::capnp_layout(back);                   // sections, offsets, discriminants
+layouts.find("Order")->field("total")->bit_offset();
+```
+
+(`<psio/emit_capnp.hpp>`, `<psio/capnp_parser.hpp>`, `<psio/capnp_layout.hpp>`;
+the cases of `cpp/tests/emit_capnp_tests.cpp`, `capnp_parser_tests.cpp`,
+`capnp_schema_tests.cpp`.)
+
+**What is guaranteed, and how it is checked** (against `capnp` 1.3.0,
+wherever the tool and the library are installed):
+
+* **Export.** `capnp compile` accepts `emit_capnp` of a reflected type and
+  lays it out as the codec does. `psio_capnp_schema_interop_tests` is built
+  from the code `capnp compile -oc++` generates for a schema that
+  `psio::emit_capnp` writes at build time: every value is read and written
+  member by member through the compiled schema (libcapnp's dynamic API over
+  the generated types) — a message psio writes is read by libcapnp as the
+  value, a message libcapnp writes validates and decodes in psio to it;
+  defaults: a member at its C++ initialiser is zero on the wire and libcapnp
+  reads the initialiser, and an empty libcapnp message decodes to the
+  default-constructed value. For 54 reflected records (the 48 of
+  `capnp_layout_fixture.hpp` among them) the compiler's layout of the
+  emitted text is `psio::capnp::layout<T>`.
+* **Import.** The layout `capnp_layout(parse_capnp(text))` computes is the
+  one in the `CodeGeneratorRequest` `capnp compile -o-` writes for the text:
+  data and pointer section sizes, every field's ordinal, offset, size and
+  default (the bits XORed with the value), groups, the position of every
+  union's discriminant and the value of each member. On two hand-written
+  schemas (`cpp/tests/capnp/schema_all.capnp` has one of everything) and on
+  300 generated ones — groups in unions, unions in groups in unions,
+  ordinals in any order, a union with an ordinal of its own
+  (`psio_capnp_schema_tests`). `capnp_layout` is a port of the compiler's
+  allocator for any nesting; the codec's compile-time one handles the
+  shapes a C++ type produces, and the two agree on those.
+* **Round trip.** `emit_capnp(parse_capnp(text))` declares what `text`
+  declares: the compiler's own listing of the two (`capnp compile -ocapnp`:
+  ids, ordinals, types, defaults, annotations, layout) has the same lines.
+  The emitted text is a fixed point, and `parse_capnp(emit_capnp(p)) == p`
+  for a schema `p` that `parse_capnp` produced.
+* **Untrusted text.** `parse_capnp` bounds its nesting (64 levels),
+  allocates in proportion to the text and reports every malformed input as
+  `psio::capnp_parse_error` (line, column). `psio_schema_text_fuzz_tests`
+  (and the same with AddressSanitizer and UndefinedBehaviorSanitizer): every
+  prefix and every byte of the test schemas, random edits and random bytes —
+  109,098 texts, of which 8,387 were accepted and written back, each to a
+  fixed point — and inputs built to exhaust a parser (200,000 nested
+  `List(`, groups and structs; a struct of 65,536 fields; a union of 30,000
+  members; 20,000 chained types and aliases).
+
+**How a schema is read as Cap'n Proto** (the header of `capnp_layout.hpp`
+is the full statement):
+
+| Schema IR | Cap'n Proto |
+|---|---|
+| `Object`, `Struct` (a named type) | `struct` |
+| `Enum` over `UInt16` with the values 0, 1, … | `enum`; any other enum is its integer, which is what the codec writes for a C++ enum |
+| a member that is a `Variant` | `name :union { … }`, one member per alternative; the member named `""` is the struct's unnamed union |
+| a member that is an `Object` written in place | `name :group { … }` |
+| `Option<data type>` | `name :union { none @n :Void; some @n+1 :T; }` |
+| `Option<pointer type>` | the field |
+| `Resource` | `interface` |
+| `Tuple{}` | `Void` |
+
+Attributes: `ordinal` on every field of a parsed schema; without ordinals
+(a reflected type) they follow the members in ascending order of `field`,
+a union taking one per member — the codec's rule. `default` (a data
+field's default in its normal form; a pointer field's as Cap'n Proto writes
+it), `capnp_id` (a type's or the file's `@0x…`).
+
+**Names.** Cap'n Proto requires `TypeName` and `fieldName` without
+underscores. A member is written under the camelCase of its name with
+`$Json.name("the_name")` — the official annotation of
+`capnp/compat/json.capnp` — where the two differ, and `parse_capnp` reads
+the member's name from it; the file then imports that schema. So C++ member
+names survive the round trip, and libcapnp's JSON codec writes them.
+
+**What the text cannot say.** A `std::optional<std::uint32_t>` and a
+hand-written `union { none; some }` are the same declaration, and
+`parse_capnp` reads both as the optional. A union's member values are the
+ranks of their ordinals, not their order in the text.
+
+**One difference from the compiler.** For a few shapes — a union member
+that grows inside a group's location — `capnp compile` stops by default
+(Cap'n Proto 0.5 laid them out wrongly; issue 344) and compiles them only
+with `CAPNP_IGNORE_ISSUE_344` set. `capnp_layout` computes the layout the
+compiler computes with the variable set. No type the codec maps has such a
+shape.
+
+Not done: `import` is kept and written back but not followed (the layout
+refuses a type the text does not declare); generic types and methods are
+refused; `const` and `annotation` declarations are kept as written and not
+interpreted (a default that names a constant is refused). Rust, JS and
+Python have no `emit_capnp` / `parse_capnp`.
+
 ## Not supported
 
 Packed encoding; capabilities and interfaces; `AnyPointer`; groups other

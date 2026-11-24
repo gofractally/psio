@@ -362,6 +362,27 @@ assert refused(lambda: psio.from_json(Totals, '{"supply":"5","holders":5}')).rea
     'json: missing required member "decimals" of Totals'
 ```
 
+**Field numbers, defaults, retired members.** protobuf, Cap'n Proto and
+FlatBuffers number a record's members, give a scalar member a default and
+retire members. State them on the member; the Schema IR records them as the
+member attributes `field`, `default` and `deprecated`, and nothing changes in
+the member's PSSZ bytes, key or text:
+
+```python
+@dataclass
+class Ticket:
+    id: Annotated[u32, psio.number(3)]             # its field number, when it is not its position (from 1)
+    retries: Annotated[u32, psio.default(5)]       # a bool, an integer, a float, a member of its enum
+    legacy: Annotated[u32, psio.deprecated]        # or psio.deprecated("2.0"): the version that retired it
+
+members = psio.schema_of(Ticket).ir["types"][0]["type"]["value"].value["members"]
+assert [[(a["name"], a["value"]) for a in m["attributes"]] for m in members] == \
+    [[("field", "3")], [("default", "5")], [("deprecated", "")]]
+assert psio.to_pssz(Ticket(1, 2, 3)).hex() == "0c010000000200000003000000"
+```
+
+A default of zero is the absence of one (no attribute is written).
+
 **Untagged unions.** A union is written with its alternative named
 (`{"string":"x"}` under `ijson`, `[0,"x"]` under `json`).
 `Annotated[A | B, psio.untagged]` (C++ `psio_is_untagged`, the Variant

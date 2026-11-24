@@ -125,7 +125,9 @@ value of a Nested node its `Bytes`, read and written without being examined
 and of a typed reader that keeps the member's bytes. Reachable schema metadata is checked
 before encoding/decoding; constraints are never bypassed by an omitted Option.
 DWNC and collection count bounds are implemented, as are the member attributes
-`lengthBound` (enforced) and `jsonInt` / `ijsonInt` (text forms); a variant
+`lengthBound` (enforced) and `jsonInt` / `ijsonInt` (text forms); `field`,
+`default` and `deprecated` (what the numbered formats need of a member) are
+accepted on a record member and not read; a variant
 member carries no attribute — its name is the alternative's label, the key
 of its tagged text form. `maxDynamicData` is implemented by the
 automatic profile and rejected by the explicit one; `maxFields` likewise is

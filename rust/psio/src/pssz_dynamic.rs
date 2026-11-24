@@ -71,6 +71,9 @@
 //!           maxDynamicData = "N"       explicit cap (automatic profile)
 //!   Member  lengthBound = "max=N" | "exact=N" | "min=N" (comma-separated)
 //!           jsonInt / ijsonInt = "number" | "string"   (`json` submodule)
+//!           field = "N", default = "text", deprecated   accepted and not
+//!                                      read: what protobuf, Cap'n Proto and
+//!                                      FlatBuffers need of a member
 //!   Variant  untagged                  text: the bare value of the
 //!                                      alternative (`json` submodule)
 //!   Variant member  (none: its name is the alternative's label, the key
@@ -485,6 +488,10 @@ fn attributes(values: &[Attribute], site: Site, caps: bool) -> PsszResult<()> {
                     return Err(failure("pssz dynamic: malformed integer form attribute"));
                 }
             }
+            // What the numbered formats read (the schema builder writes
+            // them): the member's field number, a scalar's default, a
+            // retired member. None of them is in a PSSZ byte or in the text.
+            "field" | "default" | "deprecated" if site == Site::RecordMember => (),
             // An untagged variant: the same bytes as any variant; in text
             // the bare value of the alternative (`json` submodule).
             "untagged" if site == Site::Variant => (),

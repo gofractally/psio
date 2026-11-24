@@ -24,7 +24,9 @@ import dataclasses
 import datetime
 import enum
 import keyword
+import math
 import operator
+import struct
 import sys
 import types
 import typing
@@ -129,7 +131,8 @@ class Position:
 
 
 class FieldShape:
-    __slots__ = ("name", "attr", "type", "length_bound", "position", "json_int", "ijson_int", "order")
+    __slots__ = ("name", "attr", "type", "length_bound", "position", "json_int", "ijson_int", "order",
+                 "number", "deprecated", "default")
 
     def __init__(self, name: str, attr: str, type: Shape) -> None:
         #: ``psio.sorted`` / ``unique`` / ``unique_keys`` of the member and below it, or None.
@@ -141,6 +144,12 @@ class FieldShape:
         self.position: Optional[Position] = None
         self.json_int: Optional[str] = None
         self.ijson_int: Optional[str] = None
+        #: ``psio.number``: the stated field number (the attribute ``field``).
+        self.number: Optional[int] = None
+        #: ``psio.deprecated``: the version text of a retired member (the attribute ``deprecated``).
+        self.deprecated: Optional[str] = None
+        #: ``psio.default``: its text (the attribute ``default``); empty for zero.
+        self.default: str = ""
 
 
 class AltShape:
@@ -1019,7 +1028,7 @@ def _fields_of(shape: Shape) -> List[FieldShape]:
     for attr in shape.attrs:
         if attr not in hints:
             _fail(f"psio: {cls.__name__}.{attr} has no type hint")
-        out.append(_field(attr, hints[attr], shape.extra.get(attr, ()), f"{cls.__name__}.{attr}"))
+        out.append(_field(attr, hints[attr], shape.extra.get(attr, ()), f"{cls.__name__}.{attr}", record=True))
     if len({f.name for f in out}) != len(out):
         _fail(f"psio: {cls.__name__}: two members have the same name")
     _check_field_count(f"record {shape.name}", "fields", len(out), shape.options.max_fields)
@@ -1041,23 +1050,117 @@ def _check_field_count(what: str, noun: str, count: int, max_fields: Optional[in
         _fail(f"psio: {what} has more {noun} than its max_fields ({count} > {max_fields})")
 
 
-def _field(attr: str, hint: Any, extra: Sequence[Any], where: str) -> FieldShape:
-    """A record member / method parameter: its plain type, and what is annotated on it."""
+def _default_text(shape: Shape, value: Any, where: str) -> str:
+    """The text of a scalar default (the member attribute ``default``; C++ ``schema_scalar_text``).
+
+    Empty for zero, else ``true``, a decimal integer (an enum is its value), or the shortest decimal text
+    that reads back as the same float (``nan``, ``inf``, ``-inf``, ``-0`` for those values).
+    """
+    k = shape.k
+    if k == "bool":
+        if type(value) is not bool:
+            _fail(f"psio: {where}: the default of a bool is True or False")
+        return "true" if value else ""
+    if k == "float":
+        if type(value) not in (int, float):
+            _fail(f"psio: {where}: the default of a float is a number")
+        return _float_text(float(value), shape.bits == 32)
+    if k in ("int", "char", "enum"):
+        if k == "enum" and isinstance(value, shape.py):
+            value = value._value_
+        under = shape.under if k == "enum" else shape
+        bits, signed = (8, False) if k == "char" else (under.bits, under.signed)
+        if bits > 64:
+            _fail(f"psio: {where}: psio.default applies to a scalar member (an integer of at most 64 bits)")
+        if isinstance(value, bool) or not isinstance(value, int):
+            _fail(f"psio: {where}: the default of an integer or an enum is an integer"
+                  + (" or a member of the enum" if k == "enum" else ""))
+        value = int(value)
+        lo, hi = (-(1 << (bits - 1)), (1 << (bits - 1)) - 1) if signed else (0, (1 << bits) - 1)
+        if not lo <= value <= hi:
+            _fail(f"psio: {where}: the default is out of the range of the member's type")
+        return str(value) if value else ""
+    _fail(f"psio: {where}: psio.default applies to a scalar member (a bool, an integer, a float or an enum)")
+
+
+def _float_text(value: float, single: bool) -> str:
+    """The shortest digits that read back as the same float, as C++ ``std::to_chars`` writes them.
+
+    A plain decimal or with an exponent (``1e+20``), whichever is shorter (a plain decimal on a tie).
+    """
+    def same(x: float) -> float:
+        return struct.unpack("<f", struct.pack("<f", x))[0] if single else x
+
+    if single and not (math.isnan(value) or math.isinf(value)):
+        try:
+            value = same(value)
+        except OverflowError:
+            value = math.copysign(math.inf, value)
+    if math.isnan(value):
+        return "nan"
+    if math.isinf(value):
+        return "inf" if value > 0 else "-inf"
+    if value == 0:
+        return "-0" if math.copysign(1.0, value) < 0 else ""
+    sign = "-" if value < 0 else ""
+    magnitude = abs(value)
+    for precision in range(17):
+        scientific = "%.*e" % (precision, magnitude)
+        try:
+            if same(float(scientific)) == magnitude:
+                break
+        except OverflowError:  # (rounded up past the largest f32: more digits)
+            continue
+    mantissa, power = scientific.split("e")
+    digits = mantissa.replace(".", "")
+    exponent = int(power)
+    count = len(digits)
+    scientific_length = count + (1 if count > 1 else 0) + 2 + max(2, len(str(abs(exponent))))
+    fixed_length = exponent + 1 if exponent >= count - 1 else count + 1 if exponent >= 0 else count + 1 - exponent
+    if fixed_length > scientific_length:
+        return f"{sign}{digits[0]}{'.' if count > 1 else ''}{digits[1:]}e{'-' if exponent < 0 else '+'}{abs(exponent):02d}"
+    if exponent >= count - 1:
+        return sign + str(int(magnitude))  # a whole number: every digit of its exact value
+    if exponent >= 0:
+        return f"{sign}{digits[:exponent + 1]}.{digits[exponent + 1:]}"
+    return f"{sign}0.{'0' * (-exponent - 1)}{digits}"
+
+
+def _field(attr: str, hint: Any, extra: Sequence[Any], where: str, record: bool = False) -> FieldShape:
+    """A record member / method parameter: its plain type, and what is annotated on it.
+
+    ``record``: a record member, which alone states a field number, a default and that it is retired.
+    """
     base, meta = _split(hint)
     meta = tuple(meta) + tuple(m for m in extra if isinstance(m, A.Spec))
     name = _wire_name(attr)
     member_specs: List[Any] = []
     type_specs: List[Any] = []
+    numbered: List[Any] = []
     for m in meta:
         if isinstance(m, A.NameSpec):
             name = m.name
         elif isinstance(m, (A.LengthSpec, A.Utf8Spec, A.PositionSpec, A.IntFormSpec, A.SortedSpec,
                             A.UniqueKeysSpec)):
             member_specs.append(m)
+        elif isinstance(m, (A.FieldNumberSpec, A.DefaultSpec, A.DeprecatedSpec)):
+            if not record:
+                _fail(f"psio: {where}: psio.number / psio.default / psio.deprecated belong to record members")
+            numbered.append(m)
         else:
             type_specs.append(m)
     plain = Annotated[tuple([base] + type_specs)] if type_specs else base
     field = FieldShape(name, attr, shape_of(plain))
+    for kind in (A.FieldNumberSpec, A.DefaultSpec, A.DeprecatedSpec):
+        if sum(isinstance(m, kind) for m in numbered) > 1:
+            _fail(f"psio: {where}: a field number, a default and psio.deprecated are stated once")
+    for m in numbered:
+        if isinstance(m, A.FieldNumberSpec):
+            field.number = m.number
+        elif isinstance(m, A.DeprecatedSpec):
+            field.deprecated = m.version
+        else:
+            field.default = _default_text(field.type, m.value, where)
     bound: Dict[str, int] = {}
     rest = []
     for m in member_specs:
@@ -1597,6 +1700,13 @@ class Builder:
             member["attributes"].append(_attribute("jsonInt", field.json_int))
         if field.ijson_int:
             member["attributes"].append(_attribute("ijsonInt", field.ijson_int))
+        # What the numbered formats read of a record member, in the order C++ `build_record_member` writes.
+        if field.number is not None:
+            member["attributes"].append(_attribute("field", str(field.number)))
+        if field.deprecated is not None:
+            member["attributes"].append(_attribute("deprecated", field.deprecated))
+        if field.default:
+            member["attributes"].append(_attribute("default", field.default))
         return member
 
     def _parameter(self, field: FieldShape) -> Dict[str, Any]:

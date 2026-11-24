@@ -6,7 +6,243 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 ## Handover (newest first)
 
-### After the FlatBuffers budget pass (gofractally/psio#10) — tip of this note
+### After F3 (schemas that agree with the codecs; gofractally/psio#9) — tip of this note
+
+State: F3 done for FlatBuffers and Cap'n Proto in C++, on top of main
+`842a538`. User documentation: `docs/flatbuffers.md` "Schema",
+`docs/capnp.md` "Schema", `docs/schema-builder.md` ("What the numbered
+formats need of a member").
+
+**What exists now.**
+
+* `psio::emit_fbs` / `parse_fbs` / `fbs_layout` and `psio::emit_capnp` /
+  `parse_capnp` / `capnp_layout` (new: `cpp/include/psio/capnp_layout.hpp`)
+  are rewritten around one statement of how a Schema IR is read as each
+  format (the header comments of `fbs_layout.hpp` and `capnp_layout.hpp`).
+  The emitters write that, the parsers produce it, the layouts compute what
+  the official compiler computes.
+* `capnp_layout` is a run-time port of the compiler's `StructLayout` for any
+  nesting of groups and unions (the codec's compile-time one covers what a
+  C++ type produces); the hole set they share is
+  `psio/detail/capnp_holes.hpp`.
+* The schema builder records what the numbered formats need of a member
+  (below, "IR changes").
+
+**Export differences found and fixed** (reflected type → IR → IDL, against
+the codec):
+
+| | before | now |
+|---|---|---|
+| fbs: `std::variant` member | a wrapper table `Name { value:NameUnion; }` around the union — another wire | a union field (two vtable slots); `std::monostate` first is `NONE` (it was emitted as a `uint` alternative, the IR had `Custom{u32, "unknown"}` for it) |
+| fbs: `std::optional<scalar>` | the scalar with a `// @psio:option` comment | `= null` |
+| fbs: enum | always `ubyte`, values 0, 1, … | its underlying type and its values |
+| fbs: defaults | none | the member initialiser (`= 7`, `= true`, `= green`, `= 0.5`) |
+| fbs: `field<N>` | not read (the emitter read an `fbs_id` attribute nothing wrote) | `(id: K)` in ascending field-number order, a union's id its value's |
+| fbs: `deprecated_spec` | not written | `(deprecated)` |
+| fbs: struct or table | only an IR `Struct`; a C++ `definitionWillNotChange()` record of fixed members was a table | the codec's rule |
+| fbs: `std::map` / `std::set` | `/* TODO */` text | `[Owner_member]` with a `(key)` entry table / `[K]` |
+| fbs: `std::array` | `[T]  // @psio:array=N` | `[T:N]` in a struct, `[T]` in a table |
+| fbs: names | PascalCase of the IR name; a type could be renamed into a collision | as written (`_` for a character FlatBuffers does not allow) |
+| fbs: what FlatBuffers has not | `/* TODO: … */`, `void  // @psio:tuple<…>` — text `flatc` refuses or misreads | `std::runtime_error` |
+| capnp: `std::variant` member | (only a top-level variant was a struct with a union) no union for a member | `name :union { … }`, one ordinal per alternative |
+| capnp: `std::optional<scalar>` | the scalar | `union { none; some }` |
+| capnp: defaults | none | `= value` (the wire holds value XOR default) |
+| capnp: ordinals | sequential, or an `ordinal` attribute nothing wrote | the codec's assignment from `field<N>` |
+| capnp: enum | — (a variant of empty cases as `enum`) | a C++ enum is its integer (what the codec writes); an `Enum` over UInt16 with values 0, 1, … is an `enum` |
+| capnp: names | camelCase of the IR name, original lost | camelCase with `$Json.name("original")` |
+| capnp: file id | the constant `@0xABADC0DEABADC0DE` for every schema | the IR's, else derived from the names |
+
+**Import losses found and fixed.**
+
+* `parse_fbs` dropped: default values, enum values and underlying types (an
+  enum was a variant of empty cases), `required`, `key`, `force_align`,
+  `bit_flags`, every other metadata, `root_type`, `file_identifier`,
+  `file_extension`, `include`, `rpc_service`, a second namespace; it folded
+  a union only when it found the wrapper table its own emitter wrote,
+  rewrote every name to snake_case, read metadata before the default (the
+  grammar has it after), and accepted ids that `flatc` refuses. All kept
+  and checked now.
+* `parse_capnp` dropped: defaults, the union of a struct that also has
+  fields ("we surface the fields and drop the union"), groups, named
+  unions, type ids, nested scoping (a nested `Inner` was a top-level
+  `inner`), annotations, `using` / `const` / `annotation` declarations,
+  method parameter defaults, every result but the first; rewrote names to
+  snake_case; an enum was a variant of empty cases. All kept now.
+* Found against the official compilers on the way: a FlatBuffers string
+  `key` is implicitly `required`; `flatc`'s binary schema holds the default
+  of a `ulong` above 2^63 as 0 and that of a `float` unrounded (the tests
+  say so where they compare); a Cap'n Proto union member's value is the
+  rank of its ordinal, not its position in the text; a named union's own
+  ordinal is written `@N!` and an unnamed union cannot have one; the
+  compiler stops on a few layouts by default (issue 344, `capnp.md`).
+
+**IR changes** (every one; `schema_ir.hpp` itself — the node types and
+their encoding — is unchanged, so `ir_version` stays 1):
+
+1. Member attributes written by the schema builder: `field` = `"N"` (an
+   explicit `field<N>`), `deprecated` = version, `default` = text of a
+   non-zero scalar initialiser. The schema-driven PSSZ / JSON codecs accept
+   them on a record member and do not read them — in C++ (`pssz_ir.hpp`),
+   Rust (`pssz_dynamic.rs`), JS (`pssz-core.ts`), Python (`_core.py`); each
+   had a closed list and refused them before. The typed builders of Rust
+   (`#[psio(field = N)]`, `#[psio(default = ..)]`, `#[psio(deprecated)]` now
+   reach `ToPsszSchema`), JS (`field(T, { number, default, deprecated })`)
+   and Python (`psio.number(n)`, `psio.default(v)`, `psio.deprecated`)
+   write them.
+2. `std::monostate` is `Tuple{}` (was `Custom{Int32, "unknown"}`).
+3. Attribute names with a meaning for the IDLs, written by the parsers and
+   read by emitters and layouts: on a member `required`, `key`, `ordinal`,
+   `capnp_name`, `$annotation`; on a variant member `value`, `ordinal`; on a
+   variant `ordinal`; on a struct `force_align`, `capnp_decl`; on a named
+   type `capnp_id`, `bit_flags`, `capnp_name.N`; on the package
+   `fbs_root_type`, `fbs_file_identifier`, `fbs_file_extension`,
+   `fbs_include`, `capnp_id`, `capnp_decl`; on a function `ordinal`,
+   `capnp_params`, `capnp_results`. (`fbs_id`, `fbs_underlying` are gone.)
+   These appear only in schemas made from IDL text; the schema-driven PSSZ
+   codecs refuse the ones on members, as they refuse any attribute they do
+   not know.
+4. The parsers write floats as `Float{8, 24}` / `Float{11, 53}` (the
+   builder's values; they wrote `{8, 23}` / `{11, 52}`).
+
+Fixtures: `conformance/schema-json-vectors.json` and
+`conformance/json-vectors.json` regenerated — one member in them changed
+(`Wide.status`, an enum initialised to -1, gained `default = "-1"`); C++,
+Rust, JS and Python consume both, and the typed builders of the three
+reproduce the schema byte for byte.
+
+**Evidence.** New ctest targets: `psio_fbs_schema_tests` (flatc at run
+time: 3 hand-written schemas, the reflected shapes, 250 generated schemas),
+`psio_flatbuf_schema_interop_tests` (code generated by flatc from the
+emitted schema), `psio_capnp_schema_tests` (capnp at run time: 2
+hand-written schemas, 54 reflected records, 300 generated schemas),
+`psio_capnp_schema_interop_tests` (code generated by capnp from the emitted
+schema), `psio_schema_text_fuzz_tests` and `…_sanitized`; rewritten:
+`psio_emit_fbs_tests`, `psio_fbs_parser_tests` (the first generation's 34
+cases on the IR), `psio_emit_capnp_tests`, `psio_capnp_parser_tests` (its
+26 cases, with the official layout). Totals: C++
+442/442 ctest in both simdjson configurations (436 on main; the six new
+targets); Rust `cargo test --workspace --locked --no-fail-fast` 1,151
+passed, with `--all-features` 1,205 (1,146 / 1,200); JS 261 (256); Python
+100 (94). Official tools: flatc 25.12.19, capnp 1.3.0 (Homebrew).
+`tools/check-cpp-golden.py`: 366 fixtures match; `expand.py --check` clean.
+Not in ctest, tried by hand: `interop.fbs` → IR → `emit_capnp` compiles with
+`capnp`; the reverse is refused where it must be (a Cap'n Proto union of
+scalars has no FlatBuffers form).
+
+**Decisions that change behaviour** (flag for review).
+
+1. A schema built from a C++ type with a non-zero scalar initialiser, an
+   explicit `field<N>` or a `deprecated_spec` has other bytes (and another
+   hash) than before: the attributes are in it. A schema-driven reader
+   older than this change refuses such a schema ("unsupported schema
+   constraint or annotation"): schemas and readers must be upgraded
+   together where those members exist.
+2. Rust, JS and Python do not read a member's default from the language
+   (Rust has no initialisers; Python dataclass defaults and JS have them,
+   but reading them would change the schemas of existing types): a default
+   is stated. C++ reads the initialiser.
+3. `parse_fbs` / `parse_capnp` keep names as written; `emit_capnp` renames
+   to Cap'n Proto's required case and keeps the original as `$Json.name`,
+   so an emitted `.capnp` file imports `/capnp/compat/json.capnp`.
+4. The emitters throw for what the format does not have, where they wrote
+   comments and placeholder text before.
+5. `emit_fbs` names a union / enum / map entry table that has no name in
+   the IR after its first user (`Order_payment`). Those names are part of
+   the generated code of whoever compiles the schema; they change if the
+   member is renamed.
+
+**Not done / found on the way.**
+
+* The float text of a `default` (`std::to_chars` shortest form in C++) is
+  reimplemented in Rust, JS and Python and agrees among the three on their
+  own table; no shared fixture carries a float default, so agreement with
+  C++ on unusual values is not pinned.
+* Rust's `#[psio(deprecated)]` has no version text (C++ and JS / Python
+  can state one): the attribute's value differs across languages for the
+  same declaration.
+* The schema builder interns an enum with `PSIO_REFLECT_ENUM` as an `@N`
+  node without its C++ name, so the emitted `.fbs` names it after its first
+  user (`Record_kind`), and `emit_capnp` cannot declare it as an `enum` at
+  all. Giving such an enum its reflected name in the IR would change the
+  bytes of existing schemas (all four languages): left for a decision.
+* What an IDL cannot say is lost on the way back (`flatbuffers.md`,
+  `capnp.md`, "What the text cannot say"): set / map, optional pointers,
+  array lengths in tables, bounds. A user attribute (`attribute "psio";`)
+  could carry it in `.fbs`; not built.
+* `include` / `import` are not followed. A struct that uses an imported
+  type cannot be laid out or emitted.
+* Not built on Linux / libstdc++ in this pass (the code keeps to
+  `std::from_chars` / `std::to_chars` for floating point, `std::bit_cast`,
+  `starts_with`, `std::erase_if`; a vector of an incomplete type is a
+  member of `capnp_field_layout`).
+* Rust, JS, Python have no emitters, parsers or layouts for the two IDLs.
+* Rust still needs the official Cap'n Proto union layout (open from F1).
+
+**Protobuf** (audit only; F5): `emit_protobuf` /
+`parse_protobuf` are where the other two emitters and parsers were before
+this pass. Measured against `protoc` 34.0 (probes in
+`~/psio-formats-scratch/f3-proto/`):
+
+* *What works.* For records of integers, bools and strings (`Profile`,
+  `Renumbered` with `field<N>`, `WithDeprecated`) `protoc` accepts the
+  emitted text and `protoc --decode` of `psio::protobuf` bytes prints the
+  values.
+* *Export — text `protoc` refuses.* Every member of a reflected type is a
+  `Type{"@N"}` reference and the emitter tests the unresolved node, so
+  every `repeated`, `optional` and `bytes` member is `/* TODO: nested … */`;
+  floats (`Float{8, 24}` / `{11, 53}` are not recognised: `/* TODO:
+  non-IEEE float */`); `char` (`uint32  // @psio:char name = 13;` — the
+  comment swallows the name); a variant member (`/* TODO: anonymous variant
+  */`; the declaration is `message @11 { oneof value { … 0 = 1; Card Card =
+  2; } }`); maps (nested block comments), tuples, arrays, nested lists
+  (placeholders instead of errors).
+* *Export — another wire than the codec's.* `pb_sint` / `pb_fixed` are
+  honoured by the codec and not recorded in the IR (the schema says `int32`
+  where the wire is zigzag or fixed32); an enum is emitted as `uint32`
+  without a declaration (and the codec refuses enum members although its
+  header says otherwise); a oneof's alternatives are numbered 1..N whatever
+  `field` says; `default` and `deprecated` are not read — and the codec
+  fills an absent member from the C++ initialiser where a proto3 peer omits
+  zeros (a decision: proto2 `[default = …]`, or refuse); integers wider than
+  64 bits are `uint64`; names are re-cased; `@N` and `a::Config` are not
+  valid identifiers; `std::stoul` on a `field` attribute throws
+  `std::out_of_range`; field numbers are not checked (0, above 2^29 - 1,
+  19000–19999, duplicates).
+* *Import — dropped or misread.* Enum values (`A = 0; B = 5` becomes 0, 1;
+  `allow_alias`, negatives), and enums are variants of empty cases;
+  `map<K, V>` (a parse error); declarations are renamed to snake_case while
+  references keep their spelling, so they never resolve; nesting beyond one
+  level; a oneof beside fields (its members become plain members; two
+  oneofs merge); `required`, `packed`, `deprecated`, `default`, `json_name`,
+  `reserved`, `extensions`, `import`, `syntax` (proto2 becomes proto3),
+  services; `edition`, `extend`, groups are refused; the skipping of
+  options does not know strings (`option x = "a;b";`).
+* *Untrusted text.* An enum body that held anything but a name made no
+  progress and grew until memory ran out (`enum E {` — 18 GB in 2 s):
+  **fixed in this pass**, with an unterminated comment
+  (`protobuf_parser_tests.cpp`). Still open: type insertion is a linear
+  scan (40,000 messages: 2 s). Nesting is bounded (two levels).
+* *Round trip.* Text from a reflected type does not parse back; a
+  hand-written file is stable from the second pass on, after the first has
+  renumbered oneof members and enum values, flattened nesting and dropped
+  options.
+
+**What remains.**
+
+* **F4 — dynamic view + psio-tool.** A view over a parsed schema:
+  `fbs_layout` and `capnp_layout` now give it everything it needs from a
+  `.fbs` / `.capnp` file or from a reflected type (slots, offsets,
+  defaults, discriminants, optional / required / deprecated), keyed by the
+  IR's member names. The tool: `psio-tool schema emit|parse|layout`,
+  convert between the IDLs through the IR. Following `include` / `import`
+  belongs here (a resolver callback).
+* **F5 — protobuf / Avro / WIT → IR.** The same three properties for
+  `emit_protobuf` / `parse_protobuf` against `protoc` (gap list above), then
+  Avro and WIT.
+* **F6 — benchmarks and claims.** Unchanged (below).
+
+
+### After the FlatBuffers budget pass (gofractally/psio#10)
 
 Branch `codex/json-sink` (worktree `~/psio-json-sink`), on top of the JSON
 sink pass below. User documentation: `docs/flatbuffers.md` "Validation" (the

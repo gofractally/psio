@@ -379,6 +379,70 @@ ijson_number = IntFormSpec("ijson", "number")
 ijson_string = IntFormSpec("ijson", "string")
 
 
+# ── What the numbered formats read of a member ──────────────────────────────
+#
+# protobuf, Cap'n Proto and FlatBuffers number a record's members, give a
+# scalar member a default and retire members.  The Schema IR records the three
+# as the member attributes ``field``, ``default`` and ``deprecated``; none of
+# them changes the member's PSSZ bytes, key or text.
+
+@dataclass(frozen=True)
+class FieldNumberSpec(Spec):
+    number: int
+
+    def __post_init__(self) -> None:
+        if type(self.number) is not int or not 0 <= self.number <= 0xFFFFFFFF:
+            raise TypeError("psio: a field number is an integer of 32 bits, not negative")
+
+
+def number(n: int) -> FieldNumberSpec:
+    """The member's field number, when it is not its position in the record (from 1).
+
+    ``id: Annotated[u32, psio.number(3)]`` (C++ ``attr(id, field<3>)``).
+    """
+    return FieldNumberSpec(n)
+
+
+@dataclass(frozen=True, eq=False)
+class DefaultSpec(Spec):
+    value: Any
+
+    # (``True == 1`` and ``0.0 == -0.0``, and ``typing`` interns ``Annotated`` by equality: the
+    # default is the value as written)
+    def _identity(self) -> Any:
+        return type(self.value), repr(self.value)
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, DefaultSpec) and self._identity() == other._identity()
+
+    def __hash__(self) -> int:
+        return hash(self._identity())
+
+
+def default(value: Any) -> DefaultSpec:
+    """The default of a scalar member: a bool, an integer, a float, a member of its enum.
+
+    ``status: Annotated[Status, psio.default(Status.pending)]`` (C++: the
+    member's initialiser).  Zero is the absence of a default.
+    """
+    return DefaultSpec(value)
+
+
+@dataclass(frozen=True)
+class DeprecatedSpec(Spec):
+    version: str = ""
+
+    def __call__(self, version: str) -> "DeprecatedSpec":
+        """``psio.deprecated("2.0")``: the version that retired the member."""
+        if type(version) is not str:
+            raise TypeError("psio: the version of a deprecated member is a string")
+        return DeprecatedSpec(version)
+
+
+#: The member is retired: ``old: Annotated[u8, psio.deprecated]``, or ``psio.deprecated("2.0")``.
+deprecated = DeprecatedSpec()
+
+
 # ── Time ────────────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)

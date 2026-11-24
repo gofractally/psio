@@ -312,3 +312,19 @@ TEST_CASE("parse_protobuf: stray semicolons and comments tolerated",
    const auto& m = std::get<Object>(s.get("m")->value).members;
    CHECK(m.size() == 2);
 }
+
+// Text that is not a schema must end in protobuf_parse_error, not in a loop:
+// an enum body that held anything but a name made no progress and grew until
+// memory ran out (found by the F3 audit; the rest of that audit's list is in
+// docs/formats-migration-status.md).
+TEST_CASE("parse_protobuf: an enum body that is not names is an error", "[protobuf_parser]")
+{
+   for (const char* text : {"enum E {", "enum E { @ }", "enum E { A = 0; 1 }", "enum E { A = 0; ",
+                            "message M { enum E { } ", "enum E { = }"})
+   {
+      INFO(text);
+      CHECK_THROWS_AS(psio::parse_protobuf(text), psio::protobuf_parse_error);
+   }
+   CHECK_THROWS_AS(psio::parse_protobuf("message M { } /* open"), psio::protobuf_parse_error);
+   CHECK_NOTHROW(psio::parse_protobuf("enum E { A = 0; B = 1; } /* closed */"));
+}

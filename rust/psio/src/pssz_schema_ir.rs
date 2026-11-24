@@ -460,12 +460,78 @@ pub trait ToPsszSchema {
     fn member_attributes() -> Vec<Attribute> {
         Vec::new()
     }
+    /// The text of this value as a member's `default` attribute
+    /// (`#[psio(default = ..)]`): `None` for a type that is not a scalar
+    /// (a bool, an integer, a float, an enum over an integer), the empty
+    /// string for zero (no attribute is written), else `true`, a decimal
+    /// integer (an enum is its value), or the shortest decimal text that
+    /// reads back as the same float (`nan`, `inf`, `-inf`, `-0` for those).
+    fn default_text(&self) -> Option<String> {
+        None
+    }
     fn build_schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType>;
     fn schema(builder: &mut SchemaBuilder) -> PsszResult<AnyType>
     where
         Self: Sized,
     {
         builder.insert::<Self>()
+    }
+}
+
+/// The member attribute `default` of a record member whose
+/// `#[psio(default = ..)]` is `value` (C++ `build_record_member`): nothing
+/// for zero. A default on a member that is not a scalar is an error.
+#[doc(hidden)]
+pub fn default_attribute<T: ToPsszSchema>(value: &T) -> PsszResult<Option<Attribute>> {
+    match value.default_text() {
+        None => Err(PsszError::new("pssz schema: #[psio(default = ..)] applies to a scalar member")),
+        Some(text) if text.is_empty() => Ok(None),
+        Some(text) => Ok(Some(Attribute { name: "default".into(), value: Some(text) })),
+    }
+}
+
+/// The text of a float default: the shortest digits that read back as the
+/// same value, as a plain decimal or with an exponent (`1e+20`), whichever
+/// is shorter (a plain decimal on a tie) — what C++ `std::to_chars` writes.
+/// `shortest` is Rust's `{:e}` text of the value (its shortest digits),
+/// `exact` its exact value without a fraction.
+fn float_text(nan: bool, negative: bool, zero: bool, infinite: bool, shortest: String, exact: String) -> String {
+    if nan {
+        return "nan".into();
+    }
+    if infinite {
+        return if negative { "-inf".into() } else { "inf".into() };
+    }
+    if zero {
+        return if negative { "-0".into() } else { String::new() };
+    }
+    let (mantissa, exponent) = shortest.split_once('e').expect("{:e} has an exponent");
+    let exponent: i32 = exponent.parse().expect("{:e} has a decimal exponent");
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let count = digits.len() as i32;
+    let width = exponent.unsigned_abs().to_string().len().max(2);
+    let scientific = digits.len() + usize::from(count > 1) + 2 + width;
+    let fixed = if exponent >= count - 1 {
+        exponent + 1
+    } else if exponent >= 0 {
+        count + 1
+    } else {
+        count + 1 - exponent
+    } as usize;
+    let sign = if negative { "-" } else { "" };
+    if fixed > scientific {
+        let point = if count > 1 { "." } else { "" };
+        let mark = if exponent < 0 { '-' } else { '+' };
+        return format!("{sign}{}{point}{}e{mark}{:0>2}", &digits[..1], &digits[1..], exponent.unsigned_abs());
+    }
+    if exponent >= count - 1 {
+        // A whole number: every digit of its exact value.
+        exact
+    } else if exponent >= 0 {
+        let split = exponent as usize + 1;
+        format!("{sign}{}.{}", &digits[..split], &digits[split..])
+    } else {
+        format!("{sign}0.{}{digits}", "0".repeat((-exponent - 1) as usize))
     }
 }
 
@@ -695,6 +761,9 @@ macro_rules! schema_integer {
             fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
                 Ok(AnyType::new(AnyValue::Int(Int { bits: (std::mem::size_of::<Self>() * 8) as u32, isSigned: $signed })))
             }
+            fn default_text(&self) -> Option<String> {
+                Some(if *self == 0 { String::new() } else { self.to_string() })
+            }
         }
     )*};
 }
@@ -711,6 +780,10 @@ schema_integer!(
     (i128, true)
 );
 impl ToPsszSchema for f32 {
+    fn default_text(&self) -> Option<String> {
+        let v = *self;
+        Some(float_text(v.is_nan(), v.is_sign_negative(), v == 0.0, v.is_infinite(), format!("{v:e}"), format!("{v:.0}")))
+    }
     fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Float(Float {
             exp: 8,
@@ -719,6 +792,10 @@ impl ToPsszSchema for f32 {
     }
 }
 impl ToPsszSchema for f64 {
+    fn default_text(&self) -> Option<String> {
+        let v = *self;
+        Some(float_text(v.is_nan(), v.is_sign_negative(), v == 0.0, v.is_infinite(), format!("{v:e}"), format!("{v:.0}")))
+    }
     fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Float(Float {
             exp: 11,
@@ -727,6 +804,9 @@ impl ToPsszSchema for f64 {
     }
 }
 impl ToPsszSchema for bool {
+    fn default_text(&self) -> Option<String> {
+        Some(if *self { "true".into() } else { String::new() })
+    }
     fn build_schema(_: &mut SchemaBuilder) -> PsszResult<AnyType> {
         Ok(AnyType::new(AnyValue::Custom(Custom {
             r#type: Box::new(AnyType::new(AnyValue::Int(Int {

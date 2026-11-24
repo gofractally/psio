@@ -151,6 +151,19 @@ builder records everything those depend on:
   The validation policy of `psio::nested<T, nested_validation::deferred>` is
   not recorded: both forms produce the same node.
 
+- **What the numbered formats need of a member** (protobuf, Cap'n Proto,
+  FlatBuffers; `docs/flatbuffers.md` and `docs/capnp.md`, "Schema"): the
+  member attributes `field` = `"N"` when `attr(member, field<N>)` states the
+  field number (absent: the 1-based position), `deprecated` = the version
+  of `deprecated_spec`, and `default` = the member initialiser of a `bool`,
+  integer, float or enum member when it is not zero (`"true"`, a decimal
+  integer — an enum's value —, the shortest decimal float, `nan`, `inf`,
+  `-inf`, `-0`). No PSSZ byte, key or text depends on them: the
+  schema-driven codecs accept them on a record member and do not read them,
+  and the run-time comparison does not compare them.
+- **No value.** `std::monostate` is `Tuple{}` (a variant's `NONE` /
+  `Void` alternative).
+
 - **Any JSON.** `psio::json_value` is `Custom{ Custom{List<u8>, "utf8"},
   "json" }`: a UTF-8 string on the wire, whose content is the value's JSON
   text and whose text form is that value itself (`docs/json.md`, "Any JSON

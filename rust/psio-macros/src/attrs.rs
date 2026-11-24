@@ -14,9 +14,9 @@
 //! | `psio` | `name = "..."` | item, variant, field | the name of the type in a schema; the name of an enumerator, alternative or member in a schema and in text |
 //! | `psio` | `rename_all = "..."` | item | a case convention for the member names of a struct or the variant names of an enum |
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
-//! | `psio` | `field = N` | field | the member's field number (C++ `field<N>`): its vtable slot order in FlatBuffers; the declaration position, from 1, by default |
-//! | `psio` | `deprecated` | field | the member keeps its place on the wire and is neither written nor read (FlatBuffers `deprecated`); a reader fills it with its default |
-//! | `psio` | `default = value` | field | the value of a scalar member that is not on the wire (C++: the member's initialiser): a literal, or an expression in a string (`default = "Color::Green"`, `default = "-1"`) |
+//! | `psio` | `field = N` | field | the member's field number (C++ `field<N>`): its vtable slot order in FlatBuffers; the declaration position, from 1, by default; the member attribute `field` of its schema |
+//! | `psio` | `deprecated` | field | the member keeps its place on the wire and is neither written nor read (FlatBuffers `deprecated`); a reader fills it with its default; the member attribute `deprecated` of its schema |
+//! | `psio` | `default = value` | field | the value of a scalar member that is not on the wire (C++: the member's initialiser): a literal, or an expression in a string (`default = "Color::Green"`, `default = "-1"`); when it is not zero, the member attribute `default` of its schema |
 //! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | length bounds of the member and of the positions below it (`psio::pssz::bounds`) |
 //! | `psio` | `sorted`, `unique` (`sorted_unique`), `unique_keys` | field | the elements of a list or an array are in non-descending / strictly ascending key order, or have pairwise different keys; also inside `element(...)` and friends |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |

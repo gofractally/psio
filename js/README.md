@@ -182,7 +182,13 @@ or the encoded bytes of a nested member (through `optional`), or
 `unique` and `uniqueKeys` for
 [order constraints](#order-constraints-sorted-unique-uniquekeys); and
 `jsonInt` / `ijsonInt: 'number' | 'string'` for the text form of its
-integers.
+integers; and `number`, `default` and `deprecated` for what the numbered
+formats (protobuf, Cap'n Proto, FlatBuffers) read of a member — its field
+number when it is not its position, the default of a scalar
+(`field(Status, { default: -1 })`; an enum's is its integer value), and
+`true` or the version that retired it. Those three are the member
+attributes `field`, `default` and `deprecated` of the Schema IR and change
+nothing in the member's PSSZ bytes, key or text.
 
 A variant alternative has **one label**: the key it is declared under. It is
 the `type` of the JavaScript value, the alternative's name in the Schema IR

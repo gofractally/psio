@@ -832,6 +832,10 @@ export function checkAttributes(values: IrAttribute[], site: Site, caps: boolean
         schemaError('pssz IR: malformed integer form attribute');
       continue;
     }
+    // What the numbered formats (protobuf, Cap'n Proto, FlatBuffers) read of
+    // a member: its field number, a scalar's default, that it is retired.
+    // None of them is in a PSSZ byte or in the text.
+    if (site === 'record_member' && (name === 'field' || name === 'default' || name === 'deprecated')) continue;
     // An untagged variant: the same bytes; in text the bare alternative.
     if (site === 'variant' && name === 'untagged') continue;
     schemaError('pssz IR: unsupported schema constraint or annotation');

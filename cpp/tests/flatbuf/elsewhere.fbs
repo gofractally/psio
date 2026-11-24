@@ -1,0 +1,4 @@
+// Included by schema_all.fbs.
+namespace elsewhere;
+
+table Elsewhere { x:int; }

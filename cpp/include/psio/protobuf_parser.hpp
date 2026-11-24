@@ -105,11 +105,11 @@ namespace psio::schema_types
                   while (!eof() &&
                          !(peek() == '*' && peek(1) == '/'))
                      advance();
-                  if (!eof())
-                  {
-                     advance();
-                     advance();
-                  }
+                  if (eof())
+                     throw protobuf_parse_error("a comment that does not end",
+                                                line, column);
+                  advance();
+                  advance();
                }
                else
                   break;
@@ -564,6 +564,12 @@ namespace psio::schema_types
                   continue;
                }
                auto case_name = _lex.read_ident();
+               //  (without this the loop made no progress on text that is
+               //  not a name — the end of the text, a stray character — and
+               //  grew `cases` until memory ran out)
+               if (case_name.empty())
+                  throw protobuf_parse_error("expected an enum value name",
+                                             _lex.line, _lex.column);
                _lex.skip_ws_and_comments();
                if (_lex.peek() == '=')
                {

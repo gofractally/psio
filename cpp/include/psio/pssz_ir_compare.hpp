@@ -77,7 +77,9 @@
 //   * the member attributes `jsonInt` / `ijsonInt`, and whether a variant is
 //     `untagged`.
 //
-// Never compared: `doc` / `description` / `visible` attributes, package,
+// Never compared: `doc` / `description` / `visible` attributes, the member
+// attributes `field` / `default` / `deprecated` (what the numbered formats
+// read: no PSSZ byte or text depends on them), package,
 // worlds and uses, and — because the Schema IR does not record them — the
 // member annotations `sorted` / `unique` / `unique_keys`, `as<Tag>`
 // overrides and binary adapters. For types that differ only in those the

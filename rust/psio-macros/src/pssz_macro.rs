@@ -1436,6 +1436,33 @@ fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms,
         .iter()
         .map(|m| schema_int_forms(k, m.field, forms))
         .collect::<syn::Result<Vec<_>>>()?;
+    // What the numbered formats read of a record member, after the others
+    // and in the order C++ `build_record_member` writes them: its stated
+    // field number, that it is retired, and a scalar default that is not
+    // zero. (A parameter of an argument list has none of them.)
+    let numbered: Vec<Tokens> = members
+        .iter()
+        .map(|m| {
+            if arguments.is_some() {
+                return quote!();
+            }
+            let mut out = Vec::new();
+            if let Some(number) = m.attrs.field_number {
+                out.push(schema_attribute(k, "field", &number.to_string()));
+            }
+            if m.attrs.deprecated {
+                out.push(schema_attribute(k, "deprecated", ""));
+            }
+            let default = m.attrs.default.as_ref().map(|value| {
+                let ty = &m.field.ty;
+                quote! {
+                    let __default: #ty = #value;
+                    __attributes.extend(#k::pssz::schema_ir::default_attribute(&__default)?);
+                }
+            });
+            quote!(#(__attributes.push(#out);)* #default)
+        })
+        .collect();
     // The order C++ SchemaBuilder emits.
     let mut attributes = Vec::new();
     if let Some(named) = arguments {
@@ -1458,6 +1485,7 @@ fn schema_record(k: &syn::Path, fields: &Fields, info: RecordInfo, forms: Forms,
                     #[allow(unused_mut)]
                     let mut __attributes: ::std::vec::Vec<#k::pssz::schema_ir::Attribute> = ::std::vec![#(#member_attributes),*];
                     __attributes.extend(<#types as #k::pssz::schema_ir::ToPsszSchema>::member_attributes());
+                    #numbered
                     __attributes
                 }
             }),*], attributes: ::std::vec![#(#attributes),*]
@@ -1479,6 +1507,26 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
     let (impl_g, _, where_c) = generics.split_for_impl();
     let (_, type_g, _) = input.generics.split_for_impl();
     let c_enum = c_like(&input, &opts)?;
+    // An enum over an integer is a scalar: as a member's default it is the
+    // decimal text of its value (nothing for zero).
+    let default_text = c_enum.as_ref().filter(|shape| shape.repr.is_some()).map(|shape| {
+        let (preamble, values) = shape.values();
+        let idents = shape.declared.iter().map(|v| &v.ident);
+        let other = shape.other.map(|v| {
+            let ident = &v.ident;
+            quote!(Self::#ident(value) => *value,)
+        });
+        quote! {
+            fn default_text(&self) -> ::core::option::Option<::std::string::String> {
+                #preamble
+                let value = match self {
+                    #(Self::#idents => #values,)*
+                    #other
+                };
+                ::core::option::Option::Some(if value == 0 { ::std::string::String::new() } else { value.to_string() })
+            }
+        }
+    });
     let body = match &input.data {
         // An enum is an Enum over its underlying integer: the wire form plus
         // the enumerator names and values (C++ PSIO_REFLECT_ENUM). The names
@@ -1668,6 +1716,7 @@ fn expand_schema(input: DeriveInput) -> syn::Result<Tokens> {
         impl #impl_g #k::pssz::schema_ir::ToPsszSchema for #name #type_g #where_c {
             fn schema_name() -> ::core::option::Option<::std::string::String> { #schema_name }
             #custom_id
+            #default_text
             fn build_schema(builder: &mut #k::pssz::schema_ir::SchemaBuilder) -> #k::pssz::PsszResult<#k::pssz::schema_ir::AnyType> { ::core::result::Result::Ok(#body) }
         }
     })

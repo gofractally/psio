@@ -52,7 +52,9 @@ const Shapes = record('Shapes', {
   capped: Capped, bounds: optional(Bounds),
 });
 const Wide = record('Wide', {
-  amount: u128, delta: i128, hash: u256, maybe: optional(u128), list: list(i128), status: Status,
+  amount: u128, delta: i128, hash: u256, maybe: optional(u128), list: list(i128),
+  // C++ `Status status = Status::pending;`: the member's default.
+  status: field(Status, { default: -1 }),
 });
 const Version = custom('Version', record('Version', { major: u16, minor: u16 }), versionHandler as CustomHandler<{ major: number; minor: number }>);
 const Account = custom('AccountName', u64, accountHandler as CustomHandler<bigint>);

@@ -96,6 +96,8 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
+#include <cmath>
 #include <tuple>
 #include <variant>
 #include <cstdint>
@@ -959,6 +961,10 @@ namespace psio::schema_types
                      ::psio::max_dynamic_data_v<U>.value())});
             return o;
          }
+         else if constexpr (std::is_same_v<U, std::monostate>)
+            // The unit type: a variant alternative without a value
+            // (FlatBuffers `NONE`, Cap'n Proto `Void`).
+            return Tuple{};
          else
          {
             // Fall back to Custom-tagged "unknown" so the IR keeps the
@@ -1216,7 +1222,61 @@ namespace psio::schema_types
          using eff = ::psio::effective_annotations_for<U, F, R::template member_pointer<I>>;
          Member member{std::string{R::template member_name<I>}, Box<AnyType>{insert<F>()}, {}};
          apply_member_annotations<F>(member, eff::value);
+         // What the numbered formats (protobuf, Cap'n Proto, FlatBuffers)
+         // read: the member's field number when it is stated
+         // (psio/detail/field_number.hpp: else its 1-based position), a
+         // retired member, and the member initialiser of a scalar when it is
+         // not zero (the FlatBuffers / Cap'n Proto default of the field).
+         using eff_t = std::remove_cvref_t<decltype(eff::value)>;
+         if constexpr (::psio::has_spec_v<::psio::field_num_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "field", std::to_string(std::get<::psio::field_num_spec>(eff::value).value)});
+         if constexpr (::psio::has_spec_v<::psio::deprecated_spec, eff_t>)
+            member.attributes.push_back(Attribute{
+                "deprecated",
+                std::string{std::get<::psio::deprecated_spec>(eff::value).version}});
+         using V = std::remove_cvref_t<F>;
+         if constexpr ((std::is_arithmetic_v<V> || std::is_enum_v<V>) && sizeof(V) <= 8 &&
+                       requires { U{}; })
+         {
+            const U    object{};
+            const V    value = object.*(R::template member_pointer<I>);
+            const auto text  = schema_scalar_text(value);
+            if (!text.empty())
+               member.attributes.push_back(Attribute{"default", text});
+         }
          return member;
+      }
+
+      // The text of a scalar default (the `default` member attribute):
+      // empty for zero (no attribute), else `true`, a decimal integer (an
+      // enum is its value), or the shortest decimal text that reads back as
+      // the same float (`nan`, `inf`, `-inf`, `-0` for those values).
+      template <typename V>
+      static std::string schema_scalar_text(V value)
+      {
+         if constexpr (std::is_same_v<V, bool>)
+            return value ? "true" : "";
+         else if constexpr (std::is_enum_v<V>)
+            return schema_scalar_text(static_cast<std::underlying_type_t<V>>(value));
+         else if constexpr (std::is_floating_point_v<V>)
+         {
+            if (value != value)
+               return "nan";
+            if (value == std::numeric_limits<V>::infinity())
+               return "inf";
+            if (value == -std::numeric_limits<V>::infinity())
+               return "-inf";
+            if (value == 0)
+               return std::signbit(value) ? "-0" : "";
+            char       buffer[64];
+            const auto r = std::to_chars(buffer, buffer + sizeof(buffer), value);
+            return std::string(buffer, r.ptr);
+         }
+         else if constexpr (std::is_signed_v<V>)
+            return value == 0 ? "" : std::to_string(static_cast<long long>(value));
+         else
+            return value == 0 ? "" : std::to_string(static_cast<unsigned long long>(value));
       }
 
       template <typename U, std::size_t... Is>
