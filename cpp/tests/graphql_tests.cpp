@@ -105,18 +105,29 @@ namespace
       bool                                   flag = false;
       std::string                            text;
       std::vector<J>                         items;
-      std::vector<std::pair<std::string, J>> members;
+      // (a member type of its own, completed after J: a
+      // std::pair<std::string, J> here is instantiated while J is still
+      // incomplete when J's own implicit constructor is what asks for it,
+      // which libstdc++'s pair and vector reject)
+      struct Member;
+      std::vector<Member> members;
 
-      const J& operator[](std::string_view key) const
-      {
-         static const J none;
-         for (const auto& [k, v] : members)
-            if (k == key)
-               return v;
-         return none;
-      }
-      bool is_null() const { return kind == psio::json_kind::null; }
+      const J& operator[](std::string_view key) const;
+      bool     is_null() const { return kind == psio::json_kind::null; }
    };
+   struct J::Member
+   {
+      std::string first;
+      J           second;
+   };
+   const J& J::operator[](std::string_view key) const
+   {
+      static const J none;
+      for (const auto& [k, v] : members)
+         if (k == key)
+            return v;
+      return none;
+   }
    bool read_json(psio::json_text_cursor& c, J& out)
    {
       if (!c.kind(out.kind))
