@@ -58,9 +58,11 @@ accessors):
   the same values. The reverse does not hold: psio refuses about 5 % of
   them that the official verifier takes (see "Validation").
 
-`conformance/flatbuf-vectors.json` pins 21 buffers and 14 that must be
-refused; Rust decodes and re-encodes the rows of the shapes its derive can
-declare to the same bytes (`conformance/flatbuf-vectors.md`).
+`conformance/flatbuf-vectors.json` pins 27 buffers, 427 that must be
+refused (with the reason and the position) and 62 corrupted ones the
+verifier accepts. Rust decodes and re-encodes all 27 to the same bytes and
+gives the same answer on every other row (`conformance/flatbuf-vectors.md`;
+"Rust" below).
 
 ## Type mapping
 
@@ -295,14 +297,157 @@ Vectors of unions; unions of structs or strings; `nested_flatbuffer`;
 ordinary offsets); 64-bit offsets and vectors; FlexBuffers; `required`
 other than a map's string key; a size-changing edit in place.
 
+## Rust
+
+`psio::flatbuf` (feature `flatbuf`): the same mapping, the same bytes, the
+same verifier.
+
+```rust
+use psio::flatbuf::{FbView, FbOptions};
+
+#[derive(Debug, PartialEq, psio::FbPack, psio::FbUnpack, psio::FbView)]
+struct Profile {
+    id: u64,
+    name: String,
+    verified: bool,
+}
+
+let bytes = psio::to_flatbuf(&profile);                        // Vec<u8>
+psio::validate_flatbuf::<Profile>(&bytes)?;                    // the verifier, Result<(), FbError>
+let value = psio::from_flatbuf::<Profile>(&bytes)?;            // verifies, then decodes
+let fast = psio::from_flatbuf_trusted::<Profile>(&bytes);      // no verification
+
+let view = FbView::<Profile>::new(&bytes)?;                    // verifies, then borrows
+view.name();                                                   // &str, zero copy
+let view = FbView::<Profile>::trusted(&bytes);                 // no verification
+
+let opts = FbOptions { file_identifier: Some(*b"PROF"), size_prefixed: true };
+let framed = psio::to_flatbuf_with(&profile, &opts);
+```
+
+(Compiled and run as `rust/psio/tests/flatbuf_api.rs` and the example at
+the top of `rust/psio/src/flatbuf/mod.rs`.)
+
+### Mapping
+
+| Rust | FlatBuffers |
+|---|---|
+| `bool`, `i8` … `u64`, `f32`, `f64` | `bool`, `byte` … `ulong`, `float`, `double` |
+| field-less `#[repr(int)]` enum | an `enum` of its repr type |
+| `String` | `string`, verified to be UTF-8 |
+| `psio::pssz::RawString` | `string`, any bytes (what C++ `std::string` holds) |
+| `Vec<T>` | `[T]`: scalars, enums, structs, strings, tables |
+| `[T; N]` in a struct | a fixed array `[T:N]` |
+| `[T; N]` in a table | a vector that must hold exactly N elements |
+| struct | `table` |
+| struct that is `#[psio(definition_will_not_change)]` and holds only scalars, enums, fixed arrays and such structs | `struct` |
+| `Option<S>`, S a scalar or enum | an optional scalar |
+| `Option<X>`, X anything else | the field; absent is `None` (`Some` is always written, even an empty string) |
+| enum whose variants hold one table each | `union`; a leading unit variant is `NONE` (C++ `std::monostate`) |
+| `BTreeSet<K>`, K a scalar or string | `[K]`, sorted |
+| `BTreeMap<K, V>` | `[Entry]` sorted by key |
+
+As in C++ the choice between table and struct is made from the member
+types, by constants (`FbPack::STRUCT`, `TABLE`, …): a
+`definition_will_not_change` record with a string member is a table. A
+type FlatBuffers cannot hold (`Vec<Vec<T>>`, `Option<Option<T>>`, a union
+of structs, …) and a struct, scalar or vector at the root of a buffer are
+compile-time errors that say so. The earlier crate wrapped a root scalar,
+string or vector in a one-field table; that is gone.
+
+Per member:
+
+* `#[psio(field = N)]` — the field number (C++ `field<N>`): vtable slots in
+  ascending order of it, the declaration position (from 1) by default;
+* `#[psio(default = 7)]`, `#[psio(default = "Color::Green")]` — the default
+  of a scalar member (C++: its initialiser; Rust has none, so it is
+  written here): a literal, or an expression in a string. A member whose
+  enum type has no enumerator 0 must declare one;
+* `#[psio(deprecated)]` — keeps the slot; neither written nor read. The
+  decoded member is its default.
+
+### Verifier
+
+`validate_flatbuf::<T>` (`FbUnpack::fb_validate`,
+`validate_flatbuf_with(bytes, &FbOptions, FbLimits)`) is the C++ verifier
+ported check for check: the same order, messages and positions, the same
+limits (depth 64, 1,000,000 tables). It never panics, reads outside the
+bytes or does unbounded work. `FbError` has `message()` and `offset()`.
+
+Two checks are Rust's own, because the Rust type cannot hold what C++
+accepts:
+
+* a `String` member must be UTF-8 (`flatbuf: string is not valid UTF-8`).
+  The scan is linear in the buffer however often a string is pointed at or
+  overlapped: once more bytes have been scanned than the buffer has, the
+  verifier remembers the ranges it has checked. `RawString` has no such
+  check;
+* an enum without a `#[psio(other)]` catch-all variant holds only its
+  enumerators (`flatbuf: unknown enum value`), as in the crate's pSSZ. With
+  the catch-all (`#[psio(other)] Other(u8)`) every value is accepted and
+  kept.
+
+With `RawString` and catch-all enums the accepted set is exactly C++'s:
+`rust/psio/tests/flatbuf_conformance.rs` checks all 489 rejected and
+corrupted rows of the fixture for the same verdict, message and position,
+and for the same types written with `String` and plain enums pins which
+rows differ (9 of the 62 corrupted rows C++ accepts are refused; in 2 of
+the 427 rejected rows a Rust-only check comes first).
+
+Evidence: `rust/psio/tests/flatbuf_fuzz.rs`, the cases of the C++ fuzz
+test — every truncation and eight replacements of every byte of seven
+encoded values (20,675 buffers, 8,387 valid), 300,000 random corruptions
+(39,214 valid), 180,000 probes of random bytes, the shared-sub-object
+buffer (40^12 paths, refused after 1,000,000 tables), 100,000 references
+to one 400 KiB string. On every buffer the view is walked in full through
+its accessors, with key lookups; when the buffer validates, what the
+accessors read is what the decoder gives, and it re-encodes to a valid
+buffer.
+
+### Views
+
+`FbView<'a, T>` reads in place. `FbView::<T>::new(bytes)` verifies first
+(`new_with` for an identifier, a size prefix or other limits);
+`FbView::<T>::trusted(bytes)` does not. Unlike in C++ there is one
+implementation behind both: safe Rust cannot skip the bounds checks, so a
+view from `trusted` is as safe as the C++ safe view — every offset, vtable
+entry and length is compared with the buffer, what does not fit reads as
+absent, nothing panics — and what `new` adds is the guarantee that the
+values are the ones that were written. `#[derive(FbView)]` gives the view
+one method per member, through a trait `<Record>FbAccessors`:
+
+| member | reads as |
+|---|---|
+| scalar, enum | the value; its default when absent |
+| `String` / `RawString` | `&str` / `&[u8]` |
+| table, struct | `FbView` (an absent one reads as defaults) |
+| `Vec<T>`, `[T; N]` | `FbVec`: `len`, `get(i)`, `iter`, `unpack`; `as_bytes` for `u8` |
+| `Option<X>` | `Option` of X's view |
+| `BTreeSet<K>` | `FbSet`: `len`, `get(i)`, `iter`, `contains`, `find`, `lower_bound` |
+| `BTreeMap<K, V>` | `FbMap`: `len`, `key(i)`, `value(i)`, `iter`, `get(key)`, `contains_key`, `find`, `lower_bound` |
+| union | `FbUnion`: `tag`, `is_none`, `unpack`, and one accessor per alternative (`payment.card()` is an `Option<FbView<Card>>`) |
+
+`view.unpack()` is the value. `FlatbufBuffer<T>` / `SharedFlatbuf<T>` own
+verified bytes and hand out the view (`as_view`). `psio::flatbuf::FbTable`
+/ `FbVector` are the untyped cursors underneath (fields by vtable slot),
+with the same safety.
+
+### Where Rust and C++ differ
+
+* `String` and closed enums: the two verifier checks above.
+* `from_flatbuf_trusted` and a view from `trusted` are safe functions: on
+  bytes that would not verify they give unspecified values, not undefined
+  behaviour. They are not bounded by the verifier's limits (a hostile
+  buffer can nest deeply or share sub-objects), so verify untrusted bytes.
+* A struct member has no default: an absent struct reads as zeros (in C++
+  as its members' initialisers).
+* `maxDynamicData` does not bound the buffer in Rust (the attribute is
+  pSSZ's there).
+* No in-place writes with the typed views (C++ `flatbuf_mutable_view`); the
+  untyped `FbMut` of the earlier crate remains and was not hardened.
+* `FbSchema` / `to_fbs_schema` (the earlier crate's `.fbs` text) and the
+  dynamic view know only the shapes they knew before.
+
 ## Other languages
 
-Rust (`psio::flatbuf`): the derive covers tables of scalars, strings,
-vectors of scalars / strings / tables and nested tables, and writes the
-same bytes as C++ for them (field order, vtable sharing and empty strings
-were aligned in this stage; `conformance/flatbuf-vectors.json`). The derive
-has no structs, unions, optional scalars, sorted-vector lookup, non-zero
-defaults or field ids, and the crate has **no verifier**: `fb_unpack` returns an error, stops with a slice-index panic,
-or accepts an invalid buffer depending on what it happens to index
-(`rust/psio/tests/flatbuf_conformance.rs` pins which). JavaScript and Python
-have no FlatBuffers support.
+JavaScript and Python have no FlatBuffers support.
