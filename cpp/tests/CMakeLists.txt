@@ -1,10 +1,11 @@
-# psio test runner. Uses the Catch2 v2 single-header bundled with
-# psizam (the single source of Catch2 in the tree, also used by psio
-# v1). Phase 0 scaffold creates one placeholder test; subsequent phases
-# add psio_<phase>_tests executables via psio_add_test().
+# psio test runner. Uses the vendored Catch2 v2 single header
+# (cpp/external/catch2/catch.hpp), through tests/catch2/catch.hpp, which
+# includes it and adds what one compiler / library pair needs. Phase 0
+# scaffold creates one placeholder test; subsequent phases add
+# psio_<phase>_tests executables via psio_add_test().
 
 set(PSIO_CATCH2_INCLUDE
-   ${CMAKE_CURRENT_SOURCE_DIR}/../external/catch2)
+   ${CMAKE_CURRENT_SOURCE_DIR}/catch2)
 
 # Helper — every phase's test executable calls this so they share the
 # same main(), Catch2 include path, C++ standard, and psio link.

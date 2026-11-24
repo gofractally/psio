@@ -38,7 +38,7 @@ stack deps of its own. (Consumers like `psiserve`, `psizam`,
 | Boost.Preprocessor | `find_package(Boost REQUIRED)` | system | `BOOST_PP_*` for `PSIO_REFLECT(...)` codegen — header-only, `Boost::headers` target only |
 | xxhash 0.8.2 | vendored | `external/xxhash/xxhash.h` | `XXH_INLINE_ALL` single-header used by pjson key prefilter and psch schema digest |
 | `find_byte` | vendored | `include/psio/detail/find_byte.hpp` | SWAR 8-byte byte search — copy of `ucc::find_byte` from psitri's small-utility lib (one symbol, ~50 lines) |
-| Catch2 v2 (tests only) | vendored | `external/catch2/catch.hpp` | Test framework. Single-header v2.7.2; v3 split into compiled units, deliberately not used |
+| Catch2 v2 (tests only) | vendored | `external/catch2/catch.hpp` | Test framework. Single-header v2.13.10 (the last v2 release; v2.13.5 and later build against glibc 2.34+); v3 split into compiled units, deliberately not used |
 
 ### Optional (per-feature)
 
