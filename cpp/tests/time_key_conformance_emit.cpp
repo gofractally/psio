@@ -141,10 +141,29 @@ namespace
    }
 
    // Values in ascending order (operator<); keys must ascend bytewise.
+   //
+   // Values that are equal share one key (duplicates; -0 and +0, key-spec.md
+   // "Float zero") and one of them is recorded. Which one must not be left
+   // to the sort: std::sort may put either of two equal elements first, and
+   // libc++ and libstdc++ do not agree. Equal values are therefore ordered by
+   // their PSSZ bytes (as unsigned bytes), so the one recorded is the one
+   // with the least encoding (+0 before -0), whatever the input order and
+   // the sort algorithm.
    template <typename T>
    void order(const std::string& name, std::vector<T> values)
    {
-      std::sort(values.begin(), values.end());
+      std::sort(values.begin(), values.end(), [](const T& a, const T& b) {
+         if (a < b)
+            return true;
+         if (b < a)
+            return false;
+         const auto pa = psio::encode(psio::pssz{}, a);
+         const auto pb = psio::encode(psio::pssz{}, b);
+         return std::lexicographical_compare(
+            pa.begin(), pa.end(), pb.begin(), pb.end(), [](char x, char y) {
+               return static_cast<unsigned char>(x) < static_cast<unsigned char>(y);
+            });
+      });
       Row& r = add("key-order", type_id<T>(), name);
       r.values.emplace();
       std::vector<char> last;

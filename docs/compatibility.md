@@ -189,13 +189,11 @@ languages can represent.
    - With libstdc++, PSIO needs the GNU dialect (`-std=gnu++23`, CMake's default)
      wherever a 128-bit integer goes through JSON text: under `-std=c++23`
      libstdc++ has no `std::to_chars` / `std::from_chars` for `__int128`.
-   - `conformance/time-key-vectors.json` is generated with `std::sort` over
-     values that include both zeros of a float; which of two equal elements comes
-     first is the library's choice, and the fixture records libc++'s. The
-     regeneration check (`psio_time_key_conformance_regen`) therefore fails with
-     libstdc++ on one row (`key-order/tuple<f32,f64>/mixed`), although every
-     consumer of the fixture passes. Making the emitter deterministic changes
-     that row and is pending a decision to regenerate the fixture.
+   - `conformance/time-key-vectors.json`: a key-order row records one of the
+     values that share a key (`-0` and `+0`). The emitter used to leave the
+     choice to `std::sort`, and libc++ and libstdc++ chose differently on one
+     row. Equal values are now ordered by their PSSZ bytes, so the fixture is
+     the same from either library (`psio_time_key_conformance_regen`).
 6. Supply the intended first-party license/notice files (manifests currently say
    MIT), review third-party notices, freeze versions and publish immutable tags.
    No artifacts have been published by this work.
