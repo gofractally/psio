@@ -320,12 +320,8 @@ TEST_CASE("assoc: which key types iterate in key order", "[assoc]")
          fast.emplace(static_cast<std::int16_t>(rng()),
                       std::string(rng() % 3, static_cast<char>('a' + rng() % 3)));
       std::vector<std::tuple<std::int16_t, std::string>> sorted(fast.begin(), fast.end());
-      std::sort(sorted.begin(), sorted.end(),
-                [](const auto& a, const auto& b) { return key(a) < key(b) ||
-                   (key(a) != key(b) && std::lexicographical_compare(
-                       key(a).begin(), key(a).end(), key(b).begin(), key(b).end(),
-                       [](char x, char y) { return static_cast<unsigned char>(x) <
-                                                   static_cast<unsigned char>(y); })); });
+      // (one comparator: the key bytes, compared as unsigned, each key
+      // encoded once so that begin() and end() are of one buffer)
       std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
          const Bytes ka = key(a), kb = key(b);
          return std::lexicographical_compare(
