@@ -29,8 +29,8 @@ string / vector not written.
 
 ## Rows
 
-Version 2 (version 1 had no `accept_corrupt` section, no `at`, and no
-options on rejected rows).
+Version 2 (version 1 had no `accept_corrupt` and `mutation_digests`
+sections, no `at`, and no options on rejected rows).
 
 `accept`: `{id, type, wire_hex}`, plus `file_identifier` (the four
 characters after the root offset) and / or `size_prefixed: true` (the
@@ -72,16 +72,31 @@ stricter types than C++ differs:
 A consumer accepts these rows, and what it decodes re-encodes to a buffer
 that validates.
 
-Together the `reject` and `accept_corrupt` rows pin the accepted set: the
-same bytes get the same answer, for the same reason, in every language.
+`mutation_digests`: `{type, base, seed, count, accepted, digest}`: the
+verdicts of the verifier on `count` corruptions of the accepted row `base`,
+as one number. The corruptions are drawn as for the `mutated` rows
+(`corrupt` in the emitter: splitmix64 seeded with `seed`; one or two edits;
+an edit is a position `next % size` and then, by `next % 6`: a byte set to
+`next`; a byte plus 4; one bit `next % 8` flipped; the aligned 32-bit word
+set to `next % (size + 8)` when `next % 2`, else to `next`; the aligned
+16-bit word set to `next % 96`; a truncation at the position). The digest
+is FNV-1a (64-bit) over, per buffer: the byte 1 when it is accepted; else
+the byte 0, the message, and the position as 4 bytes, little-endian.
+`accepted` counts the accepted ones. A consumer that draws the same
+corruptions and arrives at the same number agrees on every verdict, reason
+and position: 300,000 buffers over ten rows.
+
+Together the `reject`, `accept_corrupt` and `mutation_digests` rows pin the
+accepted set: the same bytes get the same answer, for the same reason, in
+every language.
 
 ## Consumers
 
-| Language | Accepted rows | Rejected rows | Corrupted rows C++ accepts |
-|---|---|---|---|
-| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 427 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer |
-| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 427 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below |
-| JavaScript, Python | none: neither package implements FlatBuffers | none | none |
+| Language | Accepted rows | Rejected rows | Corrupted rows C++ accepts | Digests |
+|---|---|---|---|---|
+| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 427 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer | computed by the emitter |
+| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 427 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below | all ten reproduced with the `raw` declarations: 300,000 buffers, 82,459 accepted; with the `natural` ones every buffer C++ refuses is refused and an accepted one is refused only for the two reasons below |
+| JavaScript, Python | none: neither package implements FlatBuffers | none | none | none |
 
 Rust declares the types twice. `raw` holds what the C++ types hold:
 `RawString` members (any bytes) and an enum with a `#[psio(other)]`

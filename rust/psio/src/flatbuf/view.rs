@@ -2,7 +2,7 @@
 //! `psio::flatbuf_view<T>` / `flatbuf_trusted_view<T>`.
 //!
 //! [`FbView<'a, T>`](FbView) reads a `T` in place. There are two ways to
-//! obtain one, as for [`PsszView`](crate::PsszView):
+//! obtain one, as for [`PsszView`](struct@crate::PsszView):
 //!
 //! * [`FbView::new`] runs the verifier first: use it for untrusted bytes.
 //! * [`FbView::trusted`] does not: the caller vouches for the bytes

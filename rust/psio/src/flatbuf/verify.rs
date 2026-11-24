@@ -410,3 +410,49 @@ pub(crate) fn check_buffer(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The range tracker gives the answer of a full scan, whatever was
+    /// checked before and however the ranges overlap.
+    #[test]
+    fn remembered_utf8_ranges_answer_as_a_full_scan_does() {
+        let mut state = 0x2545f4914f6cdd1du64;
+        let mut next = move |n: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % n as u64) as usize
+        };
+        // Text with one-, two-, three- and four-byte characters, and a few
+        // bytes that are never valid.
+        let pieces: [&[u8]; 8] = [b"a", b"\0", "é".as_bytes(), "€".as_bytes(), "😀".as_bytes(), b"\xff", b"\x80", b"zz"];
+        let (mut checked, mut valid) = (0, 0);
+        for _ in 0..300 {
+            let mut buf = Vec::new();
+            while buf.len() < 40 + next(80) {
+                // Mostly text; an invalid byte now and then.
+                let piece = if next(12) == 0 { 5 + next(2) } else { [0, 1, 2, 3, 4, 7][next(6)] };
+                buf.extend_from_slice(pieces[piece]);
+            }
+            let mut seen = Utf8Seen::default();
+            for _ in 0..200 {
+                let start = next(buf.len());
+                let end = start + next(buf.len() - start + 1);
+                let expected = std::str::from_utf8(&buf[start..end]).is_ok();
+                assert_eq!(seen.check(&buf, start, end), expected, "{buf:?} {start}..{end} after {:?}", seen.ranges);
+                checked += 1;
+                valid += expected as usize;
+                // The ranges stay disjoint and are all valid text.
+                let mut last = 0;
+                for (&s, &e) in &seen.ranges {
+                    assert!(s >= last && s < e && std::str::from_utf8(&buf[s..e]).is_ok());
+                    last = e;
+                }
+            }
+        }
+        assert!(valid > 1000 && checked - valid > 1000, "{valid} of {checked}");
+    }
+}

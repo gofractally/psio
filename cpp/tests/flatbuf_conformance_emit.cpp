@@ -114,7 +114,88 @@ namespace
       }
    };
 
-   // Deterministic corruptions of `base` (the edits of flatbuf_fuzz_tests.cpp):
+   // One corruption of `base`: one or two edits (the edits of
+   // flatbuf_fuzz_tests.cpp), drawn from `rng` in this order.
+   Bytes corrupt(const Bytes& base, Rng& rng)
+   {
+      Bytes     b     = base;
+      const int edits = 1 + static_cast<int>(rng.next() % 2);
+      for (int e = 0; e < edits && !b.empty(); ++e)
+      {
+         const std::size_t at = rng.next() % b.size();
+         switch (rng.next() % 6)
+         {
+            case 0: b[at] = static_cast<char>(rng.next()); break;
+            case 1: b[at] = static_cast<char>(b[at] + 4); break;
+            case 2: b[at] = static_cast<char>(b[at] ^ (1u << (rng.next() % 8))); break;
+            case 3:
+            {
+               // A 32-bit word: an offset or a length.
+               const std::size_t   w = at & ~std::size_t{3};
+               const std::uint32_t v =
+                  rng.next() % 2 ? static_cast<std::uint32_t>(rng.next() % (b.size() + 8))
+                                 : static_cast<std::uint32_t>(rng.next());
+               if (w + 4 <= b.size())
+                  std::memcpy(b.data() + w, &v, 4);
+               break;
+            }
+            case 4:
+            {
+               // A 16-bit word: a vtable entry.
+               const std::size_t   w = at & ~std::size_t{1};
+               const std::uint16_t v = static_cast<std::uint16_t>(rng.next() % 96);
+               if (w + 2 <= b.size())
+                  std::memcpy(b.data() + w, &v, 2);
+               break;
+            }
+            default: b.resize(at); break;
+         }
+      }
+      return b;
+   }
+
+   struct Digest
+   {
+      std::string   type, base;
+      std::uint64_t seed = 0, count = 0, accepted = 0, digest = 0;
+   };
+   std::vector<Digest> digests;
+
+   // The verdicts of the verifier on `count` corruptions of the accepted
+   // row `base_id`, folded into one number (FNV-1a over, per buffer: 1 when
+   // it is accepted; else 0, the message, and the position as 4 bytes,
+   // little-endian). A consumer draws the same corruptions and must arrive
+   // at the same number: every verdict, reason and position agrees.
+   template <typename T>
+   void digest(const std::string& type, const std::string& name, const T& value,
+               std::uint64_t seed, std::uint64_t count)
+   {
+      const Bytes   base = psio::to_flatbuf(value);
+      Rng           rng{seed};
+      std::uint64_t h    = 1469598103934665603ull;
+      const auto    mix  = [&](unsigned char c) { h = (h ^ c) * 1099511628211ull; };
+      Digest        d{type, type + "/" + name, seed, count, 0, 0};
+      for (std::uint64_t i = 0; i < count; ++i)
+      {
+         const Bytes b  = corrupt(base, rng);
+         const auto  st = psio::validate_flatbuf<T>(b);
+         if (st.ok())
+         {
+            mix(1);
+            ++d.accepted;
+            continue;
+         }
+         mix(0);
+         for (const char c : st.error().what)
+            mix(static_cast<unsigned char>(c));
+         for (int k = 0; k < 4; ++k)
+            mix(static_cast<unsigned char>(st.error().byte_offset >> (8 * k)));
+      }
+      d.digest = h;
+      digests.push_back(d);
+   }
+
+   // Deterministic corruptions of `base`:
    // the first `rejects` that the verifier refuses, with its message, and
    // the first `accepts` that it accepts.
    template <typename T>
@@ -125,39 +206,7 @@ namespace
       int n_rejected = 0, n_accepted = 0;
       for (int iter = 0; iter < 100000 && (n_rejected < rejects || n_accepted < accepts); ++iter)
       {
-         Bytes     b     = base;
-         const int edits = 1 + static_cast<int>(rng.next() % 2);
-         for (int e = 0; e < edits && !b.empty(); ++e)
-         {
-            const std::size_t at = rng.next() % b.size();
-            switch (rng.next() % 6)
-            {
-               case 0: b[at] = static_cast<char>(rng.next()); break;
-               case 1: b[at] = static_cast<char>(b[at] + 4); break;
-               case 2: b[at] = static_cast<char>(b[at] ^ (1u << (rng.next() % 8))); break;
-               case 3:
-               {
-                  // A 32-bit word: an offset or a length.
-                  const std::size_t   w = at & ~std::size_t{3};
-                  const std::uint32_t v =
-                     rng.next() % 2 ? static_cast<std::uint32_t>(rng.next() % (b.size() + 8))
-                                    : static_cast<std::uint32_t>(rng.next());
-                  if (w + 4 <= b.size())
-                     std::memcpy(b.data() + w, &v, 4);
-                  break;
-               }
-               case 4:
-               {
-                  // A 16-bit word: a vtable entry.
-                  const std::size_t   w = at & ~std::size_t{1};
-                  const std::uint16_t v = static_cast<std::uint16_t>(rng.next() % 96);
-                  if (w + 2 <= b.size())
-                     std::memcpy(b.data() + w, &v, 2);
-                  break;
-               }
-               default: b.resize(at); break;
-            }
-         }
+         const Bytes b = corrupt(base, rng);
          if (b == base)
             continue;
          const auto st = psio::validate_flatbuf<T>(b);
@@ -534,6 +583,22 @@ namespace
       mutate<Basket>("Basket", psio::to_flatbuf(conformance_basket()), 3, 60, 10);
       mutate<Order>("Order", psio::to_flatbuf(compact_order()), 4, 240, 30);
       mutate<Longs>("Longs", psio::to_flatbuf(Longs{{1, 2, 3}, {0.5}}), 5, 20, 4);
+
+      // ── The verdicts on many more corruptions, as one number each ─────
+      digest<Profile>("Profile", "sample", sample_profile(), 11, 30000);
+      digest<Tree>("Tree", "nested", conformance_tree(), 12, 30000);
+      digest<Basket>("Basket", "full", conformance_basket(), 13, 40000);
+      digest<Order>("Order", "compact", compact_order(), 14, 60000);
+      digest<Order>("Order", "sample", sample_order(), 15, 60000);
+      digest<Order>("Order", "empty", Order{}, 16, 20000);
+      digest<Scalars>("Scalars", "sample",
+                      Scalars{true, -1, 2, -3, 4, -5, 6, -7, 8, 1.5f, -2.25, Color::blue, 'x'}, 17,
+                      20000);
+      digest<Longs>("Longs", "sample", Longs{{1, 0xffffffffffffffffull, 3}, {0.5, -0.0}}, 18, 20000);
+      digest<Renumbered>("Renumbered", "sample", Renumbered{5, "five", -5}, 19, 10000);
+      digest<Sparse>("Sparse", "rows",
+                     Sparse{{{1, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 6}, {0, 2, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}, {}}},
+                     20, 10000);
    }
 
    std::string quote(const std::string& s)
@@ -582,6 +647,17 @@ namespace
          out += "{\"id\":" + quote(r.id) + ",\"type\":" + quote(r.type) + ",\"wire_hex\":" +
                 quote(r.wire_hex) + "}";
          out += i + 1 < accepted_corrupt.size() ? ",\n" : "\n";
+      }
+      out += "],\n\"mutation_digests\":[\n";
+      for (std::size_t i = 0; i < digests.size(); ++i)
+      {
+         const Digest& d = digests[i];
+         char          hex[17];
+         std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(d.digest));
+         out += "{\"type\":" + quote(d.type) + ",\"base\":" + quote(d.base) +
+                ",\"seed\":" + std::to_string(d.seed) + ",\"count\":" + std::to_string(d.count) +
+                ",\"accepted\":" + std::to_string(d.accepted) + ",\"digest\":" + quote(hex) + "}";
+         out += i + 1 < digests.size() ? ",\n" : "\n";
       }
       out += "]}\n";
       return out;

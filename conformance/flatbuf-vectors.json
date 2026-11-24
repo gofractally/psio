@@ -520,4 +520,16 @@
 {"id":"Longs/mutated_valid_001","type":"Longs","wire_hex":"100000000000000008000c000400080008000000180000000400000001000000000000000000e03f0000000003000000010000040000000002000000000000000300000000000000"},
 {"id":"Longs/mutated_valid_002","type":"Longs","wire_hex":"100000000000000008000c000400080008000000180000000400000001000000000000000000e03f59000000030000004c0000000000000002000000000000000300000000000000"},
 {"id":"Longs/mutated_valid_003","type":"Longs","wire_hex":"100000000000000008000c000400080008000000180000000400000001000000000421000000e03f0000000003000000010000000000000002000000000000000300000000000000"}
+],
+"mutation_digests":[
+{"type":"Profile","base":"Profile/sample","seed":11,"count":30000,"accepted":11547,"digest":"0981647ce20112d4"},
+{"type":"Tree","base":"Tree/nested","seed":12,"count":30000,"accepted":4309,"digest":"31da91f9c0987fdc"},
+{"type":"Basket","base":"Basket/full","seed":13,"count":40000,"accepted":11503,"digest":"5f4096026b3faf6e"},
+{"type":"Order","base":"Order/compact","seed":14,"count":60000,"accepted":13135,"digest":"c3feafd48bea0c15"},
+{"type":"Order","base":"Order/sample","seed":15,"count":60000,"accepted":16356,"digest":"dad24a3c92818e3a"},
+{"type":"Order","base":"Order/empty","seed":16,"count":20000,"accepted":5406,"digest":"df620a9fa3e238db"},
+{"type":"Scalars","base":"Scalars/sample","seed":17,"count":20000,"accepted":7956,"digest":"f84d611909553c76"},
+{"type":"Longs","base":"Longs/sample","seed":18,"count":20000,"accepted":8030,"digest":"751eac67c815eaf5"},
+{"type":"Renumbered","base":"Renumbered/sample","seed":19,"count":10000,"accepted":3179,"digest":"b467dc87ef2270e3"},
+{"type":"Sparse","base":"Sparse/rows","seed":20,"count":10000,"accepted":1038,"digest":"91da4deebea7c41b"}
 ]}

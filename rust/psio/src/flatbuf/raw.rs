@@ -5,7 +5,7 @@
 //! vtable entry and length is compared with the buffer before it is used;
 //! what does not fit reads as absent — a default, an empty string, an empty
 //! vector. Nothing here panics or reads outside the bytes it was given,
-//! whatever they are. The typed views ([`FbView`](super::FbView)) and the
+//! whatever they are. The typed views ([`FbView`](struct@super::FbView)) and the
 //! decoder are written on top of these.
 
 /// `N` bytes at `pos`, when the buffer has them.

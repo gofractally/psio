@@ -59,10 +59,11 @@ accessors):
   them that the official verifier takes (see "Validation").
 
 `conformance/flatbuf-vectors.json` pins 27 buffers, 427 that must be
-refused (with the reason and the position) and 62 corrupted ones the
-verifier accepts. Rust decodes and re-encodes all 27 to the same bytes and
-gives the same answer on every other row (`conformance/flatbuf-vectors.md`;
-"Rust" below).
+refused (with the reason and the position), 62 corrupted ones the verifier
+accepts, and the verdicts on 300,000 further corruptions as ten digests.
+Rust decodes and re-encodes all 27 to the same bytes and gives the same
+answer on every other buffer (`conformance/flatbuf-vectors.md`; "Rust"
+below).
 
 ## Type mapping
 
@@ -387,12 +388,16 @@ accepts:
   the catch-all (`#[psio(other)] Other(u8)`) every value is accepted and
   kept.
 
-With `RawString` and catch-all enums the accepted set is exactly C++'s:
-`rust/psio/tests/flatbuf_conformance.rs` checks all 489 rejected and
-corrupted rows of the fixture for the same verdict, message and position,
-and for the same types written with `String` and plain enums pins which
-rows differ (9 of the 62 corrupted rows C++ accepts are refused; in 2 of
-the 427 rejected rows a Rust-only check comes first).
+With `RawString` and catch-all enums the accepted set is C++'s on every
+buffer tested: `rust/psio/tests/flatbuf_conformance.rs` checks all 489
+rejected and corrupted rows of the fixture for the same verdict, message
+and position, and reproduces the fixture's ten digests — the verdict,
+message and position of the C++ verifier on 300,000 corruptions (82,459
+accepted) that Rust draws the same way. For the same types written with
+`String` and plain enums it pins which rows differ (9 of the 62 corrupted
+rows C++ accepts are refused; in 2 of the 427 rejected rows a Rust-only
+check comes first) and checks, on the 300,000, that nothing C++ refuses is
+accepted and that an extra refusal is one of the two above.
 
 Evidence: `rust/psio/tests/flatbuf_fuzz.rs`, the cases of the C++ fuzz
 test — every truncation and eight replacements of every byte of seven

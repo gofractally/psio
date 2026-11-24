@@ -10,7 +10,8 @@ first-class Cap'n Proto and FlatBuffers from the first generation
 
 State: Rust has the FlatBuffers verifier, the views and the C++ mapping.
 Commits on top of `ed796dd`: `e50809b` (verifier, mapping, derives, views,
-fixture version 2, tests) and the commit that carries this note (docs).
+fixture version 2, tests), `0c60cbe` (docs, this note) and one more (the
+verdict digests over 300,000 corruptions).
 User documentation: `docs/flatbuffers.md`, "Rust".
 
 **What exists now** (`rust/psio/src/flatbuf/`, `rust/psio-macros/src/fb_macro.rs`):
@@ -40,20 +41,29 @@ User documentation: `docs/flatbuffers.md`, "Rust".
   `psio_flatbuf_conformance_emit` (which now also emits one rejected row per
   reason the verifier has, deterministic corruptions with the C++ verdict
   and position, and the corrupted buffers C++ accepts): 27 accepted, 427
-  rejected, 62 accepted-though-corrupted (was 21 / 14 / none).
+  rejected, 62 accepted-though-corrupted (was 21 / 14 / none), and ten
+  `mutation_digests`: the C++ verdict, message and position on 300,000
+  further corruptions, each row folded into one number.
   `psio_flatbuf_conformance_regen` is green.
 * `rust/psio/tests/flatbuf_conformance.rs`: all 27 accepted rows decode to
   their value and re-encode to the same bytes (checked decode, trusted
   decode, view; with `String` members and with `RawString` members); all 427
   rejected rows are refused, with the C++ message and position for the
   declarations that hold what the C++ types hold; all 62 corrupted rows are
-  accepted by those.
+  accepted by those; all ten digests are reproduced (300,000 buffers,
+  82,459 accepted: every verdict, message and position as in C++).
 * `rust/psio/tests/flatbuf_fuzz.rs`: 500,675 buffers (20,675 truncations
   and byte replacements, 300,000 random corruptions, 180,000 probes of
   random bytes), the view walked in full on each; the shared-sub-object
   buffer; shared and overlapping strings.
-* `rust/psio/tests/flatbuf_api.rs`: the API (8 tests); the 62 unit tests of
-  `psio::flatbuf` (builder and wire layout, kept from before).
+* `rust/psio/tests/flatbuf_api.rs`: the API (8 tests); the unit tests of
+  `psio::flatbuf` (builder and wire layout, kept from before; the UTF-8
+  range tracker against a full scan, 60,000 random ranges).
+* Totals on the final tree: `cargo test --workspace --locked
+  --no-fail-fast` 1,139 passed, with `--all-features` 1,193 passed (1,150 /
+  1,204 before: about 50 unit tests of the removed untyped view, of the
+  hand-written `FbPack` impls and of root scalars went with that code).
+  C++ 433/433 in both simdjson configurations.
 
 **Decisions that change behaviour** (flag for review).
 

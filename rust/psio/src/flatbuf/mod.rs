@@ -4,7 +4,7 @@
 //! the C++ implementation write (`conformance/flatbuf-vectors.json`).
 //!
 //! ```
-//! use psio::flatbuf::{FbView, FbPack, FbUnpack};
+//! use psio::flatbuf::FbView;
 //!
 //! #[derive(Debug, PartialEq, psio::FbPack, psio::FbUnpack, psio::FbView)]
 //! struct Profile {

@@ -128,3 +128,92 @@ fn corrupted_buffers_the_verifier_accepts() {
     assert!(stricter.contains(&("Profile/name_not_utf8", RUST_ONLY[0])));
     assert!(stricter.contains(&("Order/color_out_of_range", RUST_ONLY[1])));
 }
+
+/// splitmix64, as in `cpp/tests/flatbuf_conformance_emit.cpp`.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e3779b97f4a7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+        z ^ (z >> 31)
+    }
+}
+
+/// One corruption of `base`: `corrupt` of the C++ emitter, draw for draw.
+fn corrupt(base: &[u8], rng: &mut Rng) -> Vec<u8> {
+    let mut b = base.to_vec();
+    let edits = 1 + rng.next() % 2;
+    for _ in 0..edits {
+        if b.is_empty() {
+            break;
+        }
+        let at = (rng.next() % b.len() as u64) as usize;
+        match rng.next() % 6 {
+            0 => b[at] = rng.next() as u8,
+            1 => b[at] = b[at].wrapping_add(4),
+            2 => b[at] ^= 1 << (rng.next() % 8),
+            3 => {
+                let w = at & !3;
+                let v = if rng.next() % 2 != 0 { (rng.next() % (b.len() as u64 + 8)) as u32 } else { rng.next() as u32 };
+                if w + 4 <= b.len() {
+                    b[w..w + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            4 => {
+                let w = at & !1;
+                let v = (rng.next() % 96) as u16;
+                if w + 2 <= b.len() {
+                    b[w..w + 2].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            _ => b.truncate(at),
+        }
+    }
+    b
+}
+
+/// The differential check at scale: for 300,000 corruptions drawn the way
+/// the C++ emitter draws them, the verdict, the reason and the position of
+/// every one agree with C++ (they fold into the number C++ computed).
+#[test]
+fn verdicts_on_300_000_corruptions_agree_with_cpp() {
+    let fx = fixture();
+    let accept = rows(&fx, "accept");
+    let (mut buffers, mut accepted_total) = (0u64, 0u64);
+    for d in fx["mutation_digests"].as_array().unwrap() {
+        let (ty, base) = (d["type"].as_str().unwrap(), d["base"].as_str().unwrap());
+        let base = &accept.iter().find(|row| row.id == base).unwrap().bytes;
+        let mut rng = Rng(d["seed"].as_u64().unwrap());
+        let mut h: u64 = 1469598103934665603;
+        let mut mix = |c: u8| h = (h ^ c as u64).wrapping_mul(1099511628211);
+        let mut accepted = 0u64;
+        let count = d["count"].as_u64().unwrap();
+        for _ in 0..count {
+            let b = corrupt(base, &mut rng);
+            match raw::verdict(ty, &b, &FbOptions::default()) {
+                Ok(()) => {
+                    mix(1);
+                    accepted += 1;
+                    // What String and a plain enum add is only ever a refusal.
+                    if let Err(e) = natural::verdict(ty, &b, &FbOptions::default()) {
+                        assert!(RUST_ONLY.contains(&e.message()), "{e}");
+                    }
+                }
+                Err(e) => {
+                    mix(0);
+                    e.message().bytes().for_each(&mut mix);
+                    e.offset().to_le_bytes().into_iter().for_each(&mut mix);
+                    assert!(natural::verdict(ty, &b, &FbOptions::default()).is_err());
+                }
+            }
+        }
+        assert_eq!(accepted, d["accepted"].as_u64().unwrap(), "{} seed {}: accepted", d["base"], d["seed"]);
+        assert_eq!(format!("{h:016x}"), d["digest"].as_str().unwrap(), "{} seed {}", d["base"], d["seed"]);
+        buffers += count;
+        accepted_total += accepted;
+    }
+    println!("flatbuf-vectors.json: {buffers} corruptions, {accepted_total} accepted: every verdict, reason and position as in C++");
+    assert_eq!(buffers, 300_000);
+}
