@@ -988,6 +988,7 @@ namespace psio {
             ok = validate_leaf<T>(bytes, 0);
          if (!ok)
             return codec_fail("wit: invalid buffer", 0, "wit");
+#if defined(__cpp_exceptions)
          try
          {
             T out{};
@@ -1002,6 +1003,13 @@ namespace psio {
             return codec_fail(
                "wit: decode failed during validate_strict", 0, "wit");
          }
+#else
+         // No exceptions: the semantic walk cannot materialise the value
+         // (a failed lift would abort). As in frac.hpp / ssz.hpp.
+         if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+            return codec_fail("wit: guest strict semantic validation unsupported", 0, "wit");
+         return codec_ok();
+#endif
       }
 
       template <typename T>

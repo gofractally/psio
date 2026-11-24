@@ -160,7 +160,12 @@ languages can represent.
    behavior. Binary fixture agreement does not settle these APIs.
    Repair the advertised exception-disabled build as well: headers still refer
    to `codec_exception` when its definition is disabled, and contain unguarded
-   throws. A guest-compiler integration probe for the C++ consumer compiles with
+   throws. `psio_noexceptions_headers_check` (cpp/tests) compiles every public
+   header with `-fno-exceptions -fno-rtti` and `PSIO_EXCEPTIONS_ENABLED=0`,
+   except the ones named in `PSIO_NEEDS_EXCEPTIONS_HEADERS` there: the
+   schema-text parsers and emitters and their shared layouts, pjson and what
+   is built on it, psch, msgpack (all report by throwing), and the two WIT
+   generator headers that use `typeid`. Those have no exception-free form yet. A guest-compiler integration probe for the C++ consumer compiles with
    `PSIO_EXCEPTIONS_ENABLED=1`, but cannot link against this bootstrap's WASI
    SDK because `__cxa_allocate_exception` / `__cxa_throw` are unavailable. A
    tested exception-free psio profile (or a separately supported Wasm exception

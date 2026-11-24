@@ -1516,6 +1516,7 @@ namespace psio {
       {
          if (bytes.empty())
             return codec_fail("bin: empty buffer", 0, "bin");
+#if defined(__cpp_exceptions)
          if constexpr (::psio::Reflected<T>)
          {
             try
@@ -1531,6 +1532,20 @@ namespace psio {
             }
          }
          return codec_ok();
+#else
+         // No exceptions: the semantic walk cannot materialise the value
+         // (a failed decode would abort), so the bytes get the structural
+         // check and a type whose specs need the value is refused. As in
+         // frac.hpp / ssz.hpp.
+         if constexpr (::psio::Reflected<T>)
+         {
+            if constexpr (!::psio::detail::vstrict::can_validate_without_materialization<T>())
+               return codec_fail("bin: guest strict semantic validation unsupported", 0, "bin");
+            else
+               return tag_invoke(::psio::validate<T>, bin{}, static_cast<T*>(nullptr), bytes);
+         }
+         return codec_ok();
+#endif
       }
 
       template <typename T>
