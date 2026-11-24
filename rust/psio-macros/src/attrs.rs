@@ -14,6 +14,9 @@
 //! | `psio` | `name = "..."` | item, variant, field | the name of the type in a schema; the name of an enumerator, alternative or member in a schema and in text |
 //! | `psio` | `rename_all = "..."` | item | a case convention for the member names of a struct or the variant names of an enum |
 //! | `psio` | `skip` | field | the field is not a member of the type in any format; a reader fills it with its default |
+//! | `psio` | `field = N` | field | the member's field number (C++ `field<N>`): its vtable slot order in FlatBuffers; the declaration position, from 1, by default |
+//! | `psio` | `deprecated` | field | the member keeps its place on the wire and is neither written nor read (FlatBuffers `deprecated`); a reader fills it with its default |
+//! | `psio` | `default = value` | field | the value of a scalar member that is not on the wire (C++: the member's initialiser): a literal, or an expression in a string (`default = "Color::Green"`, `default = "-1"`) |
 //! | `psio` | `max = N`, `element(...)`, `keys(...)`, `values(...)`, `at(I, ...)` | field | length bounds of the member and of the positions below it (`psio::pssz::bounds`) |
 //! | `psio` | `sorted`, `unique` (`sorted_unique`), `unique_keys` | field | the elements of a list or an array are in non-descending / strictly ascending key order, or have pairwise different keys; also inside `element(...)` and friends |
 //! | `psio` | `other` | variant | the catch-all of a field-less `#[repr(int)]` enum |
@@ -83,6 +86,12 @@ const KEYS: &[Key] = &[
           because: "names the members or variants for every format", usage: "rename_all = \"...\"" },
     Key { name: "skip", namespace: "psio", sites: &[Site::Field],
           because: "says what the members of the type are for every format", usage: "skip" },
+    Key { name: "field", namespace: "psio", sites: &[Site::Field],
+          because: "numbers the member for every format with field numbers", usage: "field = N" },
+    Key { name: "deprecated", namespace: "psio", sites: &[Site::Field],
+          because: "retires the member for every format", usage: "deprecated" },
+    Key { name: "default", namespace: "psio", sites: &[Site::Field],
+          because: "is the member's value when it is not on the wire, for every format", usage: "default = value" },
     Key { name: "max", namespace: "psio", sites: &[Site::Field],
           because: "bounds the member for every format", usage: "max = N" },
     Key { name: "element", namespace: "psio", sites: &[Site::Field],
@@ -170,6 +179,12 @@ pub(crate) struct Attrs {
     /// `#[psio(max = N, element(...), keys(...), values(...), at(I, ...))]`:
     /// the bounds of the member and of the positions below it.
     pub(crate) bound: Option<Bound>,
+    /// `#[psio(field = N)]`.
+    pub(crate) field_number: Option<u32>,
+    /// `#[psio(deprecated)]`.
+    pub(crate) deprecated: bool,
+    /// `#[psio(default = value)]`: the expression.
+    pub(crate) default: Option<proc_macro2::TokenStream>,
     /// `#[psio(skip)]` or `#[serde(skip)]`.
     pub(crate) skip: bool,
     /// `#[serde(default = "path")]` on a skipped field: what a reader fills
@@ -598,6 +613,38 @@ fn store(out: &mut Attrs, key: &Key, meta: &Meta) -> syn::Result<()> {
         "ijson_number" => set_form(&mut out.forms.ijson, false, meta)?,
         "ijson_string" => set_form(&mut out.forms.ijson, true, meta)?,
         "skip" => set_flag(&mut out.skip, meta)?,
+        "field" => {
+            let nv = name_value(meta, key.usage)?;
+            let Lit::Int(value) = &nv.lit else {
+                return Err(syn::Error::new_spanned(nv, "field is the member's number: field = N"));
+            };
+            if out.field_number.replace(value.base10_parse()?).is_some() {
+                return Err(syn::Error::new_spanned(meta, "`field` is given twice"));
+            }
+        }
+        "deprecated" => set_flag(&mut out.deprecated, meta)?,
+        "default" => {
+            let nv = name_value(meta, key.usage)?;
+            let value = match &nv.lit {
+                Lit::Str(text) => {
+                    let expr: syn::Expr = text.parse()?;
+                    quote::quote!(#expr)
+                }
+                Lit::Int(_) | Lit::Float(_) | Lit::Bool(_) => {
+                    let lit = &nv.lit;
+                    quote::quote!(#lit)
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        nv,
+                        "default is a number, a bool, or an expression in a string: default = \"Color::Green\"",
+                    ))
+                }
+            };
+            if out.default.replace(value).is_some() {
+                return Err(syn::Error::new_spanned(meta, "`default` is given twice"));
+            }
+        }
         _ => unreachable!("every key of the table is stored"),
     }
     Ok(())

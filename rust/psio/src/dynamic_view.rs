@@ -38,7 +38,7 @@ use crate::dynamic_schema::{DynamicSchema, DynamicType, FieldDesc, FieldName};
 use crate::xxh64;
 
 use crate::capnp::wire as capnp_wire;
-use crate::flatbuf::view as fb_view_mod;
+use crate::flatbuf::FbTable;
 
 // ---------------------------------------------------------------------------
 // WireFormat
@@ -875,10 +875,7 @@ impl<'a> DynamicView<'a> {
             self.rec_offset as usize
         };
 
-        let fb = match fb_view_mod::FbView::from_table(buf, table_pos) {
-            Ok(v) => v,
-            Err(_) => return DynamicValue::Void,
-        };
+        let fb = FbTable::at(buf, table_pos);
 
         let slot = desc.offset as u16;
 

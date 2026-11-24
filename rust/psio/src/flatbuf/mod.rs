@@ -1,618 +1,171 @@
-//! FlatBuffers wire format: builder, zero-copy view, unpack, schema export.
+//! FlatBuffers: the encoding the official implementation uses, from Rust
+//! types (C++ `psio::flatbuf`, `docs/flatbuffers.md`). No dependency on the
+//! FlatBuffers library; the bytes are the ones the official object API and
+//! the C++ implementation write (`conformance/flatbuf-vectors.json`).
 //!
-//! This module implements the FlatBuffers binary format, compatible with the
-//! C++ implementation in `psio/flatbuf.hpp`. Key types:
+//! ```
+//! use psio::flatbuf::{FbView, FbPack, FbUnpack};
 //!
-//! - [`FbBuilder`] — back-to-front buffer builder
-//! - [`struct@FbView`] — zero-copy field access via vtable lookup
-//! - [`FbPack`] — trait for serializing to FlatBuffer format
-//! - [`FbUnpack`] — trait for deserializing from FlatBuffer format
-//! - [`FbLayout`] — vtable slot computation
-//! - [`FbSchema`] — schema export to .fbs IDL text
+//! #[derive(Debug, PartialEq, psio::FbPack, psio::FbUnpack, psio::FbView)]
+//! struct Profile {
+//!     id: u64,
+//!     name: String,
+//!     verified: bool,
+//! }
 //!
-//! # Wire format
+//! let profile = Profile { id: 7, name: "Alice".into(), verified: true };
+//! let bytes = psio::to_flatbuf(&profile);
+//! psio::validate_flatbuf::<Profile>(&bytes).unwrap();                // the verifier
+//! assert_eq!(psio::from_flatbuf::<Profile>(&bytes).unwrap(), profile); // verifies, then decodes
 //!
-//! A FlatBuffer starts with a `u32` root offset, followed by interleaved
-//! vtables and table data. Tables reference their vtable via a signed offset
-//! (`soffset_t`), and fields within a table are located by reading the
-//! corresponding vtable slot (a `u16` offset from the table start, or 0 for
-//! absent/default).
+//! let view = FbView::<Profile>::new(&bytes).unwrap();                // verifies; reads in place
+//! assert_eq!((view.id(), view.name(), view.verified()), (7, "Alice", true));
+//! let fast = FbView::<Profile>::trusted(&bytes);                     // no verification
+//! assert_eq!(fast.name(), "Alice");
+//! ```
+//!
+//! * [`field`]: the mapping from Rust types ([`FbPack`], [`FbUnpack`]);
+//! * [`verify`]: the verifier ([`FbError`], [`FbLimits`], [`FbOptions`]);
+//! * [`view`]: typed views over borrowed bytes ([`struct@FbView`], [`FbVec`],
+//!   [`FbSet`], [`FbMap`], [`FbUnion`]);
+//! * [`raw`]: untyped, bounds-checked cursors ([`FbTable`], [`FbVector`]);
+//! * [`builder`]: the back-to-front builder ([`FbBuilder`]).
 
 pub mod builder;
+pub mod field;
 pub mod layout;
 pub mod mutation;
+pub mod raw;
 pub mod schema;
-pub mod unpack;
+pub mod verify;
 pub mod view;
 
-pub use builder::{FbBuilder, FbPack, FbPackElement, FbTableWriter};
+pub use builder::{FbBuilder, FbTableWriter};
+pub use field::{
+    fb_add_order, fb_check_fixed, fb_fixed_at, fb_struct_layout, FbAddEntry, FbPack, FbStructLayout, FbUnpack,
+};
 pub use layout::{FbFieldLoc, FbLayout};
+pub use raw::{FbTable, FbVector};
 pub use schema::{to_fbs_schema, to_fbs_text, FbFieldSchema, FbSchema, FbTypeSchema};
-pub use unpack::{FbUnpack, FbUnpackElement, FbUnpackError};
-pub use view::{FbVecView, FbView, FbViewError};
+pub use verify::{FbCheckedTable, FbChecker, FbError, FbLimits, FbOptions, MAX_BUFFER_SIZE};
+pub use view::{FbKey, FbMap, FbSet, FbUnion, FbVec, FbView, FbViewable};
 
 // The derives, beside the traits they implement.
 pub use psio_macros::{FbPack, FbUnpack, FbView};
 
 // ── The helper names (docs/helpers.md) ──────────────────────────────────────
 
-fn pack_message<T: FbPack>(value: &T) -> Vec<u8> {
+/// The format tag (C++ `psio::flatbuf`).
+pub struct Flatbuf;
+impl crate::Format for Flatbuf {
+    type Error = FbError;
+}
+impl<T: FbPack> crate::Encode<Flatbuf> for T {
+    fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, FbError> {
+        let bytes = self.fb_pack();
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+}
+impl<T: FbUnpack> crate::Decode<Flatbuf> for T {
+    fn decode(bytes: &[u8]) -> Result<Self, FbError> {
+        T::fb_unpack(bytes)
+    }
+}
+impl<T: FbUnpack> crate::Validate<Flatbuf> for T {
+    fn validate<P: crate::ValidationPolicy>(bytes: &[u8], _policy: &P) -> Result<(), FbError> {
+        T::fb_validate(bytes)
+    }
+}
+
+/// Encodes `value` into a fresh buffer (C++ `psio::to_flatbuf(v)`).
+pub fn to_flatbuf<T: FbPack>(value: &T) -> Vec<u8> {
     value.fb_pack()
 }
-fn unpack_message<T: FbUnpack>(bytes: &[u8]) -> Result<T, FbUnpackError> {
+/// Encodes with a file identifier and / or a size prefix (C++
+/// `psio::to_flatbuf(v, {.file_identifier = "ABCD", .size_prefixed = true})`).
+pub fn to_flatbuf_with<T: FbPack>(value: &T, opts: &FbOptions) -> Vec<u8> {
+    value.fb_pack_with(opts)
+}
+/// Replaces the content of `out` with the encoding of `value` (C++
+/// `psio::to_flatbuf(v, sink)`; a buffer is self-contained and cannot be
+/// appended to another).
+pub fn to_flatbuf_into<T: FbPack>(value: &T, out: &mut Vec<u8>) {
+    *out = value.fb_pack();
+}
+/// The checked decode: verifies, then decodes (C++
+/// `psio::from_flatbuf<T>(bytes)`).
+pub fn from_flatbuf<T: FbUnpack>(bytes: &[u8]) -> Result<T, FbError> {
     T::fb_unpack(bytes)
 }
-crate::format::message_format_helpers! {
-    tag Flatbuf, "flatbuf", error FbUnpackError,
-    pack FbPack => pack_message, unpack FbUnpack => unpack_message,
-    names to_flatbuf to_flatbuf_into from_flatbuf from_flatbuf_trusted validate_flatbuf flatbuf_size
-          FlatbufBuffer SharedFlatbuf
+/// Decodes bytes the caller vouches for, without verifying them (C++
+/// `psio::from_flatbuf<T>(psio::trusted{bytes})`). A safe function: it
+/// never reads outside `bytes` and does not panic on what it reads; bytes
+/// that would not verify give an unspecified value, and the verifier's
+/// limits on nesting and shared sub-objects do not apply.
+pub fn from_flatbuf_trusted<T: FbUnpack>(bytes: &[u8]) -> T {
+    T::fb_unpack_trusted(bytes)
 }
+/// The verifier: whether `bytes` is one `T` (C++
+/// `psio::validate_flatbuf<T>(bytes)`). Typed, and safe on arbitrary bytes:
+/// it never panics, reads outside `bytes` or does unbounded work.
+pub fn validate_flatbuf<T: FbUnpack>(bytes: &[u8]) -> Result<(), FbError> {
+    T::fb_validate(bytes)
+}
+/// The verifier under other limits, and / or for a buffer with a required
+/// file identifier or a size prefix (C++ `psio::validate_flatbuf<T>(bytes,
+/// options, limits)`).
+pub fn validate_flatbuf_with<T: FbUnpack>(bytes: &[u8], opts: &FbOptions, limits: FbLimits) -> Result<(), FbError> {
+    T::fb_validate_with(bytes, opts, limits)
+}
+/// Size of the encoding of `value` (C++ `psio::flatbuf_size(v)`). Padding
+/// depends on position, so the size is found by encoding.
+pub fn flatbuf_size<T: FbPack>(value: &T) -> usize {
+    value.fb_pack().len()
+}
+/// The file identifier of a buffer (not size-prefixed): the four bytes
+/// after the root offset. `None` when the buffer is too short to have one.
+/// A buffer written without an identifier has other data there.
+pub fn flatbuf_identifier(bytes: &[u8]) -> Option<[u8; 4]> {
+    bytes.get(4..8)?.try_into().ok()
+}
+/// Whether the buffer carries the file identifier `id`.
+pub fn flatbuf_has_identifier(bytes: &[u8], id: &[u8; 4]) -> bool {
+    flatbuf_identifier(bytes).as_ref() == Some(id)
+}
+/// The buffer inside a size-prefixed one — what views, `from_flatbuf` and
+/// `flatbuf_identifier` take. `None` when the prefix exceeds the bytes; any
+/// bytes after the prefixed buffer (the next one of a stream) are left out.
+pub fn flatbuf_size_prefixed(bytes: &[u8]) -> Option<&[u8]> {
+    let n = u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?) as usize;
+    bytes.get(4..4usize.checked_add(n)?)
+}
+impl<T: FbUnpack> crate::ViewFormat<T> for Flatbuf {
+    type View<'a> = FbView<'a, T>;
+    fn view(bytes: &[u8]) -> FbView<'_, T> {
+        FbView::trusted(bytes)
+    }
+}
+/// One `T` in this format, owned (C++ `psio::flatbuf_buffer<T>`).
+pub type FlatbufBuffer<T> = crate::Buffer<T, Flatbuf>;
+/// One `T` in this format, immutable and shared (C++ `psio::shared_flatbuf<T>`).
+pub type SharedFlatbuf<T> = crate::Shared<T, Flatbuf>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── Multi-field table round-trip (manual trait impls) ─────────────────
-    //
-    // Demonstrates how a struct like:
-    //   struct Token { kind: u16, text: String }
-    // would be packed/unpacked without derive macros.
-
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, PartialEq, Default, crate::FbPack, crate::FbUnpack)]
+    #[psio(crate = "crate")]
     struct Token {
         kind: u16,
         text: String,
     }
 
-    impl Default for Token {
-        fn default() -> Self {
-            Token {
-                kind: 0,
-                text: String::new(),
-            }
-        }
-    }
-
-    // Layout: 2 fields, no variants → slots [0, 1]
-    fn token_layout() -> FbLayout {
-        FbLayout::simple(2)
-    }
-
-    impl FbPack for Token {
-        fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-            let layout = token_layout();
-            // Phase 1: pre-create sub-objects
-            let text_off = if self.text.is_empty() {
-                0
-            } else {
-                b.create_string(&self.text)
-            };
-
-            // Phase 2: build table (smallest alignment first for back-to-front)
-            let mut tw = FbTableWriter::new(b, &layout);
-            tw.add_u16(0, self.kind, 0);       // slot 0: u16 (align 2)
-            tw.add_offset(1, text_off);         // slot 1: string offset (align 4)
-            tw.finish()
-        }
-    }
-
-    impl FbUnpack for Token {
-        fn fb_unpack(data: &[u8]) -> Result<Self, FbUnpackError> {
-            let view = FbView::from_buffer(data)
-                .map_err(|e| FbUnpackError::InvalidBuffer(e.to_string()))?;
-            Self::fb_unpack_view(&view)
-        }
-
-        fn fb_unpack_view(view: &FbView<'_>) -> Result<Self, FbUnpackError> {
-            Ok(Token {
-                kind: view.read_u16(0, 0),
-                text: view.read_str_or_empty(1).to_string(),
-            })
-        }
-    }
-
-    impl FbSchema for Token {
-        fn fb_schema() -> FbTypeSchema {
-            FbTypeSchema {
-                name: "Token".to_string(),
-                is_struct: false,
-                fields: vec![
-                    FbFieldSchema {
-                        name: "kind".to_string(),
-                        fb_type: "ushort".to_string(),
-                        default: Some("0".to_string()),
-                    },
-                    FbFieldSchema {
-                        name: "text".to_string(),
-                        fb_type: "string".to_string(),
-                        default: None,
-                    },
-                ],
-            }
-        }
-    }
-
-    #[test]
-    fn flatbuf_token_roundtrip() {
-        let orig = Token {
-            kind: 42,
-            text: "hello".to_string(),
-        };
-        let data = orig.fb_pack();
-        let result = Token::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_token_view() {
-        let orig = Token {
-            kind: 7,
-            text: "world".to_string(),
-        };
-        let data = orig.fb_pack();
-        let view = FbView::from_buffer(&data).unwrap();
-        assert_eq!(view.read_u16(0, 0), 7);
-        assert_eq!(view.read_str(1), Some("world"));
-    }
-
-    #[test]
-    fn flatbuf_token_defaults() {
-        let orig = Token::default();
-        let data = orig.fb_pack();
-        let result = Token::fb_unpack(&data).unwrap();
-        assert_eq!(result.kind, 0);
-        assert_eq!(result.text, "");
-    }
-
-    #[test]
-    fn flatbuf_token_schema() {
-        let schema = to_fbs_schema::<Token>();
-        assert!(schema.contains("table Token {"), "schema: {}", schema);
-        assert!(schema.contains("kind:ushort"), "schema: {}", schema);
-        assert!(schema.contains("text:string"), "schema: {}", schema);
-    }
-
-    // ── Nested table round-trip ──────────────────────────────────────────
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct Order {
-        id: u64,
-        customer_name: String,
-        amount: f64,
-        tags: Vec<String>,
-    }
-
-    impl Default for Order {
-        fn default() -> Self {
-            Order {
-                id: 0,
-                customer_name: String::new(),
-                amount: 0.0,
-                tags: Vec::new(),
-            }
-        }
-    }
-
-    fn order_layout() -> FbLayout {
-        FbLayout::simple(4)
-    }
-
-    impl FbPack for Order {
-        fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-            let layout = order_layout();
-
-            // Phase 1: pre-create sub-objects
-            let name_off = if self.customer_name.is_empty() {
-                0
-            } else {
-                b.create_string(&self.customer_name)
-            };
-
-            let tags_off = if self.tags.is_empty() {
-                0
-            } else {
-                String::fb_write_vec(&self.tags, b)
-            };
-
-            // Phase 2: build table
-            let mut tw = FbTableWriter::new(b, &layout);
-            // Add fields sorted by alignment (smallest first):
-            tw.add_offset(1, name_off);   // slot 1: string
-            tw.add_offset(3, tags_off);   // slot 3: vector of strings
-            tw.add_f64(2, self.amount, 0.0); // slot 2: f64 (align 8)
-            tw.add_u64(0, self.id, 0);    // slot 0: u64 (align 8)
-            tw.finish()
-        }
-    }
-
-    impl FbUnpack for Order {
-        fn fb_unpack(data: &[u8]) -> Result<Self, FbUnpackError> {
-            let view = FbView::from_buffer(data)
-                .map_err(|e| FbUnpackError::InvalidBuffer(e.to_string()))?;
-            Self::fb_unpack_view(&view)
-        }
-
-        fn fb_unpack_view(view: &FbView<'_>) -> Result<Self, FbUnpackError> {
-            let tags = match view.read_vec(3) {
-                Some(vec_view) => {
-                    let mut result = Vec::with_capacity(vec_view.len() as usize);
-                    for i in 0..vec_view.len() {
-                        match vec_view.get_str(i) {
-                            Some(s) => result.push(s.to_string()),
-                            None => return Err(FbUnpackError::InvalidUtf8),
-                        }
-                    }
-                    result
-                }
-                None => Vec::new(),
-            };
-
-            Ok(Order {
-                id: view.read_u64(0, 0),
-                customer_name: view.read_str_or_empty(1).to_string(),
-                amount: view.read_f64(2, 0.0),
-                tags,
-            })
-        }
-    }
-
-    #[test]
-    fn flatbuf_order_roundtrip() {
-        let orig = Order {
-            id: 1001,
-            customer_name: "Alice".to_string(),
-            amount: 99.95,
-            tags: vec!["rush".to_string(), "fragile".to_string()],
-        };
-        let data = orig.fb_pack();
-        let result = Order::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_order_view_fields() {
-        let orig = Order {
-            id: 42,
-            customer_name: "Bob".to_string(),
-            amount: 3.14,
-            tags: vec!["a".to_string(), "b".to_string(), "c".to_string()],
-        };
-        let data = orig.fb_pack();
-        let view = FbView::from_buffer(&data).unwrap();
-
-        assert_eq!(view.read_u64(0, 0), 42);
-        assert_eq!(view.read_str(1), Some("Bob"));
-        assert_eq!(view.read_f64(2, 0.0), 3.14);
-
-        let tags_view = view.read_vec(3).expect("tags should be present");
-        assert_eq!(tags_view.len(), 3);
-        assert_eq!(tags_view.get_str(0), Some("a"));
-        assert_eq!(tags_view.get_str(1), Some("b"));
-        assert_eq!(tags_view.get_str(2), Some("c"));
-    }
-
-    #[test]
-    fn flatbuf_order_empty_defaults() {
-        let orig = Order::default();
-        let data = orig.fb_pack();
-        let result = Order::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    // ── Vector round-trips ───────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_vec_u32_roundtrip() {
-        let orig: Vec<u32> = vec![10, 20, 30, 40, 50];
-        let data = orig.fb_pack();
-        let result = Vec::<u32>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_vec_string_roundtrip() {
-        let orig: Vec<String> = vec!["foo".into(), "bar".into(), "baz".into()];
-        let data = orig.fb_pack();
-        let result = Vec::<String>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_vec_empty_roundtrip() {
-        let orig: Vec<u32> = vec![];
-        let data = orig.fb_pack();
-        let result = Vec::<u32>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_vec_i64_roundtrip() {
-        let orig: Vec<i64> = vec![-100, 0, 100, i64::MIN, i64::MAX];
-        let data = orig.fb_pack();
-        let result = Vec::<i64>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_vec_f64_roundtrip() {
-        let orig: Vec<f64> = vec![1.1, 2.2, 3.3];
-        let data = orig.fb_pack();
-        let result = Vec::<f64>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_vec_bool_roundtrip() {
-        let orig: Vec<bool> = vec![true, false, true, true, false];
-        let data = orig.fb_pack();
-        let result = Vec::<bool>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    // ── Wire format structure verification ───────────────────────────────
-
-    #[test]
-    fn flatbuf_wire_format_structure() {
-        // Verify the wire format has correct structure:
-        // [root_offset:u32] ... [vtable] ... [table_data]
-        let orig = Token {
-            kind: 123,
-            text: "test".to_string(),
-        };
-        let data = orig.fb_pack();
-
-        // 1. Root offset at position 0
-        let root_off = u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
-        assert!(root_off < data.len(), "root offset should point within buffer");
-
-        // 2. Table has soffset to vtable
-        let soff = i32::from_le_bytes(data[root_off..root_off + 4].try_into().unwrap());
-        let vt_pos = (root_off as i64 - soff as i64) as usize;
-        assert!(vt_pos + 4 <= data.len(), "vtable should be within buffer");
-
-        // 3. Vtable has valid sizes
-        let vt_size = u16::from_le_bytes(data[vt_pos..vt_pos + 2].try_into().unwrap());
-        let tbl_size = u16::from_le_bytes(data[vt_pos + 2..vt_pos + 4].try_into().unwrap());
-        assert!(vt_size >= 4, "vtable size should be at least 4");
-        assert!(tbl_size >= 4, "table size should be at least 4 (includes soffset)");
-        assert!(
-            vt_pos + vt_size as usize <= data.len(),
-            "vtable should fit in buffer"
-        );
-
-        // 4. At least one field present (kind != 0)
-        let has_field = (4..vt_size as usize)
-            .step_by(2)
-            .any(|off| u16::from_le_bytes(data[vt_pos + off..vt_pos + off + 2].try_into().unwrap()) != 0);
-        assert!(has_field, "at least one field should be present");
-    }
-
-    // ── Scalar edge cases ────────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_scalar_extremes() {
-        // u8
-        assert_eq!(u8::fb_unpack(&255u8.fb_pack()).unwrap(), 255);
-        assert_eq!(u8::fb_unpack(&0u8.fb_pack()).unwrap(), 0);
-
-        // i16
-        assert_eq!(i16::fb_unpack(&i16::MIN.fb_pack()).unwrap(), i16::MIN);
-        assert_eq!(i16::fb_unpack(&i16::MAX.fb_pack()).unwrap(), i16::MAX);
-
-        // u64
-        assert_eq!(u64::fb_unpack(&u64::MAX.fb_pack()).unwrap(), u64::MAX);
-
-        // f32
-        let pi = std::f32::consts::PI;
-        assert_eq!(f32::fb_unpack(&pi.fb_pack()).unwrap(), pi);
-
-        // Negative f64
-        let neg = -1e100_f64;
-        assert_eq!(f64::fb_unpack(&neg.fb_pack()).unwrap(), neg);
-    }
-
-    // ── Unicode strings ──────────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_unicode_string() {
-        let orig = Token {
-            kind: 1,
-            text: "Hello \u{1F600} \u{00E9}\u{00E8}\u{00EA}".to_string(),
-        };
-        let data = orig.fb_pack();
-        let result = Token::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    // ── Large string ─────────────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_large_string() {
-        let long_text: String = "x".repeat(10_000);
-        let orig = Token {
-            kind: 99,
-            text: long_text.clone(),
-        };
-        let data = orig.fb_pack();
-        let result = Token::fb_unpack(&data).unwrap();
-        assert_eq!(result.text, long_text);
-    }
-
-    // ── Nested table ─────────────────────────────────────────────────────
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct Wrapper {
-        label: String,
-        inner: InnerData,
-    }
-
-    #[derive(Debug, Clone, PartialEq)]
-    struct InnerData {
-        x: i32,
-        y: i32,
-    }
-
-    impl Default for InnerData {
-        fn default() -> Self {
-            InnerData { x: 0, y: 0 }
-        }
-    }
-
-    impl Default for Wrapper {
-        fn default() -> Self {
-            Wrapper {
-                label: String::new(),
-                inner: InnerData::default(),
-            }
-        }
-    }
-
-    fn inner_data_layout() -> FbLayout {
-        FbLayout::simple(2)
-    }
-
-    fn wrapper_layout() -> FbLayout {
-        FbLayout::simple(2)
-    }
-
-    impl FbPack for InnerData {
-        fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-            let layout = inner_data_layout();
-            let mut tw = FbTableWriter::new(b, &layout);
-            tw.add_i32(0, self.x, 0);
-            tw.add_i32(1, self.y, 0);
-            tw.finish()
-        }
-    }
-
-    impl FbUnpack for InnerData {
-        fn fb_unpack(data: &[u8]) -> Result<Self, FbUnpackError> {
-            let view = FbView::from_buffer(data)
-                .map_err(|e| FbUnpackError::InvalidBuffer(e.to_string()))?;
-            Self::fb_unpack_view(&view)
-        }
-
-        fn fb_unpack_view(view: &FbView<'_>) -> Result<Self, FbUnpackError> {
-            Ok(InnerData {
-                x: view.read_i32(0, 0),
-                y: view.read_i32(1, 0),
-            })
-        }
-    }
-
-    impl FbPack for Wrapper {
-        fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-            let layout = wrapper_layout();
-            let label_off = if self.label.is_empty() {
-                0
-            } else {
-                b.create_string(&self.label)
-            };
-            let inner_off = self.inner.fb_write(b);
-
-            let mut tw = FbTableWriter::new(b, &layout);
-            tw.add_offset(0, label_off);
-            tw.add_offset(1, inner_off);
-            tw.finish()
-        }
-    }
-
-    impl FbUnpack for Wrapper {
-        fn fb_unpack(data: &[u8]) -> Result<Self, FbUnpackError> {
-            let view = FbView::from_buffer(data)
-                .map_err(|e| FbUnpackError::InvalidBuffer(e.to_string()))?;
-            Self::fb_unpack_view(&view)
-        }
-
-        fn fb_unpack_view(view: &FbView<'_>) -> Result<Self, FbUnpackError> {
-            let inner = match view.read_table(1) {
-                Some(inner_view) => InnerData::fb_unpack_view(&inner_view)?,
-                None => InnerData::default(),
-            };
-            Ok(Wrapper {
-                label: view.read_str_or_empty(0).to_string(),
-                inner,
-            })
-        }
-    }
-
-    #[test]
-    fn flatbuf_nested_table_roundtrip() {
-        let orig = Wrapper {
-            label: "point".to_string(),
-            inner: InnerData { x: 10, y: -20 },
-        };
-        let data = orig.fb_pack();
-        let result = Wrapper::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    #[test]
-    fn flatbuf_nested_table_view() {
-        let orig = Wrapper {
-            label: "coords".to_string(),
-            inner: InnerData { x: 100, y: 200 },
-        };
-        let data = orig.fb_pack();
-        let view = FbView::from_buffer(&data).unwrap();
-
-        assert_eq!(view.read_str(0), Some("coords"));
-
-        let inner_view = view.read_table(1).expect("inner should be present");
-        assert_eq!(inner_view.read_i32(0, 0), 100);
-        assert_eq!(inner_view.read_i32(1, 0), 200);
-    }
-
-    #[test]
-    fn flatbuf_nested_defaults() {
-        let orig = Wrapper::default();
-        let data = orig.fb_pack();
-        let result = Wrapper::fb_unpack(&data).unwrap();
-        assert_eq!(result.label, "");
-        assert_eq!(result.inner.x, 0);
-        assert_eq!(result.inner.y, 0);
-    }
-
-    // ── Vec<u8> (byte vector) ────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_vec_u8_roundtrip() {
-        let orig: Vec<u8> = vec![0, 1, 2, 127, 255];
-        let data = orig.fb_pack();
-        let result = Vec::<u8>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    // ── Multiple strings in vectors ──────────────────────────────────────
-
-    #[test]
-    fn flatbuf_many_string_vec() {
-        let orig: Vec<String> = (0..100).map(|i| format!("item_{}", i)).collect();
-        let data = orig.fb_pack();
-        let result = Vec::<String>::fb_unpack(&data).unwrap();
-        assert_eq!(result, orig);
-    }
-
-    // ── Builder reuse ────────────────────────────────────────────────────
-
-    #[test]
-    fn flatbuf_builder_reuse() {
-        let mut b = FbBuilder::default();
-
-        // First use
-        let root1 = 42u32.fb_write(&mut b);
-        b.finish(root1);
-        let data1 = b.data().to_vec();
-
-        // Clear and reuse
-        b.clear();
-        let root2 = 99u32.fb_write(&mut b);
-        b.finish(root2);
-        let data2 = b.data().to_vec();
-
-        assert_eq!(u32::fb_unpack(&data1).unwrap(), 42);
-        assert_eq!(u32::fb_unpack(&data2).unwrap(), 99);
+    #[derive(Debug, Clone, PartialEq, Default, crate::FbPack, crate::FbUnpack)]
+    #[psio(crate = "crate")]
+    struct Numbers {
+        values: Vec<u32>,
     }
 
     // ════════════════════════════════════════════════════════════════════════
@@ -667,7 +220,7 @@ mod tests {
             0xEF, 0xBE, 0xAD, 0xDE,  // val = 0xDEADBEEF
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 0), 0xDEADBEEF);
     }
 
@@ -690,7 +243,7 @@ mod tests {
             0x2A, 0x00, 0x00, 0x00,  // field b = 42
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 999), 999, "absent field should return default");
         assert_eq!(view.read_u32(1, 0), 42, "present field should return value");
     }
@@ -807,7 +360,7 @@ mod tests {
             0x41, 0x42, 0x43, 0x00,  // "ABC" + NUL
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_str(0), Some("ABC"));
     }
 
@@ -857,7 +410,7 @@ mod tests {
         }
 
         // Read back values through the view to confirm correctness
-        let view = FbView::from_buffer(buf).unwrap();
+        let view = FbTable::root(buf);
         assert_eq!(view.read_u8(0, 0), 0xAB);
         assert_eq!(view.read_u16(1, 0), 0x1234);
         assert_eq!(view.read_u32(2, 0), 0xDEAD);
@@ -903,7 +456,7 @@ mod tests {
         assert_eq!(s2, 0, "default-value field 2 must be elided from vtable");
 
         // Reading elided fields returns the specified default
-        let view = FbView::from_buffer(buf).unwrap();
+        let view = FbTable::root(buf);
         assert_eq!(view.read_u32(0, 999), 999);
         assert_eq!(view.read_u32(1, 0), 42);
         assert_eq!(view.read_u32(2, 777), 777);
@@ -929,7 +482,7 @@ mod tests {
         let buf = b.data();
 
         // Navigate to vector via view
-        let view = FbView::from_buffer(buf).unwrap();
+        let view = FbTable::root(buf);
         let vec_view = view.read_vec(0).unwrap();
 
         // Element count
@@ -1006,7 +559,7 @@ mod tests {
             0x00, 0x00,              // trailing pad
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         let vec_view = view.read_vec(0).unwrap();
         assert_eq!(vec_view.len(), 3);
         assert_eq!(vec_view.get_u16(0), 100);
@@ -1029,7 +582,7 @@ mod tests {
             let buf = b.data();
 
             // Find the string position
-            let view = FbView::from_buffer(buf).unwrap();
+            let view = FbTable::root(buf);
             let read_back = view.read_str(0);
 
             if s.is_empty() {
@@ -1191,7 +744,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         let vec_view = view.read_vec(0).unwrap();
 
         assert_eq!(vec_view.len(), 3);
@@ -1247,7 +800,7 @@ mod tests {
         let buf = b.data();
 
         // Verify outer table
-        let outer_view = FbView::from_buffer(&buf).unwrap();
+        let outer_view = FbTable::root(&buf);
         assert!(outer_view.has_field(0), "outer slot 0 must be present");
 
         // Verify inner table through nested view
@@ -1299,7 +852,7 @@ mod tests {
         assert_eq!(tbl_size, 4, "empty table should be 4 bytes (soffset only)");
 
         // View can be created and all field reads return defaults
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 123), 123);
         assert_eq!(view.read_str(0), None);
         assert!(!view.has_field(0));
@@ -1351,7 +904,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert!(!view.has_field(0), "field 0 (default scalar) should be absent");
         assert!(view.has_field(1), "field 1 (non-default scalar) should be present");
         assert!(!view.has_field(2), "field 2 (null offset) should be absent");
@@ -1414,7 +967,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_bool(0, false), true);
         // field 1 = false with default false → elided
         assert_eq!(view.read_bool(1, false), false);
@@ -1514,7 +1067,7 @@ mod tests {
             0x63, 0x00, 0x00, 0x00,  // field 0 = 99
         ];
 
-        let outer = FbView::from_buffer(&buf).unwrap();
+        let outer = FbTable::root(&buf);
         let inner = outer.read_table(0).expect("inner table should be present");
         assert_eq!(inner.read_u32(0, 0), 99);
     }
@@ -1547,7 +1100,7 @@ mod tests {
         assert_eq!(raw, 3.14159);
 
         // View should read it correctly
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u8(0, 0), 1);
         assert_eq!(view.read_f64(1, 0.0), 3.14159);
     }
@@ -1564,7 +1117,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
 
         // Slot 0 present
         assert_eq!(view.read_u32(0, 0), 42);
@@ -1589,7 +1142,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         let vec_view = view.read_vec(0).unwrap();
         assert_eq!(vec_view.len(), 0);
         assert!(vec_view.is_empty());
@@ -1625,7 +1178,7 @@ mod tests {
         let buf = b.data();
 
         // Verify via view
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_i16(0, 100), 80);
         assert_eq!(view.read_str(1), Some("MyMonster"));
 
@@ -1681,7 +1234,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_i16(0, 100), 100, "should return default");
         assert!(!view.has_field(0), "default field should be absent");
         assert_eq!(view.read_str(1), Some("DefaultHP"));
@@ -1706,7 +1259,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         let vec_view = view.read_vec(0).unwrap();
         assert_eq!(vec_view.len(), 5);
         assert_eq!(vec_view.get_i64(0), i64::MIN);
@@ -1762,7 +1315,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let outer = FbView::from_buffer(&buf).unwrap();
+        let outer = FbTable::root(&buf);
         let inner_a = outer.read_table(0).unwrap();
         let inner_b = outer.read_table(1).unwrap();
         assert_eq!(inner_a.read_u32(0, 0), 111);
@@ -1799,7 +1352,7 @@ mod tests {
             0x1E, 0x00, 0x00, 0x00,  // field 2 at +12: u32 = 30 (extra)
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 0), 10);
         assert_eq!(view.read_u32(1, 0), 20);
         // Slot 2 is readable (forward compat — new reader on old code would use it)
@@ -1829,7 +1382,7 @@ mod tests {
             0xFF, 0x00, 0x00, 0x00,  // field 0: u32 = 255
         ];
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 0), 255);
         // Slots 1, 2 are beyond vtable → defaults
         assert_eq!(view.read_u32(1, 42), 42);
@@ -1854,7 +1407,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_i8(0, 0), -1);
         assert_eq!(view.read_i16(1, 0), i16::MIN);
         assert_eq!(view.read_i32(2, 0), i32::MIN);
@@ -1895,7 +1448,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_f32(0, 0.0), f32::INFINITY);
         assert_eq!(view.read_f32(1, 0.0), f32::NEG_INFINITY);
         assert_eq!(view.read_f64(2, 0.0), f64::INFINITY);
@@ -1912,7 +1465,7 @@ mod tests {
         b2.finish(root2);
         let buf2 = b2.data();
 
-        let view2 = FbView::from_buffer(&buf2).unwrap();
+        let view2 = FbTable::root(&buf2);
         let read_nan = view2.read_f32(0, 0.0);
         assert!(read_nan.is_nan());
         assert_eq!(read_nan.to_bits(), nan_bits, "NaN bit pattern must be preserved");
@@ -1944,7 +1497,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let gp = FbView::from_buffer(&buf).unwrap();
+        let gp = FbTable::root(&buf);
         let parent = gp.read_table(0).unwrap();
         let child = parent.read_table(0).unwrap();
         assert_eq!(child.read_u32(0, 0), 7);
@@ -1955,12 +1508,12 @@ mod tests {
     #[test]
     fn wire_large_vector() {
         let values: Vec<u32> = (0..1000).collect();
-        let data = values.fb_pack();
-        let result = Vec::<u32>::fb_unpack(&data).unwrap();
-        assert_eq!(result, values);
+        let data = Numbers { values: values.clone() }.fb_pack();
+        let result = Numbers::fb_unpack(&data).unwrap();
+        assert_eq!(result.values, values);
 
         // Verify count in raw bytes
-        let view = FbView::from_buffer(&data).unwrap();
+        let view = FbTable::root(&data);
         let vec_view = view.read_vec(0).unwrap();
         assert_eq!(vec_view.len(), 1000);
         assert_eq!(vec_view.get_u32(0), 0);
@@ -1983,7 +1536,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         for i in 0..n as u16 {
             assert_eq!(
                 view.read_u32(i, 0),
@@ -2032,7 +1585,7 @@ mod tests {
         assert_eq!(buf[str_pos + 8], 0);
 
         // View reads it correctly
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_str(0), Some("\u{1F600}"));
     }
 
@@ -2067,8 +1620,8 @@ mod tests {
         let buf2 = b2.data();
 
         // Both should produce the same logical content
-        let v1 = FbView::from_buffer(buf1).unwrap();
-        let v2 = FbView::from_buffer(buf2).unwrap();
+        let v1 = FbTable::root(buf1);
+        let v2 = FbTable::root(buf2);
 
         assert_eq!(v1.read_u32(0, 0), v2.read_u32(0, 0));
         assert_eq!(v1.read_str(1), v2.read_str(1));
@@ -2117,7 +1670,7 @@ mod tests {
         b.finish(root);
         let buf = b.data();
 
-        let outer = FbView::from_buffer(&buf).unwrap();
+        let outer = FbTable::root(&buf);
         let inner = outer.read_table(0).unwrap();
         assert_eq!(inner.read_u32(0, 0), 10);
     }

@@ -205,7 +205,8 @@ pub use psio_macros::interface;
 pub use capnp::{capnp_size, from_capnp, from_capnp_trusted, to_capnp, to_capnp_into, validate_capnp};
 #[cfg(feature = "flatbuf")]
 pub use flatbuf::{
-    flatbuf_size, from_flatbuf, from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, validate_flatbuf,
+    flatbuf_has_identifier, flatbuf_identifier, flatbuf_size, flatbuf_size_prefixed, from_flatbuf,
+    from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, to_flatbuf_with, validate_flatbuf, validate_flatbuf_with,
 };
 #[cfg(feature = "wit")]
 pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, validate_wit, wit_size};

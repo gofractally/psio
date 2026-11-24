@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::flatbuf::builder::{FbBuilder, FbTableWriter};
     use crate::flatbuf::layout::FbLayout;
-    use crate::flatbuf::view::FbView;
+    use crate::flatbuf::FbTable;
 
     #[test]
     fn fb_mut_u32_roundtrip() {
@@ -290,7 +290,7 @@ mod tests {
         }
 
         // Verify via FbView
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u32(0, 0), 99);
     }
 
@@ -310,7 +310,7 @@ mod tests {
             m.write_u64(0, 0x1234_5678_9ABC_DEF0);
         }
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u64(0, 0), 0x1234_5678_9ABC_DEF0);
     }
 
@@ -336,7 +336,7 @@ mod tests {
             assert_eq!(m.read_bool(1, false), true); // unchanged
         }
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_bool(0, false), false);
         assert_eq!(view.read_bool(1, false), true);
     }
@@ -358,7 +358,7 @@ mod tests {
             m.write_f64(0, std::f64::consts::E);
         }
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_f64(0, 0.0), std::f64::consts::E);
     }
 
@@ -383,7 +383,7 @@ mod tests {
             m.write_u16(0, 42);
         }
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_u16(0, 0), 42);
         assert_eq!(view.read_str(1), Some("hello"));
     }
@@ -405,7 +405,7 @@ mod tests {
             assert_eq!(m.read_i16(0, 0), 1000);
         }
 
-        let view = FbView::from_buffer(&buf).unwrap();
+        let view = FbTable::root(&buf);
         assert_eq!(view.read_i16(0, 0), 1000);
     }
 }

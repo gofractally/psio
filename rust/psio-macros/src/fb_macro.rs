@@ -1,518 +1,806 @@
-//! Derive macros for FlatBuffers serialization (FbPack, FbUnpack).
+//! The FlatBuffers derives: `FbPack`, `FbUnpack`, `FbView`.
 //!
-//! Generates `impl FbPack` and `impl FbUnpack` for named structs,
-//! computing vtable slots from field order and emitting the appropriate
-//! builder / view code.
+//! The mapping (psio `flatbuf::field`, C++ `psio/flatbuf.hpp`) is decided by
+//! the constants of the member types, which a derive cannot see; so the
+//! code written here asks them. A struct is a FlatBuffers table, unless it
+//! is `#[psio(definition_will_not_change)]` and all its members are fixed —
+//! then it is a FlatBuffers struct, and the constant `STRUCT` says which.
+//!
+//! * struct → table or struct; members take vtable slots in ascending order
+//!   of their field numbers (`#[psio(field = N)]`, the declaration position
+//!   by default); `#[psio(default = ..)]` is a scalar member's default;
+//!   `#[psio(deprecated)]` keeps the slot and is neither written nor read;
+//! * field-less `#[repr(int)]` enum → an enum of its repr type;
+//! * enum whose variants hold one table each → union; a leading unit variant
+//!   is `NONE`.
 
 use proc_macro::TokenStream;
-use quote::{quote, ToTokens};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
+use proc_macro2::TokenStream as Tokens;
+use quote::{format_ident, quote};
+use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-
-// ── Type classification ─────────────────────────────────────────────────
-
-enum FbFieldClass {
-    Bool,
-    U8,
-    I8,
-    U16,
-    I16,
-    U32,
-    I32,
-    F32,
-    U64,
-    I64,
-    F64,
-    Text,
-    VecScalar,   // Vec<scalar> or Vec<bool>
-    VecString,
-    VecStruct,
-    Struct,
-}
-
-fn classify_type(ty: &Type) -> FbFieldClass {
-    let ty_str = quote!(#ty).to_string().replace(' ', "");
-    match ty_str.as_str() {
-        "bool" => FbFieldClass::Bool,
-        "u8" => FbFieldClass::U8,
-        "i8" => FbFieldClass::I8,
-        "u16" => FbFieldClass::U16,
-        "i16" => FbFieldClass::I16,
-        "u32" => FbFieldClass::U32,
-        "i32" => FbFieldClass::I32,
-        "f32" => FbFieldClass::F32,
-        "u64" => FbFieldClass::U64,
-        "i64" => FbFieldClass::I64,
-        "f64" => FbFieldClass::F64,
-        "String" => FbFieldClass::Text,
-        _ => {
-            if let Type::Path(tp) = ty {
-                let seg = tp.path.segments.last().unwrap();
-                if seg.ident == "Vec" {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            let inner_str = quote!(#inner).to_string().replace(' ', "");
-                            return match inner_str.as_str() {
-                                "bool" | "u8" | "i8" | "u16" | "i16" | "u32" | "i32" | "f32" |
-                                "u64" | "i64" | "f64" => FbFieldClass::VecScalar,
-                                "String" => FbFieldClass::VecString,
-                                _ => FbFieldClass::VecStruct,
-                            };
-                        }
-                    }
-                }
-            }
-            FbFieldClass::Struct
-        }
-    }
-}
-
-// ── Pack code generation ────────────────────────────────────────────────
-
-/// Generate the pre-creation statement for offset types (strings, vecs, nested tables).
-/// Returns (pre_statement, offset_var_name) or None for scalars.
-fn pre_create_tokens(
-    cls: &FbFieldClass,
-    mod_path: &proc_macro2::TokenStream,
-    field_expr: &proc_macro2::TokenStream,
-    idx: usize,
-) -> Option<(proc_macro2::TokenStream, proc_macro2::Ident)> {
-    let off_var = syn::Ident::new(&format!("__off_{}", idx), proc_macro2::Span::call_site());
-
-    let stmt = match cls {
-        FbFieldClass::Text => {
-            // An empty string is not written (it reads back as empty): what
-            // the official object API and the C++ encoder do.
-            quote! {
-                let #off_var = if #field_expr.is_empty() {
-                    0u32
-                } else {
-                    b.create_string(&#field_expr)
-                };
-            }
-        }
-        FbFieldClass::VecScalar => {
-            quote! {
-                let #off_var = if #field_expr.is_empty() {
-                    0u32
-                } else {
-                    <_ as #mod_path::flatbuf::FbPackElement>::fb_write_vec(&#field_expr[..], b)
-                };
-            }
-        }
-        FbFieldClass::VecString => {
-            quote! {
-                let #off_var = if #field_expr.is_empty() {
-                    0u32
-                } else {
-                    <String as #mod_path::flatbuf::FbPackElement>::fb_write_vec(&#field_expr[..], b)
-                };
-            }
-        }
-        FbFieldClass::VecStruct => {
-            // For Vec<T> where T: FbPack, we write each element as a table and
-            // collect offsets, then create a vector of offsets.
-            quote! {
-                let #off_var = if #field_expr.is_empty() {
-                    0u32
-                } else {
-                    let mut __elem_offs: Vec<u32> = Vec::with_capacity(#field_expr.len());
-                    for __elem in #field_expr.iter() {
-                        __elem_offs.push(#mod_path::flatbuf::FbPack::fb_write(__elem, b));
-                    }
-                    b.create_vec_offsets(&__elem_offs)
-                };
-            }
-        }
-        FbFieldClass::Struct => {
-            quote! {
-                let #off_var = #mod_path::flatbuf::FbPack::fb_write(&#field_expr, b);
-            }
-        }
-        _ => return None, // scalar
-    };
-
-    Some((stmt, off_var))
-}
-
-/// The size `flatc` sorts a table field by: the scalar's size, 4 for
-/// anything stored as an offset.
-fn field_sort_size(cls: &FbFieldClass) -> usize {
-    match cls {
-        FbFieldClass::Bool | FbFieldClass::U8 | FbFieldClass::I8 => 1,
-        FbFieldClass::U16 | FbFieldClass::I16 => 2,
-        FbFieldClass::U64 | FbFieldClass::I64 | FbFieldClass::F64 => 8,
-        _ => 4,
-    }
-}
-
-/// Generate the add-field statement inside start_table/end_table.
-fn add_field_tokens(
-    cls: &FbFieldClass,
-    field_expr: &proc_macro2::TokenStream,
-    slot: u16,
-    off_var: Option<&syn::Ident>,
-) -> proc_macro2::TokenStream {
-    let vt = 4 + 2 * slot;
-    let vt_lit = syn::LitInt::new(&vt.to_string(), proc_macro2::Span::call_site());
-
-    match cls {
-        FbFieldClass::Bool => quote! { b.add_scalar_bool(#vt_lit, #field_expr, false); },
-        FbFieldClass::U8 => quote! { b.add_scalar_u8(#vt_lit, #field_expr, 0); },
-        FbFieldClass::I8 => quote! { b.add_scalar_i8(#vt_lit, #field_expr, 0); },
-        FbFieldClass::U16 => quote! { b.add_scalar_u16(#vt_lit, #field_expr, 0); },
-        FbFieldClass::I16 => quote! { b.add_scalar_i16(#vt_lit, #field_expr, 0); },
-        FbFieldClass::U32 => quote! { b.add_scalar_u32(#vt_lit, #field_expr, 0); },
-        FbFieldClass::I32 => quote! { b.add_scalar_i32(#vt_lit, #field_expr, 0); },
-        FbFieldClass::F32 => quote! { b.add_scalar_f32(#vt_lit, #field_expr, 0.0); },
-        FbFieldClass::U64 => quote! { b.add_scalar_u64(#vt_lit, #field_expr, 0); },
-        FbFieldClass::I64 => quote! { b.add_scalar_i64(#vt_lit, #field_expr, 0); },
-        FbFieldClass::F64 => quote! { b.add_scalar_f64(#vt_lit, #field_expr, 0.0); },
-        _ => {
-            let ov = off_var.unwrap();
-            quote! { b.add_offset_field(#vt_lit, #ov); }
-        }
-    }
-}
-
-// ── Unpack code generation ──────────────────────────────────────────────
-
-fn unpack_field_tokens(
-    cls: &FbFieldClass,
-    mod_path: &proc_macro2::TokenStream,
-    slot: u16,
-    field_ty: &Type,
-) -> proc_macro2::TokenStream {
-    match cls {
-        FbFieldClass::Bool => quote! { view.read_bool(#slot, false) },
-        FbFieldClass::U8 => quote! { view.read_u8(#slot, 0) },
-        FbFieldClass::I8 => quote! { view.read_i8(#slot, 0) },
-        FbFieldClass::U16 => quote! { view.read_u16(#slot, 0) },
-        FbFieldClass::I16 => quote! { view.read_i16(#slot, 0) },
-        FbFieldClass::U32 => quote! { view.read_u32(#slot, 0) },
-        FbFieldClass::I32 => quote! { view.read_i32(#slot, 0) },
-        FbFieldClass::F32 => quote! { view.read_f32(#slot, 0.0) },
-        FbFieldClass::U64 => quote! { view.read_u64(#slot, 0) },
-        FbFieldClass::I64 => quote! { view.read_i64(#slot, 0) },
-        FbFieldClass::F64 => quote! { view.read_f64(#slot, 0.0) },
-        FbFieldClass::Text => {
-            quote! { view.read_str_or_empty(#slot).to_string() }
-        }
-        FbFieldClass::VecScalar | FbFieldClass::VecString => {
-            // Extract inner type from Vec<T>
-            let inner_ty = extract_vec_inner(field_ty);
-            quote! {
-                match view.read_vec(#slot) {
-                    Some(vec_view) => <#inner_ty as #mod_path::flatbuf::FbUnpackElement>::fb_unpack_vec(&vec_view)
-                        .unwrap_or_default(),
-                    None => Vec::new(),
-                }
-            }
-        }
-        FbFieldClass::VecStruct => {
-            let inner_ty = extract_vec_inner(field_ty);
-            quote! {
-                match view.read_vec(#slot) {
-                    Some(vec_view) => {
-                        let mut __result = Vec::with_capacity(vec_view.len() as usize);
-                        for __i in 0..vec_view.len() {
-                            if let Some(__tbl) = vec_view.get_table(__i) {
-                                __result.push(<#inner_ty as #mod_path::flatbuf::FbUnpack>::fb_unpack_view(&__tbl)
-                                    .unwrap_or_else(|_| panic!("failed to unpack nested struct")));
-                            }
-                        }
-                        __result
-                    }
-                    None => Vec::new(),
-                }
-            }
-        }
-        FbFieldClass::Struct => {
-            quote! {
-                match view.read_table(#slot) {
-                    Some(sub_view) => <#field_ty as #mod_path::flatbuf::FbUnpack>::fb_unpack_view(&sub_view)
-                        .unwrap_or_else(|_| panic!("failed to unpack nested struct")),
-                    None => <#field_ty as #mod_path::flatbuf::FbUnpack>::fb_unpack_view(&view)
-                        .unwrap_or_else(|_| panic!("failed to unpack nested struct")),
-                }
-            }
-        }
-    }
-}
-
-fn extract_vec_inner(ty: &Type) -> proc_macro2::TokenStream {
-    if let Type::Path(tp) = ty {
-        let seg = tp.path.segments.last().unwrap();
-        if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-            if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                return quote!(#inner);
-            }
-        }
-    }
-    quote!(#ty)
-}
-
-// ── Entry points ────────────────────────────────────────────────────────
+use crate::attrs::{self, Derive};
+use crate::c_enum::{self, CEnum};
 
 pub fn fb_pack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbPack")) {
-        Ok(item) => item.krate().into_token_stream(),
-        Err(err) => return err.to_compile_error().into(),
-    };
-
-    match &input.data {
-        Data::Struct(data) => {
-            if let Fields::Named(named) = &data.fields {
-                gen_fb_pack(&mod_path, &input, named)
-            } else {
-                panic!("FbPack only supports named structs");
-            }
-        }
-        _ => panic!("FbPack only supports structs"),
-    }
+    expand(&input, Which::Pack).unwrap_or_else(|e| e.to_compile_error()).into()
 }
 
 pub fn fb_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbUnpack")) {
-        Ok(item) => item.krate().into_token_stream(),
-        Err(err) => return err.to_compile_error().into(),
-    };
-
-    match &input.data {
-        Data::Struct(data) => {
-            if let Fields::Named(named) = &data.fields {
-                gen_fb_unpack(&mod_path, &input, named)
-            } else {
-                panic!("FbUnpack only supports named structs");
-            }
-        }
-        _ => panic!("FbUnpack only supports structs"),
-    }
+    expand(&input, Which::Unpack).unwrap_or_else(|e| e.to_compile_error()).into()
 }
-
-// ── Code generation ─────────────────────────────────────────────────────
-
-fn gen_fb_pack(
-    mod_path: &proc_macro2::TokenStream,
-    input: &DeriveInput,
-    named: &syn::FieldsNamed,
-) -> TokenStream {
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
-    let field_infos: Vec<_> = named.named.iter().enumerate().map(|(i, f)| {
-        let ident = f.ident.as_ref().unwrap();
-        let ty = &f.ty;
-        let cls = classify_type(ty);
-        (i, ident, ty, cls)
-    }).collect();
-
-    // Pre-create offset sub-objects (strings, vecs, nested tables)
-    let mut pre_creates = Vec::new();
-    let mut off_vars: Vec<Option<syn::Ident>> = Vec::new();
-
-    for (i, ident, _, cls) in &field_infos {
-        let field_expr = quote!(self.#ident);
-        if let Some((stmt, var)) = pre_create_tokens(cls, mod_path, &field_expr, *i) {
-            pre_creates.push(stmt);
-            off_vars.push(Some(var));
-        } else {
-            off_vars.push(None);
-        }
-    }
-
-    // The order `flatc` writes the fields of a table in, which is also the
-    // C++ encoder's (psio/flatbuf.hpp `add_order`): by size, largest first,
-    // and within a size by descending field id. FlatBuffers permits other
-    // layouts, but psio promises the same bytes in every language — and
-    // these are the bytes the official object API writes.
-    let mut add_stmts = Vec::new();
-    for size in [8usize, 4, 2, 1] {
-        for (i, ident, _, cls) in field_infos.iter().rev() {
-            if field_sort_size(cls) != size {
-                continue;
-            }
-            let field_expr = quote!(self.#ident);
-            let slot = *i as u16;
-            add_stmts.push(add_field_tokens(cls, &field_expr, slot, off_vars[*i].as_ref()));
-        }
-    }
-
-    let expanded = quote! {
-        impl #impl_generics #mod_path::flatbuf::FbPack for #name #ty_generics #where_clause {
-            fn fb_write(&self, b: &mut #mod_path::flatbuf::FbBuilder) -> u32 {
-                // Phase 1: Pre-create sub-objects
-                #(#pre_creates)*
-
-                // Phase 2: Build table
-                b.start_table();
-                #(#add_stmts)*
-                b.end_table()
-            }
-        }
-    };
-    expanded.into()
-}
-
-fn gen_fb_unpack(
-    mod_path: &proc_macro2::TokenStream,
-    input: &DeriveInput,
-    named: &syn::FieldsNamed,
-) -> TokenStream {
-    let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
-    let field_infos: Vec<_> = named.named.iter().enumerate().map(|(i, f)| {
-        let ident = f.ident.as_ref().unwrap();
-        let ty = &f.ty;
-        let cls = classify_type(ty);
-        (i, ident, ty, cls)
-    }).collect();
-
-    let field_inits: Vec<_> = field_infos.iter().map(|(i, ident, ty, cls)| {
-        let slot = *i as u16;
-        let expr = unpack_field_tokens(cls, mod_path, slot, ty);
-        quote! { #ident: #expr }
-    }).collect();
-
-    let expanded = quote! {
-        impl #impl_generics #mod_path::flatbuf::FbUnpack for #name #ty_generics #where_clause {
-            fn fb_unpack(data: &[u8]) -> Result<Self, #mod_path::flatbuf::FbUnpackError> {
-                let view = #mod_path::flatbuf::view::FbView::from_buffer(data)
-                    .map_err(|e| #mod_path::flatbuf::FbUnpackError::InvalidBuffer(format!("{}", e)))?;
-                Self::fb_unpack_view(&view)
-            }
-
-            fn fb_unpack_view(view: &#mod_path::flatbuf::view::FbView<'_>) -> Result<Self, #mod_path::flatbuf::FbUnpackError> {
-                Ok(#name {
-                    #(#field_inits),*
-                })
-            }
-        }
-    };
-    expanded.into()
-}
-
-// ── FbView derive macro ────────────────────────────────────────────────
 
 pub fn fb_view_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("FbView")) {
-        Ok(item) => item.krate().into_token_stream(),
-        Err(err) => return err.to_compile_error().into(),
-    };
+    expand(&input, Which::View).unwrap_or_else(|e| e.to_compile_error()).into()
+}
 
+#[derive(Clone, Copy, PartialEq)]
+enum Which {
+    Pack,
+    Unpack,
+    View,
+}
+
+impl Which {
+    fn name(self) -> &'static str {
+        match self {
+            Which::Pack => "FbPack",
+            Which::Unpack => "FbUnpack",
+            Which::View => "FbView",
+        }
+    }
+}
+
+fn expand(input: &DeriveInput, which: Which) -> syn::Result<Tokens> {
+    let item = attrs::item(input, Derive::Interchange(which.name()))?;
+    let k = item.krate();
+    if item.transparent {
+        return Err(syn::Error::new_spanned(
+            &input.ident,
+            format!("derive({}) has no transparent types: FlatBuffers has no wrapper-free record", which.name()),
+        ));
+    }
     match &input.data {
         Data::Struct(data) => {
-            if let Fields::Named(named) = &data.fields {
-                gen_fb_view(&mod_path, &input, named)
-            } else {
-                panic!("FbView only supports named structs");
+            let record = Record::new(input, &data.fields, item.definition_will_not_change)?;
+            match which {
+                Which::Pack => record.pack(&k),
+                Which::Unpack => record.unpack(&k),
+                Which::View => record.view(&k),
             }
         }
-        _ => panic!("FbView only supports structs"),
+        Data::Enum(_) => match c_enum::analyze(input)? {
+            Some(shape) => {
+                if shape.repr.is_none() {
+                    return Err(syn::Error::new_spanned(
+                        &input.ident,
+                        "a field-less enum is a FlatBuffers enum of its underlying integer: add \
+                         #[repr(u8)] (or u16/u32/u64/i8/i16/i32/i64)",
+                    ));
+                }
+                no_generics(input, "an enum")?;
+                match which {
+                    Which::Pack => enum_pack(input, &shape, &k),
+                    Which::Unpack => enum_unpack(input, &shape, &k),
+                    Which::View => enum_view(input, &shape, &k),
+                }
+            }
+            None => {
+                no_generics(input, "a union")?;
+                let union = Union::new(input)?;
+                match which {
+                    Which::Pack => union.pack(&k),
+                    Which::Unpack => union.unpack(&k),
+                    Which::View => union.view(&k),
+                }
+            }
+        },
+        Data::Union(_) => Err(syn::Error::new_spanned(&input.ident, "FlatBuffers derives apply to structs and enums")),
     }
 }
 
-/// Return type for a FbView accessor.
-fn fb_view_return_type(
-    cls: &FbFieldClass,
-    mod_path: &proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    match cls {
-        FbFieldClass::Bool => quote! { bool },
-        FbFieldClass::U8 => quote! { u8 },
-        FbFieldClass::I8 => quote! { i8 },
-        FbFieldClass::U16 => quote! { u16 },
-        FbFieldClass::I16 => quote! { i16 },
-        FbFieldClass::U32 => quote! { u32 },
-        FbFieldClass::I32 => quote! { i32 },
-        FbFieldClass::F32 => quote! { f32 },
-        FbFieldClass::U64 => quote! { u64 },
-        FbFieldClass::I64 => quote! { i64 },
-        FbFieldClass::F64 => quote! { f64 },
-        FbFieldClass::Text => quote! { &'a str },
-        FbFieldClass::Struct => quote! { Option<#mod_path::flatbuf::view::FbView<'a>> },
-        FbFieldClass::VecScalar | FbFieldClass::VecString | FbFieldClass::VecStruct => {
-            quote! { Option<#mod_path::flatbuf::view::FbVecView<'a>> }
+fn no_generics(input: &DeriveInput, what: &str) -> syn::Result<()> {
+    if input.generics.params.is_empty() {
+        Ok(())
+    } else {
+        Err(syn::Error::new_spanned(&input.generics, format!("the FlatBuffers derives do not support {what} with generic parameters")))
+    }
+}
+
+/// The generics of the impl: every type parameter also implements `bound`.
+fn bounded(input: &DeriveInput, bound: &Tokens) -> syn::Generics {
+    let mut generics = input.generics.clone();
+    for param in generics.type_params_mut() {
+        param.bounds.push(syn::parse_quote!(#bound));
+    }
+    generics
+}
+
+// ── Records ─────────────────────────────────────────────────────────────────
+
+struct Member<'a> {
+    member: syn::Member,
+    ty: &'a syn::Type,
+    number: u32,
+    deprecated: bool,
+    default: Option<Tokens>,
+}
+
+struct Record<'a> {
+    input: &'a DeriveInput,
+    members: Vec<Member<'a>>,
+    /// Member indices by ascending field number (ties in declaration order).
+    rank: Vec<usize>,
+    dwnc: bool,
+}
+
+impl<'a> Record<'a> {
+    fn new(input: &'a DeriveInput, fields: &'a Fields, dwnc: bool) -> syn::Result<Self> {
+        let mut members = Vec::new();
+        for (index, m) in attrs::members(fields)?.into_iter().enumerate() {
+            members.push(Member {
+                member: m.member,
+                ty: &m.field.ty,
+                // C++ `reflect<T>::field_number<I>`: the 1-based position.
+                number: m.attrs.field_number.unwrap_or(index as u32 + 1),
+                deprecated: m.attrs.deprecated,
+                default: m.attrs.default,
+            });
         }
+        let mut rank: Vec<usize> = (0..members.len()).collect();
+        rank.sort_by_key(|&i| members[i].number);
+        Ok(Record { input, members, rank, dwnc })
     }
-}
 
-/// Generate the view accessor expression for a FbView field.
-fn fb_view_field_tokens(
-    cls: &FbFieldClass,
-    slot: u16,
-) -> proc_macro2::TokenStream {
-    match cls {
-        FbFieldClass::Bool => quote! { self.view.read_bool(#slot, false) },
-        FbFieldClass::U8 => quote! { self.view.read_u8(#slot, 0) },
-        FbFieldClass::I8 => quote! { self.view.read_i8(#slot, 0) },
-        FbFieldClass::U16 => quote! { self.view.read_u16(#slot, 0) },
-        FbFieldClass::I16 => quote! { self.view.read_i16(#slot, 0) },
-        FbFieldClass::U32 => quote! { self.view.read_u32(#slot, 0) },
-        FbFieldClass::I32 => quote! { self.view.read_i32(#slot, 0) },
-        FbFieldClass::F32 => quote! { self.view.read_f32(#slot, 0.0) },
-        FbFieldClass::U64 => quote! { self.view.read_u64(#slot, 0) },
-        FbFieldClass::I64 => quote! { self.view.read_i64(#slot, 0) },
-        FbFieldClass::F64 => quote! { self.view.read_f64(#slot, 0.0) },
-        FbFieldClass::Text => quote! { self.view.read_str_or_empty(#slot) },
-        FbFieldClass::Struct => quote! { self.view.read_table(#slot) },
-        FbFieldClass::VecScalar | FbFieldClass::VecString | FbFieldClass::VecStruct => {
-            quote! { self.view.read_vec(#slot) }
-        }
+    fn types(&self) -> Vec<&syn::Type> {
+        self.members.iter().map(|m| m.ty).collect()
     }
-}
 
-fn gen_fb_view(
-    mod_path: &proc_macro2::TokenStream,
-    input: &DeriveInput,
-    named: &syn::FieldsNamed,
-) -> TokenStream {
-    let name = &input.ident;
-    let vis = &input.vis;
-    let view_name = syn::Ident::new(&format!("{}FbView", name), name.span());
+    /// The vtable slot of member `i`: the slots of the members before it in
+    /// field-number order.
+    fn slot(&self, i: usize, k: &syn::Path) -> Tokens {
+        let before = self.rank.iter().take_while(|&&m| m != i).map(|&m| self.members[m].ty);
+        quote!((0u16 #(+ <#before as #k::flatbuf::FbPack>::SLOTS)*))
+    }
 
-    let field_infos: Vec<_> = named.named.iter().enumerate().map(|(i, f)| {
-        let ident = f.ident.as_ref().unwrap();
-        let ty = &f.ty;
-        let cls = classify_type(ty);
-        (i, ident, ty, cls)
-    }).collect();
-
-    let field_accessors: Vec<_> = field_infos.iter().map(|(i, ident, _, cls)| {
-        let slot = *i as u16;
-        let ret_ty = fb_view_return_type(cls, mod_path);
-        let expr = fb_view_field_tokens(cls, slot);
+    /// `fb_struct_layout([...])` of the members.
+    fn layout(&self, k: &syn::Path) -> Tokens {
+        let types = self.types();
         quote! {
-            pub fn #ident(&self) -> #ret_ty {
-                #expr
+            #k::flatbuf::fb_struct_layout([
+                #((<#types as #k::flatbuf::FbPack>::FIXED_SIZE, <#types as #k::flatbuf::FbPack>::FIXED_ALIGN)),*
+            ])
+        }
+    }
+
+    /// The byte range of member `i` in the struct, given `__l` (the layout).
+    fn range(&self, i: usize, k: &syn::Path) -> Tokens {
+        let ty = self.members[i].ty;
+        quote!(__l.offset[#i]..__l.offset[#i] + <#ty as #k::flatbuf::FbPack>::FIXED_SIZE)
+    }
+
+    fn default_option(&self, i: usize) -> Tokens {
+        match &self.members[i].default {
+            Some(expr) => quote!(::core::option::Option::Some(#expr)),
+            None => quote!(::core::option::Option::None),
+        }
+    }
+
+    fn pack(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        let name = &self.input.ident;
+        let p = quote!(#k::flatbuf::FbPack);
+        let generics = bounded(self.input, &p);
+        let (impl_g, _, where_c) = generics.split_for_impl();
+        let (_, type_g, _) = self.input.generics.split_for_impl();
+        let types = self.types();
+        let count = self.members.len();
+        let dwnc = self.dwnc;
+        let layout = self.layout(k);
+
+        let fixed_writes = self.members.iter().enumerate().map(|(i, m)| {
+            let (member, ty, range) = (&m.member, m.ty, self.range(i, k));
+            quote!(<#ty as #p>::fb_write_fixed(&self.#member, &mut __dst[#range]);)
+        });
+
+        let mut checks = Vec::new();
+        let mut children = Vec::new();
+        let mut defaults = Vec::new();
+        let mut entries = Vec::new();
+        let mut arms = Vec::new();
+        for &i in &self.rank {
+            let m = &self.members[i];
+            let (member, ty) = (&m.member, m.ty);
+            checks.push(quote! {
+                assert!(<#ty as #p>::SUPPORTED,
+                    "psio::flatbuf: a member of this record has a type FlatBuffers cannot hold \
+                     (see the mapping in psio::flatbuf::field)");
+            });
+            match &m.default {
+                Some(_) => checks.push(quote! {
+                    assert!(<#ty as #p>::SCALAR, "psio::flatbuf: #[psio(default = ..)] applies to a scalar member");
+                }),
+                None => checks.push(quote! {
+                    assert!(!<#ty as #p>::SCALAR || <#ty as #p>::HAS_ZERO,
+                        "psio::flatbuf: a member whose enum type has no enumerator 0 declares its \
+                         default: #[psio(default = \"Type::Variant\")]");
+                }),
+            }
+            if m.deprecated {
+                continue;
+            }
+            let child = format_ident!("__child_{}", i);
+            children.push(quote!(let #child = <#ty as #p>::fb_write_child(&self.#member, __b, false);));
+        }
+        for (i, m) in self.members.iter().enumerate() {
+            let (member, ty, slot) = (&m.member, m.ty, self.slot(i, k));
+            let index = i as u16;
+            entries.push(quote!(#k::flatbuf::FbAddEntry::of::<#ty>(#index, #slot)));
+            if m.deprecated {
+                continue;
+            }
+            let (child, default) = (format_ident!("__child_{}", i), format_ident!("__default_{}", i));
+            let value = match &m.default {
+                Some(expr) => quote!(::core::option::Option::Some(#expr)),
+                None => quote!(<#ty as #p>::fb_zero()),
+            };
+            defaults.push(quote!(let #default: ::core::option::Option<#ty> = #value;));
+            arms.push(quote! {
+                #index => <#ty as #p>::fb_add(&self.#member, __b, __e.part, #child, #default.as_ref(), #slot),
+            });
+        }
+
+        Ok(quote! {
+            impl #impl_g #p for #name #type_g #where_c {
+                const STRUCT: bool = #dwnc && #count > 0 #(&& <#types as #p>::FIXED)*;
+                const TABLE: bool = !<Self as #p>::STRUCT;
+                const FIXED_SIZE: usize = if <Self as #p>::STRUCT { #layout.size } else { 0 };
+                const FIXED_ALIGN: usize = if <Self as #p>::STRUCT { #layout.align } else { 1 };
+
+                #[allow(unused_variables)]
+                fn fb_write_fixed(&self, __dst: &mut [u8]) {
+                    let __l = const { #layout };
+                    #(#fixed_writes)*
+                }
+
+                fn fb_write_child(&self, __b: &mut #k::flatbuf::FbBuilder, _keep_empty: bool) -> u32 {
+                    if <Self as #p>::STRUCT { 0 } else { <Self as #p>::fb_write_table(self, __b) }
+                }
+
+                #[allow(unused_variables)]
+                fn fb_write_table(&self, __b: &mut #k::flatbuf::FbBuilder) -> u32 {
+                    const { #(#checks)* };
+                    // Children first, in field order.
+                    #(#children)*
+                    __b.start_table();
+                    #(#defaults)*
+                    let __order = const { #k::flatbuf::fb_add_order([#(#entries),*]) };
+                    for __e in __order.iter().flatten() {
+                        if !__e.live {
+                            break;
+                        }
+                        match __e.member {
+                            #(#arms)*
+                            _ => {}
+                        }
+                    }
+                    __b.end_table()
+                }
+            }
+        })
+    }
+
+    fn unpack(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        let name = &self.input.ident;
+        let p = quote!(#k::flatbuf::FbPack);
+        let u = quote!(#k::flatbuf::FbUnpack);
+        let generics = bounded(self.input, &u);
+        let (impl_g, _, where_c) = generics.split_for_impl();
+        let (_, type_g, _) = self.input.generics.split_for_impl();
+        let types = self.types();
+        let layout = self.layout(k);
+
+        let mut valid = Vec::new();
+        let mut fixed = Vec::new();
+        let mut absent = Vec::new();
+        let mut checks = Vec::new();
+        let mut decoded = Vec::new();
+        for (i, m) in self.members.iter().enumerate() {
+            let (member, ty, range, slot) = (&m.member, m.ty, self.range(i, k), self.slot(i, k));
+            let default = self.default_option(i);
+            valid.push(quote!(&& <#ty as #u>::fb_fixed_valid(&__src[#range])));
+            fixed.push(quote!(#member: <#ty as #u>::fb_read_fixed(&__src[#range])));
+            absent.push(quote!(#member: <#ty as #u>::fb_absent()));
+            if m.deprecated {
+                decoded.push(quote! {
+                    #member: {
+                        let __default: ::core::option::Option<#ty> = #default;
+                        __default.unwrap_or_else(<#ty as #u>::fb_absent)
+                    }
+                });
+            } else {
+                checks.push(quote!(&& <#ty as #u>::fb_check_member(__c, &__t, #slot, false)));
+                decoded.push(quote!(#member: <#ty as #u>::fb_decode_member(__t, #slot, #default)));
             }
         }
-    }).collect();
 
-    let expanded = quote! {
-        #[derive(Debug, Clone, Copy)]
-        #vis struct #view_name<'a> {
-            view: #mod_path::flatbuf::view::FbView<'a>,
+        Ok(quote! {
+            impl #impl_g #u for #name #type_g #where_c {
+                const FIXED_CHECKED: bool = <Self as #p>::STRUCT && (false #(|| <#types as #u>::FIXED_CHECKED)*);
+
+                #[allow(unused_variables)]
+                fn fb_fixed_valid(__src: &[u8]) -> bool {
+                    let __l = const { #layout };
+                    true #(#valid)*
+                }
+
+                fn fb_check_cell(__c: &mut #k::flatbuf::FbChecker<'_>, __pos: u64) -> bool {
+                    if <Self as #p>::STRUCT {
+                        #k::flatbuf::fb_check_fixed::<Self>(__c, __pos)
+                    } else {
+                        let __target = __c.check_offset_cell(__pos);
+                        __target != 0 && <Self as #u>::fb_check_table(__c, __target)
+                    }
+                }
+
+                fn fb_check_table(__c: &mut #k::flatbuf::FbChecker<'_>, __pos: u64) -> bool {
+                    let ::core::option::Option::Some(__t) = __c.begin_table(__pos) else {
+                        return false;
+                    };
+                    let __ok = true #(#checks)*;
+                    __c.end_table();
+                    __ok
+                }
+
+                #[allow(unused_variables)]
+                fn fb_read_fixed(__src: &[u8]) -> Self {
+                    let __l = const { #layout };
+                    Self { #(#fixed),* }
+                }
+
+                fn fb_decode_cell(__buf: &[u8], __cell: usize) -> Self {
+                    if <Self as #p>::STRUCT {
+                        #k::flatbuf::fb_fixed_at::<Self>(__buf, __cell)
+                    } else {
+                        <Self as #u>::fb_decode_table(#k::flatbuf::FbTable::follow(__buf, __cell))
+                    }
+                }
+
+                #[allow(unused_variables)]
+                fn fb_decode_table(__t: #k::flatbuf::FbTable<'_>) -> Self {
+                    Self { #(#decoded),* }
+                }
+
+                fn fb_absent() -> Self {
+                    if <Self as #p>::STRUCT {
+                        Self { #(#absent),* }
+                    } else {
+                        <Self as #u>::fb_decode_table(#k::flatbuf::FbTable::absent(&[]))
+                    }
+                }
+            }
+        })
+    }
+
+    fn view(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        no_generics(self.input, "a view of a record")?;
+        let name = &self.input.ident;
+        let vis = &self.input.vis;
+        let p = quote!(#k::flatbuf::FbPack);
+        let v = quote!(#k::flatbuf::FbViewable);
+        let accessors = format_ident!("{}FbAccessors", name);
+        let layout = self.layout(k);
+
+        let mut declarations = Vec::new();
+        let mut methods = Vec::new();
+        for (i, m) in self.members.iter().enumerate() {
+            let syn::Member::Named(method) = &m.member else { continue };
+            let (ty, slot, default) = (m.ty, self.slot(i, k), self.default_option(i));
+            let doc = format!("The member `{}`.", method);
+            declarations.push(quote!(#[doc = #doc] fn #method(&self) -> <#ty as #v>::View<'__fb>;));
+            let table = if m.deprecated {
+                quote!(<#ty as #v>::fb_view_absent(self.fb_buffer(), #default))
+            } else {
+                quote!(<#ty as #v>::fb_view_member(self.fb_table(), #slot, #default))
+            };
+            methods.push(quote! {
+                fn #method(&self) -> <#ty as #v>::View<'__fb> {
+                    if <#name as #p>::STRUCT {
+                        let __l = const { #layout };
+                        <#ty as #v>::fb_view_fixed(self.fb_buffer(), self.fb_position().saturating_add(__l.offset[#i]))
+                    } else {
+                        #table
+                    }
+                }
+            });
         }
+        let doc = format!("The members of a [`{name}`] read in place: implemented for `FbView<{name}>`.");
 
-        impl<'a> #view_name<'a> {
-            /// Create a view from a complete FlatBuffer.
-            pub fn from_buffer(data: &'a [u8]) -> Result<Self, #mod_path::flatbuf::view::FbViewError> {
-                let view = #mod_path::flatbuf::view::FbView::from_buffer(data)?;
-                Ok(#view_name { view })
+        Ok(quote! {
+            impl #v for #name {
+                type View<'__fb> = #k::flatbuf::FbView<'__fb, #name>;
+                fn fb_view_cell(__buf: &[u8], __cell: usize) -> #k::flatbuf::FbView<'_, #name> {
+                    if <#name as #p>::STRUCT {
+                        #k::flatbuf::FbView::at(__buf, __cell)
+                    } else {
+                        #k::flatbuf::FbView::at(__buf, #k::flatbuf::FbTable::follow(__buf, __cell).position())
+                    }
+                }
+                fn fb_view_absent(__buf: &[u8], _default: ::core::option::Option<Self>) -> #k::flatbuf::FbView<'_, #name> {
+                    #k::flatbuf::FbView::absent(__buf)
+                }
             }
 
-            /// Create a view from an existing FbView.
-            pub fn from_view(view: #mod_path::flatbuf::view::FbView<'a>) -> Self {
-                #view_name { view }
+            #[doc = #doc]
+            #vis trait #accessors<'__fb> {
+                #(#declarations)*
             }
 
-            #(#field_accessors)*
+            impl<'__fb> #accessors<'__fb> for #k::flatbuf::FbView<'__fb, #name> {
+                #(#methods)*
+            }
+        })
+    }
+}
+
+// ── Enums ───────────────────────────────────────────────────────────────────
+
+/// `if __v == VALUE { return RESULT(Self::Variant); }` for every declared
+/// enumerator, after the statements that define the values.
+fn enum_matches(shape: &CEnum<'_>, wrap: impl Fn(Tokens) -> Tokens) -> Tokens {
+    let (preamble, values) = shape.values();
+    let variants = shape.declared.iter().map(|v| &v.ident);
+    let results = variants.map(|v| wrap(quote!(Self::#v)));
+    quote! {
+        #preamble
+        #(if __v == #values { return #results; })*
+    }
+}
+
+fn enum_pack(input: &DeriveInput, shape: &CEnum<'_>, k: &syn::Path) -> syn::Result<Tokens> {
+    let name = &input.ident;
+    let repr = shape.repr.as_ref().expect("checked");
+    let p = quote!(#k::flatbuf::FbPack);
+    let (preamble, values) = shape.values();
+    let variants: Vec<_> = shape.declared.iter().map(|v| &v.ident).collect();
+    let has_other = shape.other.is_some();
+    let other_arm = shape.other.map(|other| {
+        let other = &other.ident;
+        quote!(Self::#other(__n) => *__n,)
+    });
+    let zero = enum_matches(shape, |v| quote!(::core::option::Option::Some(#v)));
+    let zero_tail = match shape.other {
+        Some(other) => {
+            let other = &other.ident;
+            quote!(::core::option::Option::Some(Self::#other(__v)))
         }
+        None => quote!(::core::option::Option::None),
     };
-    expanded.into()
+    Ok(quote! {
+        impl #p for #name {
+            const SCALAR: bool = true;
+            const FIXED_SIZE: usize = ::core::mem::size_of::<#repr>();
+            const FIXED_ALIGN: usize = ::core::mem::size_of::<#repr>();
+            const HAS_ZERO: bool = {
+                #preamble
+                #has_other #(|| #values == 0)*
+            };
+            #[allow(unreachable_code)]
+            fn fb_zero() -> ::core::option::Option<Self> {
+                let __v: #repr = 0;
+                #zero
+                #zero_tail
+            }
+            fn fb_write_fixed(&self, __dst: &mut [u8]) {
+                #preamble
+                let __v: #repr = match self {
+                    #(Self::#variants => #values,)*
+                    #other_arm
+                };
+                __dst.copy_from_slice(&__v.to_le_bytes());
+            }
+        }
+    })
+}
+
+fn enum_unpack(input: &DeriveInput, shape: &CEnum<'_>, k: &syn::Path) -> syn::Result<Tokens> {
+    let name = &input.ident;
+    let repr = shape.repr.as_ref().expect("checked");
+    let p = quote!(#k::flatbuf::FbPack);
+    let u = quote!(#k::flatbuf::FbUnpack);
+    let (preamble, values) = shape.values();
+    let closed = shape.other.is_none();
+    let first = &shape.declared.first().or(shape.other.as_ref()).expect("an enum has a variant").ident;
+    let read = enum_matches(shape, |v| v);
+    let (read_tail, absent_tail) = match shape.other {
+        Some(other) => {
+            let other = &other.ident;
+            (quote!(Self::#other(__v)), quote!(Self::#other(0)))
+        }
+        None => (quote!(<Self as #u>::fb_absent()), quote!(Self::#first)),
+    };
+    Ok(quote! {
+        impl #u for #name {
+            // Without a #[psio(other)] catch-all only the declared
+            // enumerators are values of the type.
+            const FIXED_CHECKED: bool = #closed;
+            fn fb_fixed_valid(__src: &[u8]) -> bool {
+                let __v = <#repr as #u>::fb_read_fixed(__src);
+                #preamble
+                !#closed #(|| __v == #values)*
+            }
+            fn fb_check_cell(__c: &mut #k::flatbuf::FbChecker<'_>, __pos: u64) -> bool {
+                #k::flatbuf::fb_check_fixed::<Self>(__c, __pos)
+            }
+            fn fb_key_less(__buf: &[u8], __a: ::core::option::Option<usize>, __b: ::core::option::Option<usize>) -> bool {
+                <#repr as #u>::fb_key_less(__buf, __a, __b)
+            }
+            #[allow(unreachable_code)]
+            fn fb_read_fixed(__src: &[u8]) -> Self {
+                let __v = <#repr as #u>::fb_read_fixed(__src);
+                #read
+                #read_tail
+            }
+            fn fb_decode_cell(__buf: &[u8], __cell: usize) -> Self {
+                #k::flatbuf::fb_fixed_at::<Self>(__buf, __cell)
+            }
+            fn fb_absent() -> Self {
+                match <Self as #p>::fb_zero() {
+                    ::core::option::Option::Some(__zero) => __zero,
+                    ::core::option::Option::None => #absent_tail,
+                }
+            }
+        }
+    })
+}
+
+fn enum_view(input: &DeriveInput, shape: &CEnum<'_>, k: &syn::Path) -> syn::Result<Tokens> {
+    let name = &input.ident;
+    let repr = shape.repr.as_ref().expect("checked");
+    let p = quote!(#k::flatbuf::FbPack);
+    let u = quote!(#k::flatbuf::FbUnpack);
+    let v = quote!(#k::flatbuf::FbViewable);
+    Ok(quote! {
+        impl #v for #name {
+            type View<'__fb> = #name;
+            fn fb_view_cell(__buf: &[u8], __cell: usize) -> #name {
+                #k::flatbuf::fb_fixed_at::<Self>(__buf, __cell)
+            }
+            fn fb_view_absent(_buf: &[u8], __default: ::core::option::Option<Self>) -> #name {
+                __default.unwrap_or_else(<Self as #u>::fb_absent)
+            }
+        }
+        impl #k::flatbuf::FbKey for #name {
+            type Lookup = #name;
+            fn fb_key_cmp(__buf: &[u8], __cell: ::core::option::Option<usize>, __key: &#name) -> ::core::cmp::Ordering {
+                let mut __bytes = [0u8; ::core::mem::size_of::<#repr>()];
+                <#name as #p>::fb_write_fixed(__key, &mut __bytes);
+                <#repr as #k::flatbuf::FbKey>::fb_key_cmp(__buf, __cell, &<#repr>::from_le_bytes(__bytes))
+            }
+        }
+    })
+}
+
+// ── Unions ──────────────────────────────────────────────────────────────────
+
+struct Union<'a> {
+    input: &'a DeriveInput,
+    /// A leading unit variant: the union's `NONE`.
+    none: Option<&'a syn::Ident>,
+    /// The alternatives that hold a table, with their wire types 1, 2, ….
+    alternatives: Vec<(&'a syn::Ident, &'a syn::Type, u8)>,
+}
+
+impl<'a> Union<'a> {
+    fn new(input: &'a DeriveInput) -> syn::Result<Self> {
+        let Data::Enum(data) = &input.data else { unreachable!("an enum") };
+        let mut none = None;
+        let mut alternatives = Vec::new();
+        for (index, variant) in data.variants.iter().enumerate() {
+            match &variant.fields {
+                Fields::Unit if index == 0 => none = Some(&variant.ident),
+                Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
+                    if alternatives.len() == 255 {
+                        return Err(syn::Error::new_spanned(variant, "a FlatBuffers union has at most 255 alternatives"));
+                    }
+                    alternatives.push((&variant.ident, &fields.unnamed[0].ty, alternatives.len() as u8 + 1));
+                }
+                _ => {
+                    return Err(syn::Error::new_spanned(
+                        variant,
+                        "a FlatBuffers union alternative holds one table: `Name(Table)`; only the \
+                         first variant may hold nothing (the union's NONE)",
+                    ))
+                }
+            }
+        }
+        if alternatives.is_empty() {
+            return Err(syn::Error::new_spanned(&input.ident, "a FlatBuffers union has an alternative that holds a table"));
+        }
+        Ok(Union { input, none, alternatives })
+    }
+
+    fn parts(&self) -> (Vec<&syn::Ident>, Vec<&syn::Type>, Vec<u8>) {
+        (
+            self.alternatives.iter().map(|a| a.0).collect(),
+            self.alternatives.iter().map(|a| a.1).collect(),
+            self.alternatives.iter().map(|a| a.2).collect(),
+        )
+    }
+
+    fn pack(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        let name = &self.input.ident;
+        let p = quote!(#k::flatbuf::FbPack);
+        let (variants, types, tags) = self.parts();
+        let none_child = self.none.map(|none| quote!(Self::#none => 0,));
+        let none_tag = self.none.map(|none| quote!(Self::#none => 0u8,));
+        Ok(quote! {
+            impl #p for #name {
+                const UNION: bool = true;
+                // An alternative is a table.
+                const SUPPORTED: bool = true #(&& <#types as #p>::TABLE)*;
+                fn fb_write_child(&self, __b: &mut #k::flatbuf::FbBuilder, _keep_empty: bool) -> u32 {
+                    match self {
+                        #none_child
+                        #(Self::#variants(__alt) => <#types as #p>::fb_write_table(__alt, __b),)*
+                    }
+                }
+                fn fb_add(
+                    &self,
+                    __b: &mut #k::flatbuf::FbBuilder,
+                    __part: u8,
+                    __child: u32,
+                    _default: ::core::option::Option<&Self>,
+                    __slot: u16,
+                ) {
+                    if __part == 0 {
+                        let __tag = match self {
+                            #none_tag
+                            #(Self::#variants(_) => #tags,)*
+                        };
+                        if __tag != 0 {
+                            __b.add_inline(4 + 2 * __slot, 1, 1)[0] = __tag;
+                        }
+                    } else if __child != 0 {
+                        __b.add_offset_field(4 + 2 * (__slot + 1), __child);
+                    }
+                }
+            }
+        })
+    }
+
+    /// The value of a union that is `NONE` or absent: the `NONE` variant,
+    /// else the first alternative of defaults.
+    fn absent(&self, k: &syn::Path) -> Tokens {
+        match self.none {
+            Some(none) => quote!(Self::#none),
+            None => {
+                let (variant, ty, _) = self.alternatives[0];
+                quote!(Self::#variant(<#ty as #k::flatbuf::FbUnpack>::fb_absent()))
+            }
+        }
+    }
+
+    fn unpack(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        let name = &self.input.ident;
+        let u = quote!(#k::flatbuf::FbUnpack);
+        let (variants, types, tags) = self.parts();
+        let count = self.alternatives.len() as u8;
+        let absent = self.absent(k);
+        Ok(quote! {
+            impl #u for #name {
+                fn fb_check_cell(__c: &mut #k::flatbuf::FbChecker<'_>, __pos: u64) -> bool {
+                    __c.fail("flatbuf: a union is a member of a table", __pos)
+                }
+                fn fb_check_member(
+                    __c: &mut #k::flatbuf::FbChecker<'_>,
+                    __t: &#k::flatbuf::FbCheckedTable,
+                    __slot: u16,
+                    _required: bool,
+                ) -> bool {
+                    let ::core::result::Result::Ok(__tc) = __c.checked_field(__t, __slot, 1) else {
+                        return false;
+                    };
+                    let ::core::result::Result::Ok(__vc) = __c.checked_field(__t, __slot + 1, 4) else {
+                        return false;
+                    };
+                    let __type = if __tc != 0 { __c.byte(__tc) } else { 0 };
+                    if __type == 0 {
+                        return __vc == 0 || __c.fail("flatbuf: union is NONE but has a value", __vc);
+                    }
+                    if __type > #count {
+                        return __c.fail("flatbuf: unknown union type", __tc);
+                    }
+                    if __vc == 0 {
+                        return __c.fail("flatbuf: union has a type but no value", __tc);
+                    }
+                    let __target = __c.check_offset(__vc);
+                    if __target == 0 {
+                        return false;
+                    }
+                    match __type {
+                        #(#tags => <#types as #u>::fb_check_table(__c, __target),)*
+                        _ => true,
+                    }
+                }
+                fn fb_decode_cell(_buf: &[u8], _cell: usize) -> Self {
+                    <Self as #u>::fb_absent()
+                }
+                fn fb_decode_member(
+                    __t: #k::flatbuf::FbTable<'_>,
+                    __slot: u16,
+                    _default: ::core::option::Option<Self>,
+                ) -> Self {
+                    let __union = #k::flatbuf::FbUnion::<Self>::member(__t, __slot);
+                    match __union.tag() {
+                        #(#tags => Self::#variants(<#types as #u>::fb_decode_table(__union.fb_table())),)*
+                        _ => <Self as #u>::fb_absent(),
+                    }
+                }
+                fn fb_absent() -> Self {
+                    #absent
+                }
+            }
+        })
+    }
+
+    fn view(&self, k: &syn::Path) -> syn::Result<Tokens> {
+        let name = &self.input.ident;
+        let vis = &self.input.vis;
+        let u = quote!(#k::flatbuf::FbUnpack);
+        let v = quote!(#k::flatbuf::FbViewable);
+        let accessors = format_ident!("{}FbAccessors", name);
+        let (variants, types, tags) = self.parts();
+        let methods: Vec<_> = variants
+            .iter()
+            .map(|variant| format_ident!("{}", attrs::Case::Snake.variant(&variant.to_string())))
+            .collect();
+        let docs = variants.iter().map(|variant| format!("The alternative `{variant}`, when the union holds it."));
+        let doc = format!("The alternatives of a [`{name}`] read in place: implemented for `FbUnion<{name}>`.");
+        Ok(quote! {
+            impl #v for #name {
+                type View<'__fb> = #k::flatbuf::FbUnion<'__fb, #name>;
+                fn fb_view_cell(__buf: &[u8], _cell: usize) -> #k::flatbuf::FbUnion<'_, #name> {
+                    #k::flatbuf::FbUnion::none(__buf)
+                }
+                fn fb_view_absent(__buf: &[u8], _default: ::core::option::Option<Self>) -> #k::flatbuf::FbUnion<'_, #name> {
+                    #k::flatbuf::FbUnion::none(__buf)
+                }
+                fn fb_view_member(
+                    __t: #k::flatbuf::FbTable<'_>,
+                    __slot: u16,
+                    _default: ::core::option::Option<Self>,
+                ) -> #k::flatbuf::FbUnion<'_, #name> {
+                    #k::flatbuf::FbUnion::member(__t, __slot)
+                }
+            }
+
+            #[doc = #doc]
+            #vis trait #accessors<'__fb> {
+                #(#[doc = #docs] fn #methods(&self) -> ::core::option::Option<#k::flatbuf::FbView<'__fb, #types>>;)*
+                /// The value.
+                fn unpack(&self) -> #name;
+            }
+
+            impl<'__fb> #accessors<'__fb> for #k::flatbuf::FbUnion<'__fb, #name> {
+                #(fn #methods(&self) -> ::core::option::Option<#k::flatbuf::FbView<'__fb, #types>> {
+                    self.alternative::<#types>(#tags)
+                })*
+                fn unpack(&self) -> #name {
+                    match self.tag() {
+                        #(#tags => #name::#variants(<#types as #u>::fb_decode_table(self.fb_table())),)*
+                        _ => {
+                            // `Self` is the view here.
+                            fn __absent() -> #name {
+                                <#name as #u>::fb_absent()
+                            }
+                            __absent()
+                        }
+                    }
+                }
+            }
+        })
+    }
 }

@@ -1,519 +1,618 @@
-//! Zero-copy FlatBuffer view types.
+//! Typed views over FlatBuffers bytes: the counterpart of C++
+//! `psio::flatbuf_view<T>` / `flatbuf_trusted_view<T>`.
 //!
-//! `FbView` provides zero-copy access to FlatBuffer data. Fields are read
-//! lazily via vtable-based lookup:
+//! [`FbView<'a, T>`](FbView) reads a `T` in place. There are two ways to
+//! obtain one, as for [`PsszView`](crate::PsszView):
 //!
-//! 1. Navigate to the vtable (table - soffset)
-//! 2. Read the field offset from the vtable slot
-//! 3. If non-zero, read the field data at that offset within the table
-//! 4. If zero, the field is absent — return the default value
+//! * [`FbView::new`] runs the verifier first: use it for untrusted bytes.
+//! * [`FbView::trusted`] does not: the caller vouches for the bytes
+//!   (verified earlier, or written by `to_flatbuf`).
 //!
-//! For strings, this returns `&str` pointing directly into the buffer.
-//! For vectors, this returns `FbVecView` which provides indexed access.
+//! Both are safe on any bytes. Every offset, vtable entry and length is
+//! compared with the buffer before it is used, and what does not fit reads
+//! as absent — a default, an empty string, an empty list. A view never
+//! panics and never reads outside the bytes it was given, whether they
+//! were verified or not; verification is what makes the values it reads
+//! the values that were written.
+//!
+//! A member reads as what is natural for its type ([`FbViewable::View`]):
+//!
+//! | member | reads as |
+//! |---|---|
+//! | scalar, enum | the value (its default when absent) |
+//! | `String` | `&str` |
+//! | [`RawString`] | `&[u8]` |
+//! | table, struct | [`FbView`] (an absent one reads as defaults) |
+//! | `Vec<T>`, `[T; N]` | [`FbVec`] |
+//! | `Option<X>` | `Option` of X's view |
+//! | `BTreeSet<K>` | [`FbSet`], with key lookup |
+//! | `BTreeMap<K, V>` | [`FbMap`], with key lookup |
+//! | union | [`FbUnion`], with one accessor per alternative |
+//!
+//! `#[derive(FbView)]` gives a record's view one method per member
+//! (`view.name()`), through a trait named `<Record>FbAccessors` it defines
+//! beside the record.
 
-use std::fmt;
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet};
+use std::marker::PhantomData;
 
-/// Error type for FlatBuffer view operations.
-#[derive(Debug, Clone)]
-pub enum FbViewError {
-    /// Buffer is too small to contain a valid FlatBuffer.
-    BufferTooSmall,
-    /// Invalid root offset.
-    InvalidRootOffset,
-    /// Invalid vtable pointer.
-    InvalidVtable,
-    /// String is not valid UTF-8.
-    InvalidUtf8,
-    /// Field offset is out of bounds.
-    FieldOutOfBounds,
-}
+use super::field::{entry_key_cell, fb_fixed_at, string_at, vector_at, FbUnpack};
+use super::raw::{self, FbTable, NOWHERE};
+use super::verify::{FbError, FbLimits, FbOptions};
+use crate::pssz::RawString;
 
-impl fmt::Display for FbViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            FbViewError::BufferTooSmall => write!(f, "buffer too small for FlatBuffer"),
-            FbViewError::InvalidRootOffset => write!(f, "invalid root offset"),
-            FbViewError::InvalidVtable => write!(f, "invalid vtable pointer"),
-            FbViewError::InvalidUtf8 => write!(f, "string is not valid UTF-8"),
-            FbViewError::FieldOutOfBounds => write!(f, "field offset out of bounds"),
+/// A type with a view: what reading it in place gives.
+pub trait FbViewable: FbUnpack {
+    /// What a member of this type reads as.
+    type View<'a>;
+
+    /// The view of the value whose inline cell — a table field or a vector
+    /// element — is at `cell`.
+    fn fb_view_cell(buf: &[u8], cell: usize) -> Self::View<'_>;
+
+    /// The view of the fixed value at `pos`: a member of a struct.
+    fn fb_view_fixed(buf: &[u8], pos: usize) -> Self::View<'_> {
+        Self::fb_view_cell(buf, pos)
+    }
+
+    /// The view of a member the table does not store.
+    fn fb_view_absent(buf: &[u8], default: Option<Self>) -> Self::View<'_>;
+
+    /// The view of the member at vtable slot `slot` of table `t`.
+    fn fb_view_member(t: FbTable<'_>, slot: u16, default: Option<Self>) -> Self::View<'_> {
+        match t.cell(slot, Self::INLINE_SIZE) {
+            Some(cell) => Self::fb_view_cell(t.buffer(), cell),
+            None => Self::fb_view_absent(t.buffer(), default),
         }
     }
 }
 
-impl std::error::Error for FbViewError {}
+fn view_element<T: FbViewable>(buf: &[u8], pos: usize) -> T::View<'_> {
+    if T::INLINE {
+        T::fb_view_fixed(buf, pos)
+    } else {
+        T::fb_view_cell(buf, pos)
+    }
+}
 
-/// Zero-copy view into a FlatBuffer table.
-///
-/// This holds a reference to the entire buffer and the position of one table
-/// within it. Fields are accessed by vtable slot index.
-#[derive(Clone, Copy)]
-pub struct FbView<'a> {
-    /// The entire FlatBuffer.
+// ── Records ─────────────────────────────────────────────────────────────────
+
+/// A read-only view of a table or struct `T` inside a buffer.
+pub struct FbView<'a, T> {
     buf: &'a [u8],
-    /// Byte offset of this table within `buf`.
-    table_pos: usize,
-    /// Byte offset of this table's vtable within `buf`.
-    vt_pos: usize,
-    /// Size of the vtable in bytes.
-    vt_size: u16,
+    pos: usize,
+    _type: PhantomData<fn() -> T>,
 }
 
-impl<'a> FbView<'a> {
-    /// Create a view from a complete FlatBuffer (with root offset at position 0).
-    pub fn from_buffer(buf: &'a [u8]) -> Result<Self, FbViewError> {
-        if buf.len() < 4 {
-            return Err(FbViewError::BufferTooSmall);
-        }
-        let root_off = read_u32(buf, 0) as usize;
-        if root_off >= buf.len() || root_off + 4 > buf.len() {
-            return Err(FbViewError::InvalidRootOffset);
-        }
-        Self::from_table(buf, root_off)
+impl<T> Clone for FbView<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for FbView<'_, T> {}
+
+impl<T> std::fmt::Debug for FbView<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FbView").field("type", &std::any::type_name::<T>()).field("pos", &self.pos).finish()
+    }
+}
+
+impl<'a, T: FbUnpack> FbView<'a, T> {
+    /// Verifies `bytes` as a buffer whose root is a `T`, then borrows.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, FbError> {
+        T::fb_validate(bytes)?;
+        Ok(Self::trusted(bytes))
     }
 
-    /// Create a view pointing at a specific table position within the buffer.
-    pub fn from_table(buf: &'a [u8], table_pos: usize) -> Result<Self, FbViewError> {
-        if table_pos + 4 > buf.len() {
-            return Err(FbViewError::InvalidVtable);
-        }
-        let soff = read_i32(buf, table_pos);
-        let vt_pos = (table_pos as i64 - soff as i64) as usize;
-        if vt_pos + 4 > buf.len() {
-            return Err(FbViewError::InvalidVtable);
-        }
-        let vt_size = read_u16(buf, vt_pos);
-        Ok(FbView {
-            buf,
-            table_pos,
-            vt_pos,
-            vt_size,
-        })
+    /// Verifies under other limits, and / or a buffer with a required file
+    /// identifier or a size prefix; the view is of the buffer inside the
+    /// prefix.
+    pub fn new_with(bytes: &'a [u8], opts: &FbOptions, limits: FbLimits) -> Result<Self, FbError> {
+        T::fb_validate_with(bytes, opts, limits)?;
+        Ok(Self::trusted(if opts.size_prefixed { bytes.get(4..).unwrap_or(&[]) } else { bytes }))
     }
 
-    /// Get the underlying buffer.
-    pub fn buffer(&self) -> &'a [u8] {
+    /// A view of bytes the caller vouches for; does not verify. Reads of
+    /// bytes that would not verify give defaults or unspecified values —
+    /// never a panic, never a read outside `bytes`.
+    pub fn trusted(bytes: &'a [u8]) -> Self {
+        const { assert!(T::TABLE, "psio::flatbuf: the root of a buffer is a table") };
+        FbView { buf: bytes, pos: raw::follow(bytes, 0).unwrap_or(NOWHERE), _type: PhantomData }
+    }
+
+    /// The view of the `T` at `pos` in `buf` (a table's position, or a
+    /// struct's first byte).
+    pub fn at(buf: &'a [u8], pos: usize) -> Self {
+        FbView { buf, pos, _type: PhantomData }
+    }
+
+    /// The view of a `T` that is not stored: every member reads as its
+    /// default.
+    pub fn absent(buf: &'a [u8]) -> Self {
+        FbView { buf, pos: NOWHERE, _type: PhantomData }
+    }
+
+    // The methods below are named so that they cannot hide the accessor of
+    // a member (`view.position()` is the member `position`).
+
+    /// The whole buffer.
+    pub fn fb_buffer(&self) -> &'a [u8] {
         self.buf
     }
 
-    /// Get the field offset for a given vtable byte position.
-    /// Returns 0 if the field is absent (slot beyond vtable or value is 0).
-    #[inline]
-    fn field_offset(&self, vt_byte: u16) -> u16 {
-        if vt_byte + 2 <= self.vt_size {
-            read_u16(self.buf, self.vt_pos + vt_byte as usize)
+    /// The position of the table, or of the struct's first byte.
+    pub fn fb_position(&self) -> usize {
+        self.pos
+    }
+
+    /// The table, for reading a member by vtable slot.
+    pub fn fb_table(&self) -> FbTable<'a> {
+        FbTable::at(self.buf, self.pos)
+    }
+
+    /// The value. Does not verify: on a view made by [`trusted`](Self::trusted)
+    /// this is the trusted decode. (A member named `unpack` is read with
+    /// `<Record>FbAccessors::unpack(&view)`.)
+    pub fn unpack(&self) -> T {
+        if T::STRUCT {
+            fb_fixed_at(self.buf, self.pos)
         } else {
-            0
+            T::fb_decode_table(self.fb_table())
         }
-    }
-
-    /// Read a boolean field. Returns `def` if absent.
-    pub fn read_bool(&self, slot: u16, def: bool) -> bool {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            self.buf[self.table_pos + fo as usize] != 0
-        } else {
-            def
-        }
-    }
-
-    /// Read a u8 field. Returns `def` if absent.
-    pub fn read_u8(&self, slot: u16, def: u8) -> u8 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            self.buf[self.table_pos + fo as usize]
-        } else {
-            def
-        }
-    }
-
-    /// Read an i8 field. Returns `def` if absent.
-    pub fn read_i8(&self, slot: u16, def: i8) -> i8 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            self.buf[self.table_pos + fo as usize] as i8
-        } else {
-            def
-        }
-    }
-
-    /// Read a u16 field. Returns `def` if absent.
-    pub fn read_u16(&self, slot: u16, def: u16) -> u16 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_u16(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read an i16 field. Returns `def` if absent.
-    pub fn read_i16(&self, slot: u16, def: i16) -> i16 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_i16(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read a u32 field. Returns `def` if absent.
-    pub fn read_u32(&self, slot: u16, def: u32) -> u32 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_u32(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read an i32 field. Returns `def` if absent.
-    pub fn read_i32(&self, slot: u16, def: i32) -> i32 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_i32(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read a u64 field. Returns `def` if absent.
-    pub fn read_u64(&self, slot: u16, def: u64) -> u64 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_u64(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read an i64 field. Returns `def` if absent.
-    pub fn read_i64(&self, slot: u16, def: i64) -> i64 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_i64(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read an f32 field. Returns `def` if absent.
-    pub fn read_f32(&self, slot: u16, def: f32) -> f32 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_f32(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read an f64 field. Returns `def` if absent.
-    pub fn read_f64(&self, slot: u16, def: f64) -> f64 {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo != 0 {
-            read_f64(self.buf, self.table_pos + fo as usize)
-        } else {
-            def
-        }
-    }
-
-    /// Read a string field. Returns `None` if absent.
-    pub fn read_str(&self, slot: u16) -> Option<&'a str> {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo == 0 {
-            return None;
-        }
-        let str_ref_pos = self.table_pos + fo as usize;
-        let str_pos = deref_offset(self.buf, str_ref_pos);
-        let len = read_u32(self.buf, str_pos) as usize;
-        let bytes = &self.buf[str_pos + 4..str_pos + 4 + len];
-        // FlatBuffer strings should be valid UTF-8
-        std::str::from_utf8(bytes).ok()
-    }
-
-    /// Read a string field, returning empty string if absent.
-    pub fn read_str_or_empty(&self, slot: u16) -> &'a str {
-        self.read_str(slot).unwrap_or("")
-    }
-
-    /// Read a nested table field. Returns `None` if absent.
-    pub fn read_table(&self, slot: u16) -> Option<FbView<'a>> {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo == 0 {
-            return None;
-        }
-        let ref_pos = self.table_pos + fo as usize;
-        let sub_table_pos = deref_offset(self.buf, ref_pos);
-        FbView::from_table(self.buf, sub_table_pos).ok()
-    }
-
-    /// Read a vector field. Returns `None` if absent.
-    pub fn read_vec(&self, slot: u16) -> Option<FbVecView<'a>> {
-        let vt_byte = 4 + 2 * slot;
-        let fo = self.field_offset(vt_byte);
-        if fo == 0 {
-            return None;
-        }
-        let ref_pos = self.table_pos + fo as usize;
-        let vec_pos = deref_offset(self.buf, ref_pos);
-        let count = read_u32(self.buf, vec_pos);
-        Some(FbVecView {
-            buf: self.buf,
-            data_pos: vec_pos + 4,
-            count,
-        })
-    }
-
-    /// Check if a field is present (vtable slot is non-zero).
-    pub fn has_field(&self, slot: u16) -> bool {
-        let vt_byte = 4 + 2 * slot;
-        self.field_offset(vt_byte) != 0
     }
 }
 
-impl<'a> fmt::Debug for FbView<'a> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("FbView")
-            .field("table_pos", &self.table_pos)
-            .field("vt_pos", &self.vt_pos)
-            .field("vt_size", &self.vt_size)
-            .finish()
+// ── Scalars and strings ─────────────────────────────────────────────────────
+
+macro_rules! scalar_view {
+    ($($ty:ty),*) => {$(
+        impl FbViewable for $ty {
+            type View<'a> = $ty;
+            #[inline]
+            fn fb_view_cell(buf: &[u8], cell: usize) -> $ty {
+                fb_fixed_at(buf, cell)
+            }
+            #[inline]
+            fn fb_view_absent(_buf: &[u8], default: Option<Self>) -> $ty {
+                default.unwrap_or_default()
+            }
+        }
+    )*};
+}
+scalar_view!(bool, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64);
+
+impl FbViewable for String {
+    type View<'a> = &'a str;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> &str {
+        std::str::from_utf8(string_at(buf, Some(cell))).unwrap_or("")
+    }
+    fn fb_view_absent(_buf: &[u8], _default: Option<Self>) -> &str {
+        ""
     }
 }
 
-/// Zero-copy view into a FlatBuffer vector.
-///
-/// Elements are accessed by index. The element type determines how each
-/// entry is read (scalars inline, strings/tables via offset).
-#[derive(Clone, Copy, Debug)]
-pub struct FbVecView<'a> {
+impl FbViewable for RawString {
+    type View<'a> = &'a [u8];
+    fn fb_view_cell(buf: &[u8], cell: usize) -> &[u8] {
+        string_at(buf, Some(cell))
+    }
+    fn fb_view_absent(_buf: &[u8], _default: Option<Self>) -> &[u8] {
+        &[]
+    }
+}
+
+impl<T: FbViewable> FbViewable for Option<T> {
+    type View<'a> = Option<T::View<'a>>;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> Option<T::View<'_>> {
+        Some(T::fb_view_cell(buf, cell))
+    }
+    fn fb_view_absent(_buf: &[u8], _default: Option<Self>) -> Option<T::View<'_>> {
+        None
+    }
+}
+
+// ── Vectors ─────────────────────────────────────────────────────────────────
+
+/// A view of a vector (or of a fixed array inside a struct).
+pub struct FbVec<'a, T> {
     buf: &'a [u8],
-    /// Byte offset of the first element (right after the length prefix).
-    data_pos: usize,
-    /// Number of elements.
-    count: u32,
+    data: usize,
+    count: usize,
+    _type: PhantomData<fn() -> T>,
 }
 
-impl<'a> FbVecView<'a> {
-    /// Number of elements in the vector.
-    pub fn len(&self) -> u32 {
+impl<T> Clone for FbVec<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for FbVec<'_, T> {}
+
+impl<T> std::fmt::Debug for FbVec<'_, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FbVec").field("len", &self.count).finish()
+    }
+}
+
+impl<'a, T: FbViewable> FbVec<'a, T> {
+    fn empty(buf: &'a [u8]) -> Self {
+        FbVec { buf, data: 0, count: 0, _type: PhantomData }
+    }
+
+    /// The vector the offset at `cell` points to; empty when it is not
+    /// inside the buffer.
+    fn follow(buf: &'a [u8], cell: usize) -> Self {
+        match vector_at(buf, cell, T::INLINE_SIZE) {
+            Some((data, count)) => FbVec { buf, data, count, _type: PhantomData },
+            None => Self::empty(buf),
+        }
+    }
+
+    /// Number of elements.
+    pub fn len(&self) -> usize {
         self.count
     }
 
-    /// Whether the vector is empty.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
 
-    /// Read a scalar u8 element at index `i`.
-    pub fn get_u8(&self, i: u32) -> u8 {
-        self.buf[self.data_pos + i as usize]
+    /// Element `i`, or `None` past the end.
+    pub fn get(&self, i: usize) -> Option<T::View<'a>> {
+        (i < self.count).then(|| view_element::<T>(self.buf, self.data + i * T::INLINE_SIZE))
     }
 
-    /// Read a scalar i8 element at index `i`.
-    pub fn get_i8(&self, i: u32) -> i8 {
-        self.buf[self.data_pos + i as usize] as i8
+    /// The elements, in order.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = T::View<'a>> + DoubleEndedIterator + 'a {
+        let (buf, data) = (self.buf, self.data);
+        (0..self.count).map(move |i| view_element::<T>(buf, data + i * T::INLINE_SIZE))
     }
 
-    /// Read a scalar u16 element at index `i`.
-    pub fn get_u16(&self, i: u32) -> u16 {
-        read_u16(self.buf, self.data_pos + i as usize * 2)
-    }
-
-    /// Read a scalar i16 element at index `i`.
-    pub fn get_i16(&self, i: u32) -> i16 {
-        read_i16(self.buf, self.data_pos + i as usize * 2)
-    }
-
-    /// Read a scalar u32 element at index `i`.
-    pub fn get_u32(&self, i: u32) -> u32 {
-        read_u32(self.buf, self.data_pos + i as usize * 4)
-    }
-
-    /// Read a scalar i32 element at index `i`.
-    pub fn get_i32(&self, i: u32) -> i32 {
-        read_i32(self.buf, self.data_pos + i as usize * 4)
-    }
-
-    /// Read a scalar u64 element at index `i`.
-    pub fn get_u64(&self, i: u32) -> u64 {
-        read_u64(self.buf, self.data_pos + i as usize * 8)
-    }
-
-    /// Read a scalar i64 element at index `i`.
-    pub fn get_i64(&self, i: u32) -> i64 {
-        read_i64(self.buf, self.data_pos + i as usize * 8)
-    }
-
-    /// Read a scalar f32 element at index `i`.
-    pub fn get_f32(&self, i: u32) -> f32 {
-        read_f32(self.buf, self.data_pos + i as usize * 4)
-    }
-
-    /// Read a scalar f64 element at index `i`.
-    pub fn get_f64(&self, i: u32) -> f64 {
-        read_f64(self.buf, self.data_pos + i as usize * 8)
-    }
-
-    /// Read a bool element at index `i`.
-    pub fn get_bool(&self, i: u32) -> bool {
-        self.buf[self.data_pos + i as usize] != 0
-    }
-
-    /// Read a string element at index `i` (vector of string offsets).
-    pub fn get_str(&self, i: u32) -> Option<&'a str> {
-        let entry_pos = self.data_pos + i as usize * 4;
-        let str_pos = deref_offset(self.buf, entry_pos);
-        let len = read_u32(self.buf, str_pos) as usize;
-        let bytes = &self.buf[str_pos + 4..str_pos + 4 + len];
-        std::str::from_utf8(bytes).ok()
-    }
-
-    /// Read a table element at index `i` (vector of table offsets).
-    pub fn get_table(&self, i: u32) -> Option<FbView<'a>> {
-        let entry_pos = self.data_pos + i as usize * 4;
-        let tbl_pos = deref_offset(self.buf, entry_pos);
-        FbView::from_table(self.buf, tbl_pos).ok()
+    /// The elements as values.
+    pub fn unpack(&self) -> Vec<T> {
+        let size = T::INLINE_SIZE;
+        (0..self.count)
+            .map(|i| {
+                let pos = self.data + i * size;
+                if T::INLINE {
+                    fb_fixed_at(self.buf, pos)
+                } else {
+                    T::fb_decode_cell(self.buf, pos)
+                }
+            })
+            .collect()
     }
 }
 
-// ── Read primitives (little-endian, unaligned-safe) ──────────────────────
-
-#[inline]
-fn read_u16(buf: &[u8], pos: usize) -> u16 {
-    u16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap())
+impl<'a> FbVec<'a, u8> {
+    /// The bytes, borrowed from the buffer.
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.buf.get(self.data..self.data + self.count).unwrap_or(&[])
+    }
 }
 
-#[inline]
-fn read_i16(buf: &[u8], pos: usize) -> i16 {
-    i16::from_le_bytes(buf[pos..pos + 2].try_into().unwrap())
+impl<T: FbViewable> FbViewable for Vec<T> {
+    type View<'a> = FbVec<'a, T>;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> FbVec<'_, T> {
+        FbVec::follow(buf, cell)
+    }
+    fn fb_view_absent(buf: &[u8], _default: Option<Self>) -> FbVec<'_, T> {
+        FbVec::empty(buf)
+    }
 }
 
-#[inline]
-fn read_u32(buf: &[u8], pos: usize) -> u32 {
-    u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap())
+impl<T: FbViewable, const N: usize> FbViewable for [T; N] {
+    type View<'a> = FbVec<'a, T>;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> FbVec<'_, T> {
+        FbVec::follow(buf, cell)
+    }
+    fn fb_view_fixed(buf: &[u8], pos: usize) -> FbVec<'_, T> {
+        match pos.checked_add(N * T::FIXED_SIZE) {
+            Some(end) if end <= buf.len() => FbVec { buf, data: pos, count: N, _type: PhantomData },
+            _ => FbVec::empty(buf),
+        }
+    }
+    fn fb_view_absent(buf: &[u8], _default: Option<Self>) -> FbVec<'_, T> {
+        FbVec::empty(buf)
+    }
 }
 
-#[inline]
-fn read_i32(buf: &[u8], pos: usize) -> i32 {
-    i32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap())
+// ── Sorted vectors ──────────────────────────────────────────────────────────
+
+/// A key of a set or map: how a stored key compares with one to look up.
+pub trait FbKey: FbViewable {
+    /// What a lookup takes: `str` for a string key, the scalar itself
+    /// otherwise.
+    type Lookup: ?Sized;
+
+    /// The stored key at `cell` (the default when absent) against `key`.
+    fn fb_key_cmp(buf: &[u8], cell: Option<usize>, key: &Self::Lookup) -> Ordering;
 }
 
-#[inline]
-fn read_u64(buf: &[u8], pos: usize) -> u64 {
-    u64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap())
+macro_rules! scalar_key {
+    ($($ty:ty),*) => {$(
+        impl FbKey for $ty {
+            type Lookup = $ty;
+            fn fb_key_cmp(buf: &[u8], cell: Option<usize>, key: &$ty) -> Ordering {
+                let stored: $ty = cell.map_or_else(<$ty>::default, |cell| fb_fixed_at(buf, cell));
+                stored.cmp(key)
+            }
+        }
+    )*};
+}
+scalar_key!(bool, i8, i16, i32, i64, u8, u16, u32, u64);
+
+impl FbKey for String {
+    type Lookup = str;
+    fn fb_key_cmp(buf: &[u8], cell: Option<usize>, key: &str) -> Ordering {
+        string_at(buf, cell).cmp(key.as_bytes())
+    }
 }
 
-#[inline]
-fn read_i64(buf: &[u8], pos: usize) -> i64 {
-    i64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap())
+impl FbKey for RawString {
+    type Lookup = [u8];
+    fn fb_key_cmp(buf: &[u8], cell: Option<usize>, key: &[u8]) -> Ordering {
+        string_at(buf, cell).cmp(key)
+    }
 }
 
-#[inline]
-fn read_f32(buf: &[u8], pos: usize) -> f32 {
-    f32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap())
+/// The first index in `0..count` whose key is not less than the one
+/// `cmp` compares with. Terminates and stays in range whatever the order
+/// of the stored keys is.
+fn lower_bound(count: usize, cmp: impl Fn(usize) -> Ordering) -> usize {
+    let (mut lo, mut hi) = (0, count);
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cmp(mid) == Ordering::Less {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
-#[inline]
-fn read_f64(buf: &[u8], pos: usize) -> f64 {
-    f64::from_le_bytes(buf[pos..pos + 8].try_into().unwrap())
+/// A view of a set: a vector sorted by key.
+pub struct FbSet<'a, K> {
+    items: FbVec<'a, K>,
 }
 
-/// Dereference a u32 offset: position + value at position = target position.
-#[inline]
-fn deref_offset(buf: &[u8], pos: usize) -> usize {
-    pos + read_u32(buf, pos) as usize
+impl<K> Clone for FbSet<'_, K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K> Copy for FbSet<'_, K> {}
+
+impl<K> std::fmt::Debug for FbSet<'_, K> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FbSet").field("len", &self.items.count).finish()
+    }
+}
+
+impl<'a, K: FbViewable> FbSet<'a, K> {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Key `i` in ascending order, or `None` past the end.
+    pub fn get(&self, i: usize) -> Option<K::View<'a>> {
+        self.items.get(i)
+    }
+
+    /// The keys, ascending.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = K::View<'a>> + DoubleEndedIterator + 'a {
+        self.items.iter()
+    }
+}
+
+impl<'a, K: FbKey> FbSet<'a, K> {
+    fn cmp_at(&self, i: usize, key: &K::Lookup) -> Ordering {
+        K::fb_key_cmp(self.items.buf, Some(self.items.data + i * K::INLINE_SIZE), key)
+    }
+
+    /// The index of the first key that is not less than `key` (`len()` when
+    /// there is none). Binary search.
+    pub fn lower_bound(&self, key: &K::Lookup) -> usize {
+        lower_bound(self.len(), |i| self.cmp_at(i, key))
+    }
+
+    /// The index of `key`.
+    pub fn find(&self, key: &K::Lookup) -> Option<usize> {
+        let i = self.lower_bound(key);
+        (i < self.len() && self.cmp_at(i, key) == Ordering::Equal).then_some(i)
+    }
+
+    pub fn contains(&self, key: &K::Lookup) -> bool {
+        self.find(key).is_some()
+    }
+}
+
+impl<K: FbViewable + Ord> FbViewable for BTreeSet<K> {
+    type View<'a> = FbSet<'a, K>;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> FbSet<'_, K> {
+        FbSet { items: FbVec::follow(buf, cell) }
+    }
+    fn fb_view_absent(buf: &[u8], _default: Option<Self>) -> FbSet<'_, K> {
+        FbSet { items: FbVec::empty(buf) }
+    }
+}
+
+/// A view of a map: a vector of `{key, value}` tables sorted by key.
+pub struct FbMap<'a, K, V> {
+    buf: &'a [u8],
+    data: usize,
+    count: usize,
+    _type: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> Clone for FbMap<'_, K, V> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K, V> Copy for FbMap<'_, K, V> {}
+
+impl<K, V> std::fmt::Debug for FbMap<'_, K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FbMap").field("len", &self.count).finish()
+    }
+}
+
+impl<'a, K: FbViewable, V: FbViewable> FbMap<'a, K, V> {
+    fn entry(&self, i: usize) -> FbTable<'a> {
+        FbTable::follow(self.buf, self.data + i * 4)
+    }
+
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    /// Key `i` in ascending order, or `None` past the end.
+    pub fn key(&self, i: usize) -> Option<K::View<'a>> {
+        (i < self.count).then(|| K::fb_view_member(self.entry(i), 0, None))
+    }
+
+    /// The value of entry `i`, or `None` past the end.
+    pub fn value(&self, i: usize) -> Option<V::View<'a>> {
+        (i < self.count).then(|| V::fb_view_member(self.entry(i), 1, None))
+    }
+
+    /// The entries as `(key, value)`, by ascending key.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (K::View<'a>, V::View<'a>)> + DoubleEndedIterator + 'a {
+        let (buf, data) = (self.buf, self.data);
+        (0..self.count).map(move |i| {
+            let entry = FbTable::follow(buf, data + i * 4);
+            (K::fb_view_member(entry, 0, None), V::fb_view_member(entry, 1, None))
+        })
+    }
+}
+
+impl<'a, K: FbKey, V: FbViewable> FbMap<'a, K, V> {
+    fn cmp_at(&self, i: usize, key: &K::Lookup) -> Ordering {
+        K::fb_key_cmp(self.buf, entry_key_cell::<K>(self.buf, self.data + i * 4), key)
+    }
+
+    /// The index of the first entry whose key is not less than `key`
+    /// (`len()` when there is none). Binary search.
+    pub fn lower_bound(&self, key: &K::Lookup) -> usize {
+        lower_bound(self.count, |i| self.cmp_at(i, key))
+    }
+
+    /// The index of the entry of `key`.
+    pub fn find(&self, key: &K::Lookup) -> Option<usize> {
+        let i = self.lower_bound(key);
+        (i < self.count && self.cmp_at(i, key) == Ordering::Equal).then_some(i)
+    }
+
+    pub fn contains_key(&self, key: &K::Lookup) -> bool {
+        self.find(key).is_some()
+    }
+
+    /// The value of `key`.
+    pub fn get(&self, key: &K::Lookup) -> Option<V::View<'a>> {
+        self.find(key).and_then(|i| self.value(i))
+    }
+}
+
+impl<K: FbViewable + Ord, V: FbViewable> FbViewable for BTreeMap<K, V> {
+    type View<'a> = FbMap<'a, K, V>;
+    fn fb_view_cell(buf: &[u8], cell: usize) -> FbMap<'_, K, V> {
+        match vector_at(buf, cell, 4) {
+            Some((data, count)) => FbMap { buf, data, count, _type: PhantomData },
+            None => Self::fb_view_absent(buf, None),
+        }
+    }
+    fn fb_view_absent(buf: &[u8], _default: Option<Self>) -> FbMap<'_, K, V> {
+        FbMap { buf, data: 0, count: 0, _type: PhantomData }
+    }
+}
+
+// ── Unions ──────────────────────────────────────────────────────────────────
+
+/// A view of a union member: its type and, through the accessors
+/// `#[derive(FbView)]` adds for each alternative, its value.
+pub struct FbUnion<'a, U> {
+    buf: &'a [u8],
+    tag: u8,
+    pos: usize,
+    _type: PhantomData<fn() -> U>,
+}
+
+impl<U> Clone for FbUnion<'_, U> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<U> Copy for FbUnion<'_, U> {}
+
+impl<U> std::fmt::Debug for FbUnion<'_, U> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FbUnion").field("tag", &self.tag).finish()
+    }
+}
+
+impl<'a, U> FbUnion<'a, U> {
+    /// The union stored at slots `slot` (type) and `slot + 1` (value) of
+    /// `t`. A type without a value, or a value without a type, is `NONE`.
+    pub fn member(t: FbTable<'a>, slot: u16) -> Self {
+        let buf = t.buffer();
+        let tag = t.cell(slot, 1).and_then(|cell| buf.get(cell).copied()).unwrap_or(0);
+        let pos = t.cell(slot + 1, 4).and_then(|cell| raw::follow(buf, cell));
+        match pos {
+            Some(pos) if tag != 0 => FbUnion { buf, tag, pos, _type: PhantomData },
+            _ => Self::none(buf),
+        }
+    }
+
+    /// A union that holds nothing.
+    pub fn none(buf: &'a [u8]) -> Self {
+        FbUnion { buf, tag: 0, pos: NOWHERE, _type: PhantomData }
+    }
+
+    /// The union type on the wire: 0 is `NONE`, 1 the first alternative
+    /// that holds a table.
+    pub fn tag(&self) -> u8 {
+        self.tag
+    }
+
+    /// Whether the union holds nothing.
+    pub fn is_none(&self) -> bool {
+        self.tag == 0
+    }
+
+    /// The view of the alternative whose wire type is `tag`, when the
+    /// union holds it.
+    pub fn alternative<T: FbUnpack>(&self, tag: u8) -> Option<FbView<'a, T>> {
+        (self.tag == tag && tag != 0).then(|| FbView::at(self.buf, self.pos))
+    }
+
+    /// The table the union holds (no table when it is `NONE`).
+    pub fn fb_table(&self) -> FbTable<'a> {
+        FbTable::at(self.buf, self.pos)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flatbuf::builder::FbBuilder;
 
     #[test]
-    fn flatbuf_view_scalar_field() {
-        let mut b = FbBuilder::default();
-        b.start_table();
-        b.add_scalar_u32(4, 42, 0); // slot 0
-        let root = b.end_table();
-        b.finish(root);
-
-        let view = FbView::from_buffer(b.data()).unwrap();
-        assert_eq!(view.read_u32(0, 0), 42);
-    }
-
-    #[test]
-    fn flatbuf_view_absent_field_default() {
-        let mut b = FbBuilder::default();
-        b.start_table();
-        // Add only slot 1, leave slot 0 absent
-        b.add_scalar_u32(6, 99, 0); // slot 1
-        let root = b.end_table();
-        b.finish(root);
-
-        let view = FbView::from_buffer(b.data()).unwrap();
-        // Slot 0 is absent, should return default
-        assert_eq!(view.read_u32(0, 777), 777);
-        // Slot 1 is present
-        assert_eq!(view.read_u32(1, 0), 99);
-    }
-
-    #[test]
-    fn flatbuf_view_string_field() {
-        let mut b = FbBuilder::default();
-        let s_off = b.create_string("world");
-        b.start_table();
-        b.add_offset_field(4, s_off); // slot 0
-        let root = b.end_table();
-        b.finish(root);
-
-        let view = FbView::from_buffer(b.data()).unwrap();
-        assert_eq!(view.read_str(0), Some("world"));
-    }
-
-    #[test]
-    fn flatbuf_view_absent_string() {
-        let mut b = FbBuilder::default();
-        b.start_table();
-        // No string field added
-        let root = b.end_table();
-        b.finish(root);
-
-        let view = FbView::from_buffer(b.data()).unwrap();
-        assert_eq!(view.read_str(0), None);
-        assert_eq!(view.read_str_or_empty(0), "");
-    }
-
-    #[test]
-    fn flatbuf_view_multiple_fields() {
-        let mut b = FbBuilder::default();
-        let s_off = b.create_string("hello");
-        b.start_table();
-        // Add fields in reverse alignment order (smallest align first) as
-        // the builder writes back-to-front
-        b.add_scalar_u8(4, 7, 0);     // slot 0: u8
-        b.add_scalar_u16(6, 1000, 0); // slot 1: u16
-        b.add_scalar_u32(8, 42, 0);   // slot 2: u32
-        b.add_offset_field(10, s_off); // slot 3: string
-        let root = b.end_table();
-        b.finish(root);
-
-        let view = FbView::from_buffer(b.data()).unwrap();
-        assert_eq!(view.read_u8(0, 0), 7);
-        assert_eq!(view.read_u16(1, 0), 1000);
-        assert_eq!(view.read_u32(2, 0), 42);
-        assert_eq!(view.read_str(3), Some("hello"));
+    fn lower_bound_terminates_on_any_order() {
+        for keys in [vec![], vec![1], vec![3, 1, 2], vec![5, 5, 5], vec![9, 0, 9, 0, 9]] {
+            for probe in 0..10 {
+                let i = lower_bound(keys.len(), |i| keys[i].cmp(&probe));
+                assert!(i <= keys.len());
+            }
+        }
     }
 }

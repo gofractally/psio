@@ -15,9 +15,6 @@
 
 use super::layout::FbLayout;
 
-/// Maximum number of fields tracked during a single table construction.
-const MAX_FIELDS: usize = 64;
-
 /// Records the position and vtable byte-offset of one field within a table
 /// being constructed.
 #[derive(Clone, Copy)]
@@ -30,22 +27,16 @@ struct FieldLoc {
 
 /// FlatBuffer builder that constructs messages back-to-front.
 ///
-/// # Example
-/// ```
-/// use psio::flatbuf::{FbBuilder, FbPack};
-///
-/// let data = 42u32.fb_pack();
-/// assert!(!data.is_empty());
-/// ```
 pub struct FbBuilder {
     buf: Vec<u8>,
     head: usize, // write cursor, starts at capacity, grows toward 0
     min_align: usize,
 
     // Table construction state
-    fields: [FieldLoc; MAX_FIELDS],
-    nfields: usize,
+    fields: Vec<FieldLoc>,
     tbl_start: u32,
+    // The vtable being written, kept for its allocation.
+    vt_scratch: Vec<u8>,
 
     // The vtables written so far (their offsets from the end of the buffer):
     // a table whose vtable has the same bytes as an earlier one shares it,
@@ -61,8 +52,8 @@ impl FbBuilder {
             buf: vec![0u8; cap],
             head: cap,
             min_align: 1,
-            fields: [FieldLoc { off: 0, vt: 0 }; MAX_FIELDS],
-            nfields: 0,
+            fields: Vec::new(),
+            vt_scratch: Vec::new(),
             tbl_start: 0,
             vtables: Vec::new(),
         }
@@ -79,6 +70,10 @@ impl FbBuilder {
         let old_cap = self.buf.len();
         let new_cap = (old_cap * 2).max(old_cap + needed);
         let tail = self.sz();
+        assert!(
+            needed <= super::verify::MAX_BUFFER_SIZE - tail.min(super::verify::MAX_BUFFER_SIZE),
+            "flatbuf: the buffer would exceed 2 GiB"
+        );
         let mut new_buf = vec![0u8; new_cap];
         new_buf[new_cap - tail..].copy_from_slice(&self.buf[self.head..]);
         self.buf = new_buf;
@@ -177,13 +172,17 @@ impl FbBuilder {
     /// Write a string (length-prefixed UTF-8 with NUL terminator).
     /// Returns the offset (from end of buffer) for later reference.
     pub fn create_string(&mut self, s: &str) -> u32 {
+        self.create_bytes_string(s.as_bytes())
+    }
+
+    /// Write a string of any bytes (FlatBuffers does not require UTF-8).
+    pub fn create_bytes_string(&mut self, s: &[u8]) -> u32 {
         let len = s.len();
         self.pre_align(len + 1, 4);
         // NUL terminator
         self.push_u8(0);
         // String bytes
-        let dest = self.alloc(len);
-        dest.copy_from_slice(s.as_bytes());
+        self.alloc(len).copy_from_slice(s);
         // Length prefix
         self.align(4);
         self.push_u32(len as u32);
@@ -219,11 +218,42 @@ impl FbBuilder {
         self.sz() as u32
     }
 
+    /// Starts a vector of `count` elements of `elem_size` bytes aligned to
+    /// `elem_align`: returns their storage, zeroed, for the caller to fill.
+    /// [`end_vector`](Self::end_vector) writes the length.
+    pub fn start_vector(&mut self, count: usize, elem_size: usize, elem_align: usize) -> &mut [u8] {
+        let body = count * elem_size;
+        self.pre_align(body, 4);
+        self.pre_align(body, elem_align);
+        let dest = self.alloc(body);
+        dest.fill(0);
+        dest
+    }
+
+    /// Finishes a vector begun with [`start_vector`](Self::start_vector).
+    /// Returns its offset from the end of the buffer.
+    pub fn end_vector(&mut self, count: usize) -> u32 {
+        self.align(4);
+        self.push_u32(count as u32);
+        self.sz() as u32
+    }
+
+    /// Adds a field of `size` bytes aligned to `align` to the table under
+    /// construction — a scalar or a struct — and returns its storage,
+    /// zeroed. `vt` is the field's position in the vtable (4 + 2 × slot).
+    pub fn add_inline(&mut self, vt: u16, align: usize, size: usize) -> &mut [u8] {
+        self.align(align);
+        self.alloc(size).fill(0);
+        self.record_field(vt);
+        let head = self.head;
+        &mut self.buf[head..head + size]
+    }
+
     // ── Table construction ───────────────────────────────────────────────
 
     /// Begin constructing a new table.
     pub fn start_table(&mut self) {
-        self.nfields = 0;
+        self.fields.clear();
         self.tbl_start = self.sz() as u32;
     }
 
@@ -348,16 +378,7 @@ impl FbBuilder {
     }
 
     fn record_field(&mut self, vt: u16) {
-        assert!(
-            self.nfields < MAX_FIELDS,
-            "too many fields in table (max {})",
-            MAX_FIELDS
-        );
-        self.fields[self.nfields] = FieldLoc {
-            off: self.sz() as u32,
-            vt,
-        };
-        self.nfields += 1;
+        self.fields.push(FieldLoc { off: self.sz() as u32, vt });
     }
 
     /// Finish the current table, writing the vtable and patching the soffset.
@@ -370,24 +391,27 @@ impl FbBuilder {
 
         // Compute vtable size
         let mut max_vt: u16 = 0;
-        for i in 0..self.nfields {
-            if self.fields[i].vt > max_vt {
-                max_vt = self.fields[i].vt;
+        for f in &self.fields {
+            if f.vt > max_vt {
+                max_vt = f.vt;
             }
         }
         let vt_size = (max_vt + 2).max(4);
-        let tbl_obj_sz = (tbl_off - self.tbl_start) as u16;
+        let object = tbl_off - self.tbl_start;
+        assert!(object <= 0xffff, "flatbuf: a table's inline data exceeds 64 KiB");
+        let tbl_obj_sz = object as u16;
 
-        // Build the vtable content into a local buffer first to avoid
-        // borrow conflicts between alloc (which borrows self mutably)
-        // and reading self.fields/self.nfields.
+        // The vtable is built aside first: it is compared with the earlier
+        // ones before it is known whether it stays in the buffer.
         let vt_bytes = vt_size as usize;
-        let mut vt_buf = vec![0u8; vt_bytes];
+        let mut vt_buf = std::mem::take(&mut self.vt_scratch);
+        vt_buf.clear();
+        vt_buf.resize(vt_bytes, 0);
         vt_buf[0..2].copy_from_slice(&vt_size.to_le_bytes());
         vt_buf[2..4].copy_from_slice(&tbl_obj_sz.to_le_bytes());
-        for i in 0..self.nfields {
-            let fo = (tbl_off - self.fields[i].off) as u16;
-            let slot_off = self.fields[i].vt as usize;
+        for f in &self.fields {
+            let fo = (tbl_off - f.off) as u16;
+            let slot_off = f.vt as usize;
             if slot_off + 2 <= vt_bytes {
                 vt_buf[slot_off..slot_off + 2].copy_from_slice(&fo.to_le_bytes());
             }
@@ -418,6 +442,7 @@ impl FbBuilder {
         let soff = vt_off as i32 - tbl_off as i32;
         let tbl_pos = self.buf.len() - tbl_off as usize;
         self.buf[tbl_pos..tbl_pos + 4].copy_from_slice(&soff.to_le_bytes());
+        self.vt_scratch = vt_buf;
 
         tbl_off
     }
@@ -428,6 +453,24 @@ impl FbBuilder {
         self.align(4);
         let rel = self.sz() as u32 - root + 4;
         self.push_u32(rel);
+    }
+
+    /// Finishes the buffer with a file identifier and / or a size prefix.
+    pub fn finish_with(&mut self, root: u32, opts: &super::verify::FbOptions) {
+        let prefix = if opts.size_prefixed { 4 } else { 0 };
+        self.track(prefix);
+        let ident = if opts.file_identifier.is_some() { 4 } else { 0 };
+        self.pre_align(prefix + 4 + ident, self.min_align);
+        if let Some(id) = opts.file_identifier {
+            self.alloc(4).copy_from_slice(&id);
+        }
+        self.align(4);
+        let rel = self.sz() as u32 - root + 4;
+        self.push_u32(rel);
+        if opts.size_prefixed {
+            let size = self.sz() as u32;
+            self.push_u32(size);
+        }
     }
 
     /// Get the finished buffer data.
@@ -450,7 +493,7 @@ impl FbBuilder {
     pub fn clear(&mut self) {
         self.head = self.buf.len();
         self.min_align = 1;
-        self.nfields = 0;
+        self.fields.clear();
         self.tbl_start = 0;
         self.vtables.clear();
     }
@@ -459,145 +502,6 @@ impl FbBuilder {
 impl Default for FbBuilder {
     fn default() -> Self {
         Self::new(1024)
-    }
-}
-
-// ── FbPack trait ─────────────────────────────────────────────────────────
-
-/// Trait for types that can be serialized to FlatBuffer format.
-///
-/// Implementing types provide `fb_write` to write their data into a builder,
-/// and get `fb_pack` for free which returns the complete FlatBuffer bytes.
-pub trait FbPack {
-    /// Write this value as a complete FlatBuffer table into the builder.
-    /// Returns the table offset from end-of-buffer.
-    fn fb_write(&self, b: &mut FbBuilder) -> u32;
-
-    /// Serialize this value to a complete FlatBuffer byte buffer.
-    fn fb_pack(&self) -> Vec<u8> {
-        let mut b = FbBuilder::default();
-        let root = self.fb_write(&mut b);
-        b.finish(root);
-        b.into_vec()
-    }
-}
-
-// ── Scalar FbPack impls ──────────────────────────────────────────────────
-//
-// Scalars are wrapped in a single-field table for standalone packing.
-
-macro_rules! impl_fb_pack_scalar {
-    ($ty:ty, $add_method:ident, $default:expr) => {
-        impl FbPack for $ty {
-            fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-                b.start_table();
-                b.$add_method(4, *self, $default);
-                b.end_table()
-            }
-        }
-    };
-}
-
-impl_fb_pack_scalar!(u8, add_scalar_u8, 0);
-impl_fb_pack_scalar!(i8, add_scalar_i8, 0);
-impl_fb_pack_scalar!(u16, add_scalar_u16, 0);
-impl_fb_pack_scalar!(i16, add_scalar_i16, 0);
-impl_fb_pack_scalar!(u32, add_scalar_u32, 0);
-impl_fb_pack_scalar!(i32, add_scalar_i32, 0);
-impl_fb_pack_scalar!(u64, add_scalar_u64, 0);
-impl_fb_pack_scalar!(i64, add_scalar_i64, 0);
-impl_fb_pack_scalar!(f32, add_scalar_f32, 0.0);
-impl_fb_pack_scalar!(f64, add_scalar_f64, 0.0);
-
-impl FbPack for bool {
-    fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-        b.start_table();
-        b.add_scalar_bool(4, *self, false);
-        b.end_table()
-    }
-}
-
-impl FbPack for String {
-    fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-        let s_off = b.create_string(self);
-        b.start_table();
-        b.add_offset_field(4, s_off);
-        b.end_table()
-    }
-}
-
-impl<T: FbPackElement> FbPack for Vec<T> {
-    fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-        let v_off = T::fb_write_vec(self.as_slice(), b);
-        b.start_table();
-        b.add_offset_field(4, v_off);
-        b.end_table()
-    }
-}
-
-impl<T: FbPack> FbPack for Option<T> {
-    fn fb_write(&self, b: &mut FbBuilder) -> u32 {
-        match self {
-            Some(v) => v.fb_write(b),
-            None => {
-                // Empty table
-                b.start_table();
-                b.end_table()
-            }
-        }
-    }
-}
-
-// ── FbPackElement — helper for vector element serialization ──────────────
-
-/// Trait for types that can appear as elements of a FlatBuffer vector.
-pub trait FbPackElement: Sized {
-    /// Write a slice of elements as a FlatBuffer vector.
-    /// Returns the offset from end-of-buffer.
-    fn fb_write_vec(elems: &[Self], b: &mut FbBuilder) -> u32;
-}
-
-macro_rules! impl_fb_pack_element_scalar {
-    ($ty:ty) => {
-        impl FbPackElement for $ty {
-            fn fb_write_vec(elems: &[Self], b: &mut FbBuilder) -> u32 {
-                let bytes: &[u8] = unsafe {
-                    std::slice::from_raw_parts(
-                        elems.as_ptr() as *const u8,
-                        elems.len() * std::mem::size_of::<$ty>(),
-                    )
-                };
-                b.create_vec_scalar(bytes, std::mem::size_of::<$ty>(), elems.len())
-            }
-        }
-    };
-}
-
-impl_fb_pack_element_scalar!(u8);
-impl_fb_pack_element_scalar!(i8);
-impl_fb_pack_element_scalar!(u16);
-impl_fb_pack_element_scalar!(i16);
-impl_fb_pack_element_scalar!(u32);
-impl_fb_pack_element_scalar!(i32);
-impl_fb_pack_element_scalar!(u64);
-impl_fb_pack_element_scalar!(i64);
-impl_fb_pack_element_scalar!(f32);
-impl_fb_pack_element_scalar!(f64);
-
-impl FbPackElement for bool {
-    fn fb_write_vec(elems: &[Self], b: &mut FbBuilder) -> u32 {
-        let bytes: Vec<u8> = elems.iter().map(|&v| v as u8).collect();
-        b.create_vec_scalar(&bytes, 1, elems.len())
-    }
-}
-
-impl FbPackElement for String {
-    fn fb_write_vec(elems: &[Self], b: &mut FbBuilder) -> u32 {
-        let mut offs: Vec<u32> = Vec::with_capacity(elems.len());
-        for s in elems {
-            offs.push(b.create_string(s));
-        }
-        b.create_vec_offsets(&offs)
     }
 }
 

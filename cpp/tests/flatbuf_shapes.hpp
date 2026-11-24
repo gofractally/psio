@@ -188,9 +188,9 @@ struct Sparse
 };
 PSIO_REFLECT(Sparse, rows)
 
-// Shapes every language with a FlatBuffers codec can declare (the Rust
-// derive has no structs, unions, optionals, maps or non-zero defaults):
-// conformance/flatbuf-vectors.json is read by C++ and Rust through these.
+// Shapes declared here only (not in tests/flatbuf/interop.fbs);
+// conformance/flatbuf-vectors.json is read by C++ and Rust through these
+// and the ones above.
 struct Numbers
 {
    bool          b   = false;
@@ -231,6 +231,16 @@ struct Basket
 };
 PSIO_REFLECT(Basket, id, owner, entries, tags, codes, bytes, total, paid)
 
+// A vector of 8-byte elements (alignment of the elements, not only of the
+// length).
+struct Longs
+{
+   std::vector<std::uint64_t> values;
+   std::vector<double>        reals;
+   friend bool                operator==(const Longs&, const Longs&) = default;
+};
+PSIO_REFLECT(Longs, values, reals)
+
 inline Profile sample_profile()
 {
    return Profile{42, "Alice Example", "alice@example.com", 37, true};
@@ -261,5 +271,33 @@ inline Order sample_order()
    o.ids      = {3, 40, 500};
    o.refund   = Card{"refund", 1};
    o.mixed    = Mixed{200, 0x0102030405060708ull, 65000, {-1, 2, -3}, {0.5f, 1.5f, 2.5f}, true};
+   return o;
+}
+
+// A small Order that still has one of everything: the base of the mutated
+// rows of conformance/flatbuf-vectors.json.
+inline Order compact_order()
+{
+   Order o;
+   o.id       = 7;
+   o.customer = Profile{1, "Al", "", 30, true};
+   o.items    = {{"w", 3, 1.5}};
+   o.note     = "n";
+   o.payment  = Card{"41", 9};
+   o.origin   = Vec3{1.0f, 0.0f, -1.0f};
+   o.path     = {{1, 2, 3}};
+   o.tags     = {"t", ""};
+   o.color    = Color::blue;
+   o.discount = 5;
+   o.labels   = {"a", "b"};
+   o.stock    = {{"k", 1}, {"m", 2}};
+   o.by_id    = {{1, {"one", 1, 0}}, {9, {"nine", 2, 0.5}}};
+   o.blob     = {1, 2, 3};
+   o.flags    = {true, false};
+   o.quad     = {1, 2, 3, 4};
+   o.colors   = {Color::green};
+   o.ids      = {1, 2};
+   o.refund   = Wire{"FR"};
+   o.mixed    = Mixed{1, 2, 3, {4, 5, 6}, {7, 8, 9}, true};
    return o;
 }

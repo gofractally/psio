@@ -11,9 +11,9 @@ what the C++ implementation generates. Regenerate with
 <build>/cpp/tests/psio_flatbuf_conformance_emit conformance/flatbuf-vectors.json
 ```
 
-The schema of the types is `cpp/tests/flatbuf/interop.fbs` (the common
-subset below is `Point`, `Profile`, `Tree` there; `Numbers`, `Entry` and
-`Basket` are declared in `flatbuf_shapes.hpp` only).
+The schema of the types is `cpp/tests/flatbuf/interop.fbs` (`Numbers`,
+`Entry`, `Basket`, `Longs`, `Sparse` are declared in `flatbuf_shapes.hpp`
+only). The Rust declarations are `rust/psio/tests/flatbuf_shapes/mod.rs`.
 
 ## What the bytes are
 
@@ -29,6 +29,9 @@ string / vector not written.
 
 ## Rows
 
+Version 2 (version 1 had no `accept_corrupt` section, no `at`, and no
+options on rejected rows).
+
 `accept`: `{id, type, wire_hex}`, plus `file_identifier` (the four
 characters after the root offset) and / or `size_prefixed: true` (the
 buffer starts with its 32-bit size) where the buffer was written with them.
@@ -37,13 +40,56 @@ The value of a row is the one its `id` names in `flatbuf_shapes.hpp` /
 values and checks decode (bytes to value) and encode (value to the same
 bytes).
 
-`reject`: `{id, type, error, wire_hex}`: a buffer `validate_flatbuf<type>`
-refuses, and the message C++ refuses it with.
+`reject`: `{id, type, error, at, wire_hex}`, plus `file_identifier` /
+`size_prefixed` where the verifier is asked for them: a buffer
+`validate_flatbuf<type>` refuses, the message C++ refuses it with and the
+position it reports. Two kinds:
+
+* written by hand, one for each reason the verifier has (the rows whose id
+  names the reason: `Profile/null_root`, `Order/union_none_with_value`,
+  `Tree/shared_subobjects`, …). Every message of `validate_flatbuf` is
+  there except the three that cannot be reached or stored: "buffer larger
+  than 2 GiB", "field out of bounds" and "table out of bounds" (the checks
+  before them already cover the buffer);
+* `<type>/mutated_NNN`: deterministic corruptions (one or two edits of a
+  byte, a 16-bit word, a 32-bit word, or a truncation; splitmix64, so the
+  rows are the same on every platform) of `Profile/sample`, `Tree/nested`,
+  `Basket/full`, `Order/compact` and a `Longs`, with the verdict of the C++
+  verifier.
+
+`accept_corrupt`: `{id, type, wire_hex}`: a buffer that is not the encoding
+of an intended value and that the verifier accepts all the same —
+`<type>/mutated_valid_NNN`, the corruptions above that stay structurally
+valid (a changed scalar, a changed padding byte, an offset that lands on
+another valid object), and two rows written to show where a language with
+stricter types than C++ differs:
+
+* `Profile/name_not_utf8`: a FlatBuffers string is bytes; C++ `std::string`
+  holds them;
+* `Order/color_out_of_range`: an enum is its underlying integer; a C++ enum
+  holds any value of it.
+
+A consumer accepts these rows, and what it decodes re-encodes to a buffer
+that validates.
+
+Together the `reject` and `accept_corrupt` rows pin the accepted set: the
+same bytes get the same answer, for the same reason, in every language.
 
 ## Consumers
 
-| Language | Accepted rows | Rejected rows |
-|---|---|---|
-| C++ | all 21: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 14 refused with the stated message |
-| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | the 12 rows of the shapes the derive can declare (tables of scalars, strings, vectors, nested tables): decoded to the value and re-encoded to the same bytes. The 9 rows of `Order`, `Defaults`, `Renumbered`, `WithDeprecated` (structs, unions, optionals, sorted vectors, non-zero defaults, explicit ids) are counted and not read | Rust has no verifier yet: the test pins which rows `fb_unpack` accepts for lack of a check (5 of 12 today; the others return `Err` or stop with a slice-index panic) |
-| JavaScript, Python | none: neither package implements FlatBuffers | none |
+| Language | Accepted rows | Rejected rows | Corrupted rows C++ accepts |
+|---|---|---|---|
+| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 427 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer |
+| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 427 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below |
+| JavaScript, Python | none: neither package implements FlatBuffers | none | none |
+
+Rust declares the types twice. `raw` holds what the C++ types hold:
+`RawString` members (any bytes) and an enum with a `#[psio(other)]`
+catch-all (any value). Its verifier gives the C++ answer on every row.
+`natural` is how a Rust program writes them — `String` and a plain `enum` —
+and for those the Rust verifier refuses two things C++ accepts, because the
+Rust type cannot hold them: a string that is not UTF-8 (`flatbuf: string is
+not valid UTF-8`) and an enum value that is not an enumerator (`flatbuf:
+unknown enum value`). In 2 rejected rows one of these checks comes before
+the reason C++ gives (`Order/mutated_011`, `Order/mutated_173`); the test
+pins both lists.

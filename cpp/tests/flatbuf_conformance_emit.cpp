@@ -44,10 +44,11 @@ namespace
 
    struct Row
    {
-      std::string id, type, identifier, wire_hex, error;
-      bool        size_prefixed = false;
+      std::string   id, type, identifier, wire_hex, error;
+      bool          size_prefixed = false;
+      std::uint32_t at            = 0;  // rejected rows: where the check failed
    };
-   std::vector<Row> accepted, rejected;
+   std::vector<Row> accepted, rejected, accepted_corrupt;
 
    template <typename T>
    void accept(const std::string& type, const std::string& name, const T& value,
@@ -69,10 +70,10 @@ namespace
 
    template <typename T>
    void reject(const std::string& type, const std::string& name, const Bytes& bytes,
-               std::string_view error)
+               std::string_view error, psio::flatbuf::options opts = {})
    {
       const std::string id = type + "/" + name;
-      const auto        st = psio::validate_flatbuf<T>(bytes);
+      const auto        st = psio::validate_flatbuf<T>(bytes, opts);
       if (st.ok())
          die(id + ": is accepted");
       if (st.error().what != error)
@@ -80,7 +81,104 @@ namespace
              std::string(error) + "\"");
       // The safe view reads such bytes without leaving them.
       (void)psio::flatbuf_view<T>{bytes}.template get<0>();
-      rejected.push_back(Row{id, type, {}, to_hex(bytes), std::string(error)});
+      rejected.push_back(Row{id, type, std::string(opts.file_identifier), to_hex(bytes),
+                             std::string(error), opts.size_prefixed, st.error().byte_offset});
+   }
+
+   // A buffer that is not the encoding of an intended value and that the
+   // verifier accepts all the same: what it decodes to re-encodes to a valid
+   // buffer.
+   template <typename T>
+   void accept_corrupt(const std::string& type, const std::string& name, const Bytes& bytes)
+   {
+      const std::string id = type + "/" + name;
+      if (auto st = psio::validate_flatbuf<T>(bytes); !st.ok())
+         die(id + ": " + std::string(st.error().what));
+      const T    value = psio::from_flatbuf<T>(psio::trusted{bytes});
+      const auto again = psio::to_flatbuf(value);
+      if (!psio::validate_flatbuf<T>(again).ok())
+         die(id + ": its value does not re-encode to a valid buffer");
+      accepted_corrupt.push_back(Row{id, type, {}, to_hex(bytes), {}, false});
+   }
+
+   // splitmix64: the same sequence on every platform.
+   struct Rng
+   {
+      std::uint64_t state;
+      std::uint64_t next()
+      {
+         std::uint64_t z = (state += 0x9e3779b97f4a7c15ull);
+         z               = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+         z               = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+         return z ^ (z >> 31);
+      }
+   };
+
+   // Deterministic corruptions of `base` (the edits of flatbuf_fuzz_tests.cpp):
+   // the first `rejects` that the verifier refuses, with its message, and
+   // the first `accepts` that it accepts.
+   template <typename T>
+   void mutate(const std::string& type, const Bytes& base, std::uint64_t seed, int rejects,
+               int accepts)
+   {
+      Rng rng{seed};
+      int n_rejected = 0, n_accepted = 0;
+      for (int iter = 0; iter < 100000 && (n_rejected < rejects || n_accepted < accepts); ++iter)
+      {
+         Bytes     b     = base;
+         const int edits = 1 + static_cast<int>(rng.next() % 2);
+         for (int e = 0; e < edits && !b.empty(); ++e)
+         {
+            const std::size_t at = rng.next() % b.size();
+            switch (rng.next() % 6)
+            {
+               case 0: b[at] = static_cast<char>(rng.next()); break;
+               case 1: b[at] = static_cast<char>(b[at] + 4); break;
+               case 2: b[at] = static_cast<char>(b[at] ^ (1u << (rng.next() % 8))); break;
+               case 3:
+               {
+                  // A 32-bit word: an offset or a length.
+                  const std::size_t   w = at & ~std::size_t{3};
+                  const std::uint32_t v =
+                     rng.next() % 2 ? static_cast<std::uint32_t>(rng.next() % (b.size() + 8))
+                                    : static_cast<std::uint32_t>(rng.next());
+                  if (w + 4 <= b.size())
+                     std::memcpy(b.data() + w, &v, 4);
+                  break;
+               }
+               case 4:
+               {
+                  // A 16-bit word: a vtable entry.
+                  const std::size_t   w = at & ~std::size_t{1};
+                  const std::uint16_t v = static_cast<std::uint16_t>(rng.next() % 96);
+                  if (w + 2 <= b.size())
+                     std::memcpy(b.data() + w, &v, 2);
+                  break;
+               }
+               default: b.resize(at); break;
+            }
+         }
+         if (b == base)
+            continue;
+         const auto st = psio::validate_flatbuf<T>(b);
+         char       name[32];
+         if (st.ok())
+         {
+            if (n_accepted >= accepts)
+               continue;
+            std::snprintf(name, sizeof name, "mutated_valid_%03d", n_accepted++);
+            accept_corrupt<T>(type, name, b);
+         }
+         else
+         {
+            if (n_rejected >= rejects)
+               continue;
+            std::snprintf(name, sizeof name, "mutated_%03d", n_rejected++);
+            reject<T>(type, name, b, st.error().what);
+         }
+      }
+      if (n_rejected < rejects || n_accepted < accepts)
+         die(type + ": not enough mutations");
    }
 
    void put32(Bytes& b, std::size_t at, std::uint32_t v) { std::memcpy(b.data() + at, &v, 4); }
@@ -90,6 +188,30 @@ namespace
       std::uint32_t v;
       std::memcpy(&v, b.data() + at, 4);
       return v;
+   }
+   std::uint16_t get16(const Bytes& b, std::size_t at)
+   {
+      std::uint16_t v;
+      std::memcpy(&v, b.data() + at, 2);
+      return v;
+   }
+   // The vtable of the table at `table`.
+   std::size_t vtable_of(const Bytes& b, std::size_t table)
+   {
+      std::int32_t soff;
+      std::memcpy(&soff, b.data() + table, 4);
+      return table - soff;
+   }
+   // The position of the field of member `member` of the root table (a T).
+   template <typename T>
+   std::size_t root_field(const Bytes& b, std::size_t member)
+   {
+      const std::size_t   root = get32(b, 0);
+      const std::uint16_t off =
+         get16(b, vtable_of(b, root) + psio::flatbuf::layout<T>::vtable_offset(member));
+      if (off == 0)
+         die("the root table does not store the member");
+      return root + off;
    }
    std::size_t find(const Bytes& b, std::string_view text)
    {
@@ -175,6 +297,14 @@ namespace
       accept("Defaults", "zeros", Defaults{0, false, Color::red, 0.0});
       accept("Renumbered", "sample", Renumbered{5, "five", -5});
       accept("WithDeprecated", "sample", WithDeprecated{1, 0, 3});
+      accept("Order", "compact", compact_order());
+      accept("Scalars", "zero", Scalars{});
+      accept("Scalars", "sample",
+             Scalars{true, -1, 2, -3, 4, -5, 6, -7, 8, 1.5f, -2.25, Color::blue, 'x'});
+      accept("Sparse", "rows",
+             Sparse{{{1, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 6}, {0, 2, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}, {}}});
+      accept("Longs", "empty", Longs{});
+      accept("Longs", "sample", Longs{{1, 0xffffffffffffffffull, 3}, {0.5, -0.0}});
 
       // ── Buffers a verifier must refuse ────────────────────────────────
       const Bytes profile = psio::to_flatbuf(sample_profile());
@@ -261,6 +391,149 @@ namespace
          b[root + off] = 9;
          reject<Order>("Order", "unknown_union_type", b, "flatbuf: unknown union type");
       }
+
+      // ── One row for every other reason the verifier has ───────────────
+      {
+         Bytes b = psio::to_flatbuf(sample_profile(), {.file_identifier = "PROF"});
+         reject<Profile>("Profile", "wrong_identifier", b, "flatbuf: wrong file identifier",
+                         {.file_identifier = "ORDR"});
+         b = psio::to_flatbuf(sample_profile(), {.size_prefixed = true});
+         b.push_back(0);
+         reject<Profile>("Profile", "size_prefix_mismatch", b,
+                         "flatbuf: size prefix does not match the buffer", {.size_prefixed = true});
+      }
+      {
+         // `name` (member 1) is an offset; `id` (member 0) a 64-bit scalar.
+         const std::size_t root = get32(profile, 0);
+         const std::size_t vt   = vtable_of(profile, root);
+         Bytes             b    = profile;
+         put16(b, vt + psio::flatbuf::layout<Profile>::vtable_offset(1), 5);
+         reject<Profile>("Profile", "misaligned_offset", b, "flatbuf: misaligned offset");
+         b = profile;
+         put16(b, vt + psio::flatbuf::layout<Profile>::vtable_offset(0), 5);
+         reject<Profile>("Profile", "misaligned_field", b, "flatbuf: misaligned field");
+         b                      = profile;
+         const std::size_t cell = root_field<Profile>(b, 1);
+         put32(b, cell, get32(b, cell) + 2);
+         reject<Profile>("Profile", "misaligned_string", b, "flatbuf: misaligned string");
+      }
+      {
+         Bytes             b    = psio::to_flatbuf(conformance_basket());
+         const std::size_t cell = root_field<Basket>(b, 4);  // codes
+         put32(b, cell, get32(b, cell) + 2);
+         reject<Basket>("Basket", "misaligned_vector", b, "flatbuf: misaligned vector");
+      }
+      {
+         // The offset moved 4 bytes into the first element, whose low word
+         // then reads as a count of 1: elements at a position that is not a
+         // multiple of 8.
+         Bytes             b    = psio::to_flatbuf(Longs{{1, 2, 3}, {}});
+         const std::size_t cell = root_field<Longs>(b, 0);
+         put32(b, cell, get32(b, cell) + 4);
+         reject<Longs>("Longs", "misaligned_elements", b, "flatbuf: misaligned vector elements");
+      }
+      {
+         const Bytes order = psio::to_flatbuf(compact_order());
+         Bytes       b     = order;
+         {
+            const unsigned char pattern[] = {4, 0, 0, 0, 1, 0, 2, 0, 3, 0, 4, 0};  // quad
+            const std::size_t   at =
+               find(b, std::string_view(reinterpret_cast<const char*>(pattern), sizeof(pattern)));
+            put32(b, at, 3);
+            reject<Order>("Order", "fixed_vector_length", b,
+                          "flatbuf: a fixed-length vector has the wrong length");
+         }
+         b = order;
+         {
+            // The keys of `stock` are "k" and "m".
+            const unsigned char pattern[] = {1, 0, 0, 0, 'k', 0};
+            const std::size_t   at =
+               find(b, std::string_view(reinterpret_cast<const char*>(pattern), sizeof(pattern)));
+            b[at + 4] = 'z';
+            reject<Order>("Order", "map_not_ascending", b,
+                          "flatbuf: map keys are not in ascending order");
+         }
+         b = order;
+         {
+            // The first entry of `stock`: its vtable loses the key.
+            const std::size_t vec   = root_field<Order>(b, 13);
+            const std::size_t list  = vec + get32(b, vec);
+            const std::size_t entry = list + 4 + get32(b, list + 4);
+            put16(b, vtable_of(b, entry) + 4, 0);
+            reject<Order>("Order", "map_entry_without_key", b, "flatbuf: map entry has no key");
+         }
+         b = order;
+         {
+            const std::size_t root = get32(b, 0);
+            const std::size_t vt   = vtable_of(b, root);
+            const std::size_t tvo  = psio::flatbuf::layout<Order>::vtable_offset(5);  // payment
+            b[root + get16(b, vt + tvo)] = 0;
+            reject<Order>("Order", "union_none_with_value", b,
+                          "flatbuf: union is NONE but has a value");
+            b = order;
+            put16(b, vt + tvo + 2, 0);
+            reject<Order>("Order", "union_type_without_value", b,
+                          "flatbuf: union has a type but no value");
+         }
+      }
+      {
+         // A Tree whose `children` vector holds 40 offsets to ONE child, and
+         // so on for 12 levels: 40^12 tables if every path were walked
+         // (flatbuf_fuzz_tests.cpp explains the construction).
+         const std::uint32_t fan = 40, levels = 12;
+         const std::size_t   vtable = 4, first = 16;
+         const std::size_t   stride = 8 + 4 + std::size_t{fan} * 4;
+         Bytes               b(first + stride * levels + 12, 0);
+         put32(b, 0, static_cast<std::uint32_t>(first));
+         put16(b, vtable, 10);
+         put16(b, vtable + 2, 8);
+         put16(b, vtable + 8, 4);
+         for (std::uint32_t l = 0; l <= levels; ++l)
+         {
+            const std::size_t tbl = first + stride * l;
+            put32(b, tbl, static_cast<std::uint32_t>(tbl - vtable));
+            if (l == levels)
+            {
+               put32(b, tbl + 4, 4);
+               break;
+            }
+            const std::size_t vec = tbl + 8;
+            put32(b, tbl + 4, static_cast<std::uint32_t>(vec - (tbl + 4)));
+            put32(b, vec, fan);
+            const std::size_t next = first + stride * (l + 1);
+            for (std::uint32_t i = 0; i < fan; ++i)
+            {
+               const std::size_t cell = vec + 4 + std::size_t{i} * 4;
+               put32(b, cell, static_cast<std::uint32_t>(next - cell));
+            }
+         }
+         reject<Tree>("Tree", "shared_subobjects", b, "flatbuf: too many tables");
+      }
+
+      // ── Corrupted buffers the verifier accepts ────────────────────────
+      {
+         // FlatBuffers strings are bytes: C++ `std::string` holds these, the
+         // Rust `String` cannot (its verifier refuses the row; `RawString`
+         // accepts it).
+         Bytes             b  = profile;
+         const std::size_t at = find(b, "Alice Example");
+         b[at]                = static_cast<char>(0xff);
+         accept_corrupt<Profile>("Profile", "name_not_utf8", b);
+      }
+      {
+         // An enum is its underlying integer: C++ reads any value, a Rust
+         // enum without a catch-all variant does not have this one.
+         Bytes b = psio::to_flatbuf(compact_order());
+         b[root_field<Order>(b, 10)] = 9;  // color
+         accept_corrupt<Order>("Order", "color_out_of_range", b);
+      }
+
+      // ── Deterministic corruptions, with the verdict of this verifier ──
+      mutate<Profile>("Profile", profile, 1, 40, 8);
+      mutate<Tree>("Tree", psio::to_flatbuf(conformance_tree()), 2, 40, 8);
+      mutate<Basket>("Basket", psio::to_flatbuf(conformance_basket()), 3, 60, 10);
+      mutate<Order>("Order", psio::to_flatbuf(compact_order()), 4, 240, 30);
+      mutate<Longs>("Longs", psio::to_flatbuf(Longs{{1, 2, 3}, {0.5}}), 5, 20, 4);
    }
 
    std::string quote(const std::string& s)
@@ -277,7 +550,7 @@ namespace
 
    std::string render()
    {
-      std::string out = "{\"version\":1,\n\"accept\":[\n";
+      std::string out = "{\"version\":2,\n\"accept\":[\n";
       for (std::size_t i = 0; i < accepted.size(); ++i)
       {
          const Row& r = accepted[i];
@@ -293,9 +566,22 @@ namespace
       for (std::size_t i = 0; i < rejected.size(); ++i)
       {
          const Row& r = rejected[i];
-         out += "{\"id\":" + quote(r.id) + ",\"type\":" + quote(r.type) + ",\"error\":" +
-                quote(r.error) + ",\"wire_hex\":" + quote(r.wire_hex) + "}";
+         out += "{\"id\":" + quote(r.id) + ",\"type\":" + quote(r.type);
+         if (!r.identifier.empty())
+            out += ",\"file_identifier\":" + quote(r.identifier);
+         if (r.size_prefixed)
+            out += ",\"size_prefixed\":true";
+         out += ",\"error\":" + quote(r.error) + ",\"at\":" + std::to_string(r.at) +
+                ",\"wire_hex\":" + quote(r.wire_hex) + "}";
          out += i + 1 < rejected.size() ? ",\n" : "\n";
+      }
+      out += "],\n\"accept_corrupt\":[\n";
+      for (std::size_t i = 0; i < accepted_corrupt.size(); ++i)
+      {
+         const Row& r = accepted_corrupt[i];
+         out += "{\"id\":" + quote(r.id) + ",\"type\":" + quote(r.type) + ",\"wire_hex\":" +
+                quote(r.wire_hex) + "}";
+         out += i + 1 < accepted_corrupt.size() ? ",\n" : "\n";
       }
       out += "]}\n";
       return out;
@@ -329,7 +615,7 @@ int main(int argc, char** argv)
    }
    std::ofstream out(argv[1], std::ios::binary);
    out << text;
-   std::printf("wrote %zu accepted and %zu rejected buffers to %s\n", accepted.size(),
-               rejected.size(), argv[1]);
+   std::printf("wrote %zu accepted, %zu rejected and %zu corrupted-but-accepted buffers to %s\n",
+               accepted.size(), rejected.size(), accepted_corrupt.size(), argv[1]);
    return out ? 0 : 1;
 }
