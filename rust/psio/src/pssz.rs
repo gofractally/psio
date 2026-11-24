@@ -2174,7 +2174,7 @@ pssz_tuple!((A, 0), (B, 1), (C, 2), (D, 3), (E, 4), (G, 5), (H, 6), (I, 7), (J, 
 
 #[path = "pssz_nested.rs"]
 mod nested;
-pub use nested::{Checked, Deferred, Nested, NestedValidation};
+pub use nested::{Checked, Deferred, Nested, NestedRef, NestedValidation, PackedRef};
 
 #[path = "pssz_assoc.rs"]
 pub(crate) mod assoc;

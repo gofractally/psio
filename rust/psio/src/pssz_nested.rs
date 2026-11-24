@@ -326,3 +326,156 @@ where
         }
     }
 }
+
+// ── Packing in place ────────────────────────────────────────────────────────
+
+/// A [`Nested<T>`] member written **from the value**: the inner value is
+/// encoded straight into the buffer of the enclosing one, where
+/// `Nested::new(&value)` encodes it into a buffer of its own that is then
+/// copied (C++ `psio::nested_of(value)`).
+///
+/// It is a writer's type: it has the wire, the widths and the evolution
+/// shape of `Nested<T, Checked, N>`, and the same bytes. A message that
+/// wraps a message that wraps a payload is then one buffer, not one per
+/// layer.
+///
+/// ```
+/// use psio::pssz::{to_pssz, Nested, NestedRef};
+///
+/// #[derive(psio::PsszPack, psio::PsszUnpack)]
+/// struct Inner { data: Vec<u8> }
+/// #[derive(psio::PsszPack, psio::PsszUnpack)]
+/// struct Outer { tag: u32, inner: Nested<Inner> }
+/// // The same record, holding the value instead of its bytes.
+/// #[derive(psio::PsszPack)]
+/// struct OuterRef<'a> { tag: u32, inner: NestedRef<'a, Inner> }
+///
+/// let inner = Inner { data: vec![1, 2, 3] };
+/// let two_step = to_pssz(&Outer { tag: 7, inner: Nested::new(&inner).unwrap() });
+/// assert_eq!(to_pssz(&OuterRef { tag: 7, inner: NestedRef::new(&inner) }), two_step);
+/// ```
+///
+/// The value is checked where it is encoded: its bounds, invariants and
+/// `max_dynamic_data` cap, as [`Nested::new`] checks them, and the bound `N`
+/// of the member. The depth limit counts the inner value one level below
+/// the member, as a reader does.
+pub struct NestedRef<'a, T: ?Sized, const N: usize = { usize::MAX }>(pub &'a T);
+
+/// A byte-list member (`Vec<u8>`) whose content is the pSSZ encoding of a
+/// value, written **from the value**, in place (C++ `psio::packed(value)`):
+/// the arguments inside an action, say. It has the wire, the widths and the
+/// shape of `Vec<u8>`; see [`NestedRef`].
+pub struct PackedRef<'a, T: ?Sized>(pub &'a T);
+
+impl<'a, T: ?Sized, const N: usize> NestedRef<'a, T, N> {
+    pub fn new(value: &'a T) -> Self {
+        Self(value)
+    }
+}
+impl<'a, T: ?Sized> PackedRef<'a, T> {
+    pub fn new(value: &'a T) -> Self {
+        Self(value)
+    }
+}
+impl<T: ?Sized, const N: usize> Clone for NestedRef<'_, T, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: ?Sized, const N: usize> Copy for NestedRef<'_, T, N> {}
+impl<T: ?Sized> Clone for PackedRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T: ?Sized> Copy for PackedRef<'_, T> {}
+
+/// The inner value, written at the end of `out` as a value of its own:
+/// what `try_encode::<Pssz, T>` writes (its cap included), at `depth`.
+fn pack_inner<T: PsszPack<Pssz> + ?Sized>(
+    value: &T,
+    out: &mut Vec<u8>,
+    depth: usize,
+    max: usize,
+) -> PsszResult<()> {
+    let start = out.len();
+    let result = value.pssz_pack_at_depth(out, depth).and_then(|()| {
+        let len = out.len() - start;
+        checked::check_cap(T::MAX_DYNAMIC_DATA, len)?;
+        if len > max { Err(OVERFLOW) } else { Ok(()) }
+    });
+    if result.is_err() {
+        out.truncate(start);
+    }
+    result
+}
+fn size_inner<T: PsszPack<Pssz> + ?Sized>(value: &T, depth: usize, max: usize) -> PsszResult<usize> {
+    let len = value.pssz_size_at_depth(depth)?;
+    checked::check_cap(T::MAX_DYNAMIC_DATA, len)?;
+    if len > max { Err(OVERFLOW) } else { Ok(len) }
+}
+
+impl<F: PsszFormat, T: PsszPack<Pssz>, const N: usize> PsszPack<F> for NestedRef<'_, T, N> {
+    const MIN_ENCODED_SIZE: usize = <Nested<T, Checked, N> as PsszPack<F>>::MIN_ENCODED_SIZE;
+    const MAX_ENCODED_SIZE: Option<usize> = <Nested<T, Checked, N> as PsszPack<F>>::MAX_ENCODED_SIZE;
+    const IS_FIXED_SIZE: bool = false;
+    const FIXED_SIZE: usize = 0;
+    const INFERRED_BOUND: Option<usize> = <Nested<T, Checked, N> as PsszPack<F>>::INFERRED_BOUND;
+    const SHAPE: crate::pssz::Shape = <Nested<T, Checked, N> as PsszPack<F>>::SHAPE;
+    fn pssz_size(&self) -> usize {
+        <T as PsszPack<Pssz>>::pssz_size(self.0)
+    }
+    fn pssz_pack(&self, out: &mut Vec<u8>) {
+        <Self as PsszPack<F>>::pssz_pack_checked(self, out)
+            .expect("pssz: nested value has no encoding, or exceeds its bound or the depth limit; use try_to_pssz");
+    }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        checked::pack_checked::<F, Self>(self, out)
+    }
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        checked::encode_node(depth + 1)?;
+        pack_inner::<T>(self.0, out, depth + 1, N)
+    }
+    fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
+        checked::encode_node(depth)?;
+        checked::encode_node(depth + 1)?;
+        size_inner::<T>(self.0, depth + 1, N)
+    }
+    fn pssz_size_hint(&self) -> usize {
+        <T as PsszPack<Pssz>>::pssz_size_hint(self.0)
+    }
+}
+
+impl<F: PsszFormat, T: PsszPack<Pssz>> PsszPack<F> for PackedRef<'_, T> {
+    const OFFSET_WIDTH: usize = <Vec<u8> as PsszPack<F>>::OFFSET_WIDTH;
+    const RECORD_WIDTH_BENEATH: usize = <Vec<u8> as PsszPack<F>>::RECORD_WIDTH_BENEATH;
+    const MIN_ENCODED_SIZE: usize = <Vec<u8> as PsszPack<F>>::MIN_ENCODED_SIZE;
+    const MAX_ENCODED_SIZE: Option<usize> = <Vec<u8> as PsszPack<F>>::MAX_ENCODED_SIZE;
+    const IS_FIXED_SIZE: bool = false;
+    const FIXED_SIZE: usize = 0;
+    const INFERRED_BOUND: Option<usize> = <Vec<u8> as PsszPack<F>>::INFERRED_BOUND;
+    const SHAPE: crate::pssz::Shape = <Vec<u8> as PsszPack<F>>::SHAPE;
+    fn pssz_size(&self) -> usize {
+        <T as PsszPack<Pssz>>::pssz_size(self.0)
+    }
+    fn pssz_pack(&self, out: &mut Vec<u8>) {
+        <Self as PsszPack<F>>::pssz_pack_checked(self, out)
+            .expect("pssz: packed value has no encoding; use try_to_pssz");
+    }
+    fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> {
+        checked::pack_checked::<F, Self>(self, out)
+    }
+    // A byte list is a leaf; what it holds is a value of its own (node 0).
+    fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
+        checked::encode_node(depth)?;
+        pack_inner::<T>(self.0, out, 0, usize::MAX)
+    }
+    fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
+        checked::encode_node(depth)?;
+        size_inner::<T>(self.0, 0, usize::MAX)
+    }
+    fn pssz_size_hint(&self) -> usize {
+        <T as PsszPack<Pssz>>::pssz_size_hint(self.0)
+    }
+}

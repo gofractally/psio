@@ -33,6 +33,10 @@
 // holds a valid encoding of a T, which is why encoding an enclosing value
 // writes the bytes without looking at them.
 //
+// (To write the member of an enclosing value from a T without this buffer
+// of its own, give the enclosing record psio::nested_of(value): pssz.hpp
+// "Packing in place".)
+//
 //   nested<T>::from(value)         encode (fail-fast, like psio::encode)
 //   nested<T>::from_checked(v, n)  encode, reporting a codec_status
 //   nested<T>::checked(bytes, n)   adopt bytes after validating them as T
