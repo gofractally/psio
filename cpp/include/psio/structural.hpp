@@ -744,9 +744,13 @@ struct package_of
 #define PSIO_HOST_MODULE_MEMBER_PTR_(s, IMPL, METHOD) &IMPL::METHOD
 #define PSIO_HOST_MODULE_NAME_(s, _, METHOD)          BOOST_PP_STRINGIZE(METHOD)
 
+// (The specializations below name `psio::...` without a leading `::`: GCC
+// rejects a globally qualified name in a class head — "global qualification
+// of class name is invalid" — and PSIO_HOST_MODULE is used at namespace
+// scope, where the two spellings name the same template.)
 #define PSIO_HOST_MODULE_EMIT_ENTRY_(r, IMPL, entry)                                   \
    template <>                                                                         \
-   struct ::psio::detail::iface_impl<IMPL, ::PSIO_HOST_MODULE_TAG_(entry)>              \
+   struct psio::detail::iface_impl<IMPL, ::PSIO_HOST_MODULE_TAG_(entry)>                \
    {                                                                                   \
       using host = IMPL;                                                               \
       using tag  = ::PSIO_HOST_MODULE_TAG_(entry);                                      \
@@ -767,14 +771,14 @@ struct package_of
    BOOST_PP_SEQ_FOR_EACH(PSIO_HOST_MODULE_EMIT_ENTRY_, IMPL,                            \
                          BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__))                        \
    template <>                                                                         \
-   struct ::psio::impl_of<IMPL>                                                        \
+   struct psio::impl_of<IMPL>                                                          \
    {                                                                                   \
       using type = ::std::tuple<PSIO_PP_SEQ_TO_VA_ARGS(                                \
          BOOST_PP_SEQ_TRANSFORM(PSIO_HOST_MODULE_TAG_TYPE_, _,                         \
                                 BOOST_PP_VARIADIC_TO_SEQ(__VA_ARGS__)))>;              \
    };                                                                                  \
    template <>                                                                         \
-   struct ::psio::detail::impl_info<IMPL>                                              \
+   struct psio::detail::impl_info<IMPL>                                                \
    {                                                                                   \
       using interfaces = ::psio::detail::iface_impls_tuple<IMPL,                        \
          PSIO_PP_SEQ_TO_VA_ARGS(                                                       \

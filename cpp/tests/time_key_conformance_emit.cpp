@@ -863,7 +863,10 @@ namespace
       reject<SF64>("both_zeros", "[0.0,-0.0]");
 
       // A map as an element of a composite key.
-      key_type<KMap>({{{}, 0}, {{{1, "a"}}, 0}, {{{2, "b"}, {1, "a"}}, 255}, {{{0, ""}}, 1},
+      // (the empty map and the empty byte string are spelled out: `{}` beside an
+      // int also matches std::tuple's allocator_arg_t constructor, which GCC
+      // selects and then rejects as explicit)
+      key_type<KMap>({{std::map<std::uint16_t, std::string>{}, 0}, {{{1, "a"}}, 0}, {{{2, "b"}, {1, "a"}}, 255}, {{{0, ""}}, 1},
                       {{{65535, nul}, {256, "x"}, {255, "y"}}, 7}});
       accept<KMap>("any_order", R"([[[2,"b"],[1,"a"]],255])",
                    KMap{{{1, "a"}, {2, "b"}}, 255});
@@ -888,9 +891,9 @@ namespace
                         {"a" + nul + nul, 1}, {"a\x01", 1}, {"ab", 0}});
       key_type<KStrStr>({{"", ""}, {"", "a"}, {"a", ""}, {"a", "b"}, {"ab", ""}, {nul, nul},
                          {"a" + nul, "b"}, {"a", nul + "b"}});
-      key_type<KBytes>({{{}, 0}, {{}, -128}, {{}, 127}, {{0}, 0}, {{0, 0}, 0}, {{0, 1}, 0},
+      key_type<KBytes>({{Bytes{}, 0}, {Bytes{}, -128}, {Bytes{}, 127}, {{0}, 0}, {{0, 0}, 0}, {{0, 1}, 0},
                         {{1}, 0}, {{0xff}, -1}, {{0xff, 0xff}, 1}, {{0xff, 0}, 0}});
-      key_type<KList>({{{}, 0}, {{0}, 0}, {{-1}, 0}, {{1}, 0}, {{-32768, 32767}, -1}, {{0, 0}, 0},
+      key_type<KList>({{std::vector<std::int16_t>{}, 0}, {{0}, 0}, {{-1}, 0}, {{1}, 0}, {{-32768, 32767}, -1}, {{0, 0}, 0},
                        {{256}, 0}, {{1, 0}, 0}});
       key_type<KOptStr>({{std::nullopt, ""}, {std::nullopt, "a"}, {""s, ""}, {""s, "a"},
                          {nul, ""}, {"a"s, ""}});

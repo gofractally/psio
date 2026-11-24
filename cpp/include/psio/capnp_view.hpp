@@ -941,7 +941,7 @@ namespace psio {
       [[nodiscard]] std::span<const char> bytes() const noexcept { return bytes_; }
       [[nodiscard]] std::vector<char>     release() && noexcept { return std::move(bytes_); }
 
-      [[nodiscard]] view<T, capnp, storage::const_borrow> view() const noexcept
+      [[nodiscard]] ::psio::view<T, capnp, storage::const_borrow> view() const noexcept
       {
          return ::psio::view<T, capnp, storage::const_borrow>{bytes()};
       }

@@ -108,7 +108,7 @@ int main() {
       fixture("frac32", "string_vector", psio::experimental::frac32{}, std::vector<std::string>{"", "hello", "world"});
       fixture("frac32", "optional_vector", psio::experimental::frac32{}, std::vector<std::optional<std::string>>{std::nullopt, "", "hello"});
       fixture("frac32", "optional_empty_string", psio::experimental::frac32{}, std::optional<std::string>{""});
-      fixture("frac32", "optional_empty_vector", psio::experimental::frac32{}, std::optional<std::vector<std::uint32_t>>{{}});
+      fixture("frac32", "optional_empty_vector", psio::experimental::frac32{}, std::optional<std::vector<std::uint32_t>>{std::in_place});
       fixture("frac32", "optional_missing_vector", psio::experimental::frac32{}, std::optional<std::vector<std::uint32_t>>{});
       // Vector slots point to complete values. The legacy embedded-container
       // sentinels (0/1) and offsets into the fixed section are not valid here.
