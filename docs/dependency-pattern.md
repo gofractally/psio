@@ -45,7 +45,7 @@ stack deps of its own. (Consumers like `psiserve`, `psizam`,
 | Dep | Category | Define | Effect when present |
 |---|---|---|---|
 | simdjson 5.2.0 | `FetchContent`, pinned by release tag and archive SHA-256; on by default, `-DPSIO_ENABLE_SIMDJSON=OFF` to build without (default OFF for WASI). Not looked up on the system. Override with `-DFETCHCONTENT_SOURCE_DIR_SIMDJSON=<dir>` or a parent `simdjson::simdjson` target | `PSIO_HAVE_SIMDJSON=1` | The JSON syntax layer of the typed and schema-driven JSON / I-JSON readers (`json_simdjson.hpp`, see `docs/json.md`) and `psio::pjson::from_json` |
-| libflatbuffers | `find_package(flatbuffers QUIET)` (in tests) | — | Enables `psio::flatbuf_lib` parity tests |
+| libflatbuffers | `find_package(flatbuffers QUIET)` (in tests) | — | Enables `psio::flatbuf_lib` parity tests. `psio/flatbuf_lib.hpp` is an optional adapter — the one public header that includes an external library's headers (`<flatbuffers/flatbuffers.h>`); include it only where FlatBuffers is installed. The all-headers checks cover it only where the package was found |
 | msgpack-cxx | `find_package(msgpack-cxx QUIET CONFIG)` (in benches) | `PSIO_HAVE_MSGPACK` | `psio_format_perf_external` head-to-head bench |
 | libcapnp | `find_package(CapnProto QUIET)` (in benches) | `PSIO_HAVE_CAPNP` | capnp adapter column in `psio_bench_vs_externals` |
 | libprotobuf | `find_package(Protobuf QUIET)` (in benches) | `PSIO_HAVE_PROTOBUF` | protobuf adapter column in `psio_bench_vs_externals` |

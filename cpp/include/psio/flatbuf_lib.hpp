@@ -1,9 +1,15 @@
 #pragma once
 //
 // psio/flatbuf_lib.hpp — `flatbuf_lib` format tag: Google flatbuffers
-// adapter. Requires the flatbuffers C++ headers on the include path; the
-// tests build target links flatbuffers::flatbuffers when the package is
-// found.
+// adapter.
+//
+// An OPTIONAL adapter: the one public header that includes an external
+// library's headers (<flatbuffers/flatbuffers.h>). Include it only where
+// the FlatBuffers C++ headers are on the include path; PSIO itself and
+// every other header build without FlatBuffers installed (psio::flatbuf
+// in flatbuf.hpp is PSIO's own implementation of the format and needs
+// nothing). PSIO's all-headers checks cover this header only where
+// find_package(flatbuffers) succeeded.
 //
 // Wire is the canonical flatbuffers table layout — interoperable with
 // flatc-generated code that uses PSIO1_REFLECT/PSIO_REFLECT field order
