@@ -14,7 +14,9 @@
 
 #include <psio/compress_name.hpp>
 #include <psio/emit_wit.hpp>
+#include <psio/capnp.hpp>
 #include <psio/ext_int.hpp>
+#include <psio/flatbuf.hpp>
 #include <psio/get_type_name.hpp>
 #include <psio/helpers.hpp>
 #include <psio/invariant.hpp>
@@ -1560,6 +1562,26 @@ TEST_CASE("tutorial 11: views, validated and trusted reads", "[doc][tut-11]")
    CHECK(psio::from_pssz<Symbol>(psio::trusted{lower}).code == "USd");
    CHECK_THROWS_AS(psio::from_pssz<Symbol>(lower), psio::codec_exception);
    // ── /tut-11-limits ──
+
+   // ── tut-11-foreign ──
+   // The declaration is the type in FlatBuffers, Cap'n Proto and protobuf
+   // too. A writer that does not know it (here: AccountPlain, the same
+   // members without annotations) writes a 33-byte owner as valid
+   // FlatBuffers; read as an Account, the buffer is refused.
+   const AccountPlain      wide{1, std::string(33, 'x'), {}, 0};
+   const std::vector<char> fb = psio::to_flatbuf(wide);
+   CHECK(psio::validate_flatbuf<AccountPlain>(fb).ok());
+   const psio::codec_status refused = psio::validate_flatbuf<Account>(fb);
+   REQUIRE_FALSE(refused.ok());
+   CHECK(refused.error().what == std::string_view{"flatbuf: member length_bound violated"});
+   CHECK_THROWS_AS(psio::from_flatbuf<Account>(fb), psio::codec_exception);
+   CHECK_FALSE(psio::validate_capnp<Account>(psio::to_capnp(wide)).ok());
+   CHECK_FALSE(psio::validate_protobuf<Account>(psio::to_protobuf(wide)).ok());
+
+   // Inside the bounds, the same bytes are an Account.
+   const AccountPlain      fits{1, "alice", {"vip"}, 100};
+   CHECK(psio::from_flatbuf<Account>(psio::to_flatbuf(fits)) == Account{1, "alice", {"vip"}, 100});
+   // ── /tut-11-foreign ──
 }
 
 // A read view cannot write.

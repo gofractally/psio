@@ -210,6 +210,20 @@ decode. The reader is safe on arbitrary bytes:
   `maxDynamicData` on the root type bounds the input's size, as for every
   format.
 
+**What the type declares.** A member's `max<N>` / `min<N>` / `exact<N>`,
+a bound below it (`element`, `keys`, `values`), `sorted` / `unique` /
+`unique_keys` and an invariant are part of the type in protobuf too
+([annotations.md §7.2](annotations.md#72-what-is-checked-where)):
+`validate_protobuf` and `from_protobuf` refuse a message whose value is
+outside them (`protobuf: member length_bound violated`, the `sorted`
+messages, the invariant's own; offset 0). A member may be written more
+than once — the last scalar wins, repeated members and messages merge — so
+the declarations are held against the finished value, after the reader has
+accepted the bytes. For such a type `validate_protobuf` reads into a value
+(it stores nothing for a type that declares nothing). `to_protobuf` does
+not check. Rust: the same, with the same messages
+(`PbMessage::pb_message_check_declared`).
+
 Stricter than the official C++ parser, deliberately:
 
 | psio refuses | the official parser | why |
@@ -310,12 +324,14 @@ again to the same text.
 
 `conformance/protobuf-vectors.json` (written and checked by
 `psio_protobuf_conformance_emit`; the header of
-`cpp/tests/protobuf_conformance_emit.cpp` documents the format): 241
+`cpp/tests/protobuf_conformance_emit.cpp` documents the format): 243
 messages psio writes (a reader decodes them and its writer gives the same
-bytes back), 32 messages of other writers (unpacked, reordered, merged,
-with unknown fields) with the bytes they re-encode to, 63 inputs that are
-refused with the message and offset, and twelve digests: the verdict,
-message and offset on 30,000 corruptions of a message of each type.
+bytes back), 33 messages of other writers (unpacked, reordered, merged,
+with unknown fields) with the bytes they re-encode to, 79 inputs that are
+refused with the message and offset (among them a value outside what its
+type declares, in a valid message: the `PbBounded/…` rows), and thirteen
+digests: the verdict, message and offset on 30,000 corruptions of a message
+of each type.
 
 ## Performance
 
@@ -395,8 +411,8 @@ Rust: the same bytes and the same accepted set, proven on
 `conformance/protobuf-vectors.json` (`rust/psio/tests/protobuf_conformance.rs`:
 every accepted row decodes and re-encodes to its bytes, every row of
 another writer re-encodes to the canonical bytes, every rejected row is
-refused with the C++ message and offset, and the twelve digests — the C++
-verdict, message and offset on 360,000 corruptions — are reproduced).
+refused with the C++ message and offset, and the thirteen digests — the C++
+verdict, message and offset on 390,000 corruptions — are reproduced).
 
 ```rust
 #[derive(Debug, PartialEq, psio::Protobuf)]

@@ -75,7 +75,8 @@ every format follows from that one statement:
 | **Schema IR** (`psio::SchemaBuilder`) | `owner` is `Custom{BoundedList<u8, 32>, "utf8"}`, `tags` is `BoundedList<Custom{BoundedList<u8, 16>, "utf8"}, 8>`: a reader that has only the schema derives the same width and enforces the same bounds. |
 | **WIT** (`psio::emit_wit`) | A bounded list is `list<T>/* @psio:max=N */`; a record cap is `@maxDynamicData(N)`. A string's bound is not shown. |
 | **GraphQL** (`psio/graphql.hpp`) | Bounds are not part of the GraphQL schema ([graphql.md](graphql.md)). |
-| bin, ssz, borsh, bincode, msgpack, avro, bson, protobuf, capnp, flatbuf, wit ABI | Member bounds and `utf8` are not read. `validate` applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)); protobuf, capnp and flatbuf read `field<N>`, flatbuf also `deprecated_spec` ([5.12](#512-psio_reflect_enum-and-fieldn)). |
+| **flatbuf, capnp, protobuf** (`psio::validate_flatbuf`, `from_flatbuf`, …) | No change to the bytes: they are the ones the format's own specification defines. Every validating read path refuses a value outside a member's bound, a `utf8` member that is not UTF-8, a list outside its order spec and a value its invariant rejects — the structure of the bytes first, then the declarations on the value ([7.2](#72-what-is-checked-where)). The writers do not check. `validate` also applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)); the three read `field<N>`, flatbuf also `deprecated_spec` ([5.12](#512-psio_reflect_enum-and-fieldn)). |
+| bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Member bounds and `utf8` are not read. `validate` applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)). |
 
 The owner's rules this design implements:
 
@@ -620,9 +621,9 @@ last checked against the tree in which all three run every row of
 
 | Annotation | C++ (`PSIO_REFLECT`) | Rust | TypeScript | Python | Schema IR | Honoured by |
 |---|---|---|---|---|---|---|
-| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `Annotated[T, psio.max(N)]`; in a type alias: `Annotated[str, psio.bounded(N)]` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson (enforced), key (enforced by writers and readers), schema-driven codecs, WIT (comment on lists) |
+| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `Annotated[T, psio.max(N)]`; in a type alias: `Annotated[str, psio.bounded(N)]` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson (enforced), key (enforced by writers and readers), flatbuf / capnp / protobuf (enforced by the validating readers), schema-driven codecs, WIT (comment on lists) |
 | length = N, length ≥ N, a range | `attr(f, exact<N>)`, `attr(f, min<N>)`, `attr(f, min<A> \| max<B>)` (= `psio::length_bound{.max = B, .min = A}`) — member only | — | `field(T, { lengthBound: { exact, min, max } })` — member only | `psio.exact(N)`, `psio.min(N)`, `psio.length(min=A, max=B)` — member only | member attribute `lengthBound="exact=N"` / `"min=A,max=B"` | as above (`min` alone gives no width) |
-| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | n/a: `str` is UTF-8, `psio.RawString` is raw bytes (`bytes` in Python) | `Custom{…, "utf8"}` (raw: `"string"`) | pssz, json/ijson and key (writers and readers), schema-driven codecs |
+| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | n/a: `str` is UTF-8, `psio.RawString` is raw bytes (`bytes` in Python) | `Custom{…, "utf8"}` (raw: `"string"`) | pssz, json/ijson and key (writers and readers), flatbuf / capnp (the validating readers; a protobuf `string` is UTF-8 by its own format), schema-driven codecs |
 | elements | `element(specs)` | `element(...)` | `element: { … }` | `psio.element(...)` | the element type's bounded node | as length |
 | map keys / values | `keys(specs)`, `values(specs)` | `keys(...)`, `values(...)` | `keys: { … }`, `values: { … }` | `psio.keys(...)`, `psio.values(...)` | the entry tuple's bounded members | as length |
 | tuple element / variant alternative | `at<I>(specs)` | tuple: `at(I, ...)`; variant: annotate the enum variant's fields | `at: { 0: { … } }` (tuple index, variant name or index) | `psio.at(i, ...)` (tuple index; union alternative index or name) | the member's bounded node | as length |
@@ -630,7 +631,7 @@ last checked against the tree in which all three run every row of
 | fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `record(name, fields, { fixed: true })` | `@psio.record(definition_will_not_change=True)` | record attribute `definitionWillNotChange` | pssz (no header), bin / borsh / bincode fast paths, evolution check |
 | field-count cap | `maxFields(N)`, N ≤ 255, on a record or in `method(...)` | `#[psio(max_fields = N)]` on a record or an interface function | `record(name, fields, { maxFields: N })`, `argumentTuple(params, { maxFields: N })`, `method(params, { maxFields: N })` | `@psio.record(max_fields=N)`, `@psio.method(max_fields=N)` | attribute `maxFields="N"` on the record's `Object`, on an argument list's `Object` and on its `Func` | where the type is declared (C++ and Rust: compile time; TypeScript and Python: at declaration), the schema-driven codecs (a schema with more members than its `maxFields` is invalid), the compatibility checks of every language ([4.1](#41-tooling-per-language)), WIT `@maxFields(N)`. No byte, no width ([5.6](#56-maxfieldsn)) |
 | the type is its member | `transparent()`; the member may carry `utf8`, `max<N>` and position specs | `#[psio(transparent)]`; the member may carry `#[psio(max = N)]` | `transparent(name, T)` with a bounded `T` (`boundedUtf8(80)`) | `NewType("Name", T)`; `@psio.transparent` on a one-field class, whose field may carry `psio.max(N)` and position bounds | a named alias of the member's (bounded) type | pssz, key, json/ijson, views, schema, GraphQL |
-| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; not the trusted decode, not views |
+| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; the validating readers of flatbuf / capnp / protobuf; not the trusted decode, not views |
 | schema id only | `schemaId("Id")` | `#[psio(custom = "Id")]` (without a text form or an invariant) | `custom(id, wire)` (no handler) | `psio.custom("Id")` (no functions) | `Custom{wire type, id}` | the Schema IR only: a schema-driven tool may register a handler for the id. No codec, validator or view reads it ([5.15](#515-schemaidid)) |
 | integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | `Annotated[u64, psio.json_string]`, `psio.json_number`, `psio.ijson_string`, `psio.ijson_number` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
 | custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `@psio.to_text` / `@psio.from_text` methods; `psio.custom(id, to_text=…, from_text=…)` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
@@ -639,7 +640,7 @@ last checked against the tree in which all three run every row of
 | field number | `attr(f, field<N>)` | `#[psio(field = N)]` on a field | `field(T, { number: N })` | `psio.number(N)` | member attribute `field` = `"N"` (absent: the 1-based position) | protobuf (the field number), capnp (ordinals in ascending order of it), flatbuf (field ids in ascending order of it); `emit_protobuf`, `emit_capnp`, `emit_fbs` and the layouts computed from a schema |
 | deprecation | `attr(f, deprecated_spec{.version = "…"})` | `#[psio(deprecated)]` on a field | `field(T, { deprecated: '…' })` | `psio.deprecated`, `psio.deprecated("…")` | member attribute `deprecated` = the version | GraphQL (`@deprecated`); flatbuf (the member keeps its field id and is neither written nor read); `emit_fbs` (`(deprecated)`) |
 | default of a scalar member | the member initialiser (`std::int16_t level = 7;`) | `#[psio(default = ..)]` on a field | `field(T, { default: v })` | `psio.default(v)` | member attribute `default` = the value as text (absent: zero) | flatbuf and capnp (a member equal to its default is not written / is zero on the wire, and an absent one reads as it); `emit_fbs`, `emit_capnp` (`= value`). Not read by pssz, key, JSON |
-| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | `#[psio(sorted)]`, `#[psio(unique)]` (`sorted_unique`), `#[psio(unique_keys)]` on a field, also inside `element(...)` and friends (ascending only) | `field(T, { sorted: true \| 'descending', unique: true, uniqueKeys: true })` | `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`, `psio.unique_keys` | — (not in the Schema IR: typed codecs only) | the typed pssz, json/ijson and key writers and checking readers (every language); order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
+| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | `#[psio(sorted)]`, `#[psio(unique)]` (`sorted_unique`), `#[psio(unique_keys)]` on a field, also inside `element(...)` and friends (ascending only) | `field(T, { sorted: true \| 'descending', unique: true, uniqueKeys: true })` | `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`, `psio.unique_keys` | — (not in the Schema IR: typed codecs only) | the typed pssz, json/ijson and key writers and checking readers (every language), the validating readers of flatbuf / capnp / protobuf (C++, Rust); order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
 | reserved vocabulary | `hex_spec`, `skip_spec`, `default_value_spec`, `default_factory_spec`, `since_spec`, `unstable_spec`, `final_v`, `canonical`, `flags`, `padding` | Rust has `#[psio(skip)]` (a different, implemented meaning) | — | — | — | RESERVED: nothing reads them ([5.14](#514-reserved-vocabulary)) |
 
 ### 4.1 Tooling per language
@@ -725,7 +726,8 @@ static_assert(!psio::inferred_bound<AtLeast>().has_value());   // no upper bound
 | json / ijson | Text unchanged. Writer (`to_json` throws; `encode_json_checked` returns a status) and readers refuse a value outside the bound |
 | schema-driven codecs (`psio::pssz_ir`) | The same width and the same rejections, from the IR alone |
 | WIT | `list<T>/* @psio:max=N */` for a bounded list, map or set; a bounded string is `string` |
-| GraphQL, other binary formats | Not read |
+| flatbuf, capnp, protobuf | Bytes unchanged. `validate_F`, `from_F` and the validated views refuse a value outside the bound (`flatbuf: member length_bound violated`, `capnp: …`, `protobuf: …`), at the member and at every position below it; in protobuf the bound is held against the finished value (a member written twice: the last scalar, the merged list). The writers (`to_flatbuf`, …) do not check ([7.2](#72-what-is-checked-where)) |
+| GraphQL; bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Not read |
 
 **Wire / width.** A bound is part of the type: it can change the `W` of
 the record, and the `W` of the list, map, set, array, tuple, pair or map
@@ -809,6 +811,8 @@ struct NamesSpelled   // psio::utf8_spec{} is psio::utf8
 | pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the encoder (`utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode. A raw string holds any bytes for every one of them: `validate_strict` means exact schema and canonical form, not "strings are text" (`tutorial 5`) |
 | key | Bytes unchanged (raw and UTF-8 strings have one key form). The writer (`to_key` throws, `encode_key_checked` reports) and the readers (`validate_key`, `from_key`) refuse a `utf8` string that is not UTF-8, for the annotation and for `psio::utf8_string` alike (`tutorial 7`). In Rust, TypeScript and Python a text value is UTF-8 by its type |
 | json / ijson | Both kinds are JSON strings. JSON text is UTF-8, so a **raw string that is not UTF-8 has no JSON**: the writer fails |
+| flatbuf, capnp | Bytes unchanged (a FlatBuffers string and a Cap'n Proto `Text` hold any bytes for a C++ `std::string`). `validate_F`, `from_F` and the validated views refuse a `utf8` string that is not UTF-8 (`utf8_spec: invalid leading byte` and similar). In Rust `String` is UTF-8 by its type and `RawString` is raw |
+| protobuf | A `std::string` is a protobuf `string`, which is UTF-8 by the format: refused with or without the annotation (`protobuf: a string is not UTF-8`) |
 | Schema IR | `"utf8"` vs `"string"`; schema-driven codecs enforce `"utf8"` |
 
 **Wire / width.** None.
@@ -2919,6 +2923,9 @@ CHECK(psio::from_pssz<AccountV2>(psio::trusted{bytes}) == alice);
 | key `to_key`, `encode_key_checked`, `key_prefix` | — | yes | — | yes |
 | key `validate_key`, `from_key` | yes | yes | — | yes |
 | json / ijson writers and readers | yes | yes | — (the cap is not a limit on text) | yes |
+| flatbuf / capnp / protobuf `validate_F`, `from_F`, `validate_strict`, `psio::validated_view` | yes | yes | the root type's, on the size of the input | yes |
+| flatbuf / capnp / protobuf `to_F` / `encode` | — | **no** | **no** | **no** |
+| flatbuf / capnp `from_F(psio::trusted{…})`, `F_trusted_view` | **no** | **no** | **no** | **no** |
 
 ```cpp
 // A view checks nothing. Over bytes that were not validated it reads
@@ -2941,6 +2948,77 @@ std::vector<char> lower = psio::to_pssz(Symbol{"USD"});
 lower.back()            = 'd';
 CHECK(psio::from_pssz<Symbol>(psio::trusted{lower}).code == "USd");
 CHECK_THROWS_AS(psio::from_pssz<Symbol>(lower), psio::codec_exception);
+```
+
+#### Which annotation is enforced by which format's validator
+
+A validator is what stands between bytes nobody vouches for and the
+program: `validate_F<T>(bytes)`, the checked decode `from_F<T>(bytes)` and
+a validating view. "yes" = a value that violates the declaration is
+refused; "—" = the declaration does not apply to that format.
+
+| Declaration | pssz | key | json / ijson | flatbuf | capnp | protobuf | bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI |
+|---|---|---|---|---|---|---|---|
+| `max<N>`, `min<N>`, `exact<N>` on a string, byte list, list, map, set | yes | yes | yes | yes | yes (no maps or sets in the mapping) | yes | **no** |
+| a bound below the member: `element`, `keys`, `values`, `at<I>` | yes | yes | yes | yes | yes | yes | **no** |
+| `utf8` | yes | yes | yes | yes | yes | yes (every protobuf `string`) | **no** (`validate_strict` of bin, ssz and wit: yes) |
+| `sorted`, `unique`, `unique_keys` | yes | yes | yes | yes | yes | yes | **no** |
+| `invariant(fn)` | yes | yes | yes | yes | yes | yes | **no** |
+| `maxDynamicData(N)` | yes, at every record | — | — | the root type's, on the size of the input | as flatbuf | as flatbuf | as flatbuf |
+| `maxFields(N)` | at the declaration (compile time), and by the compatibility check: no run-time check in any format ([5.6](#56-maxfieldsn)) | | | | | | |
+
+The same table holds for Rust (`#[psio(max = N)]`, `element(...)`,
+`keys(...)`, `values(...)`, `sorted`, `unique`, `unique_keys`,
+`#[psio(invariant = "path")]`; Rust has no `min` / `exact`) with two
+differences: Rust has no bin / borsh / bincode / msgpack / avro / bson, and
+the view a `CapnpView` derive makes (`FooView::from_message`) checks the
+structure of the message only — validate with `psio::validate_capnp::<Foo>`
+first. TypeScript and Python have pssz, key and json / ijson; there a bound
+on a `nested` member is enforced by pssz only.
+
+How flatbuf, capnp and protobuf do it (`psio/value_contract.hpp`, Rust
+`psio::contract`):
+
+- **The structure first.** Bytes that are not valid FlatBuffers (Cap'n
+  Proto, protobuf) are refused for that, with the message and the position
+  they were refused with before.
+- **Then the declarations, on the value.** The bytes are decoded and the
+  value is held against what its type declares: the members in declaration
+  order; for each member what it holds first, then its own annotations; the
+  invariant of a type last. The first violation is reported, at position 0:
+  `flatbuf: member length_bound violated` (`capnp: …`, `protobuf: …`), the
+  `utf8_spec` / `sorted` / `unique_keys` messages pssz gives, the
+  invariant's own status. In protobuf a member may be written more than
+  once, so only the finished value has a length: the last scalar, the
+  merged list.
+- **A type that declares nothing pays nothing** and accepts exactly what it
+  accepted before (`psio::has_value_contract_v<T>` is false; the validator
+  does not decode).
+- **The writers do not check** — `to_flatbuf` writes a value its own reader
+  refuses. Check before writing with
+  `psio::check_value_contract(value, message, "flatbuf")`.
+- C++ and Rust give the same verdict, message and position: the rows
+  `Bounded/…` of `conformance/flatbuf-vectors.json` and `PbBounded/…` of
+  `conformance/protobuf-vectors.json`.
+
+```cpp
+// The declaration is the type in FlatBuffers, Cap'n Proto and protobuf
+// too. A writer that does not know it (here: AccountPlain, the same
+// members without annotations) writes a 33-byte owner as valid
+// FlatBuffers; read as an Account, the buffer is refused.
+const AccountPlain      wide{1, std::string(33, 'x'), {}, 0};
+const std::vector<char> fb = psio::to_flatbuf(wide);
+CHECK(psio::validate_flatbuf<AccountPlain>(fb).ok());
+const psio::codec_status refused = psio::validate_flatbuf<Account>(fb);
+REQUIRE_FALSE(refused.ok());
+CHECK(refused.error().what == std::string_view{"flatbuf: member length_bound violated"});
+CHECK_THROWS_AS(psio::from_flatbuf<Account>(fb), psio::codec_exception);
+CHECK_FALSE(psio::validate_capnp<Account>(psio::to_capnp(wide)).ok());
+CHECK_FALSE(psio::validate_protobuf<Account>(psio::to_protobuf(wide)).ok());
+
+// Inside the bounds, the same bytes are an Account.
+const AccountPlain      fits{1, "alice", {"vip"}, 100};
+CHECK(psio::from_flatbuf<Account>(psio::to_flatbuf(fits)) == Account{1, "alice", {"vip"}, 100});
 ```
 
 ### 7.3 The trust rule

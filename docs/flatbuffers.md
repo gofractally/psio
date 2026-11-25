@@ -58,10 +58,12 @@ accessors):
   the same values. The reverse does not hold: psio refuses about 5 % of
   them that the official verifier takes (see "Validation").
 
-`conformance/flatbuf-vectors.json` pins 27 buffers, 429 that must be
-refused (with the reason and the position), 62 corrupted ones the verifier
-accepts, and the verdicts on 300,000 further corruptions as ten digests.
-Rust decodes and re-encodes all 27 to the same bytes and gives the same
+`conformance/flatbuf-vectors.json` pins 30 buffers, 504 that must be
+refused (with the reason and the position; among them a value outside
+what its type declares, in a valid buffer: the `Bounded/…` rows), 68
+corrupted ones the verifier accepts, and the verdicts on 340,000 further
+corruptions as eleven digests.
+Rust decodes and re-encodes all 30 to the same bytes and gives the same
 answer on every other buffer (`conformance/flatbuf-vectors.md`; "Rust"
 below).
 
@@ -120,11 +122,16 @@ earlier `psio::flatbuf`, which wrote every record as a table.
 * **Unions** — a variant without `std::monostate` always writes its active
   alternative; reading a union that is `NONE` or absent (an older writer)
   yields the default-constructed variant, i.e. its first alternative.
-* **Bounds, `utf8`, `sorted`, …** — not part of the wire.
-  `validate_flatbuf` checks structure;
-  `psio::validate_strict<T>(psio::flatbuf{}, bytes)` also checks the
-  annotations on the decoded value. Strings are NOT checked for UTF-8 by
-  `validate_flatbuf` (neither does the official verifier by default).
+* **Bounds, `utf8`, `sorted`, invariants** — not part of the wire, and
+  part of the type all the same: `validate_flatbuf`, `from_flatbuf` and
+  `psio::validated_view` check the structure of the buffer and then hold
+  the value it decodes to against what the type declares
+  ([annotations.md §7.2](annotations.md#72-what-is-checked-where)):
+  `flatbuf: member length_bound violated`, the `utf8_spec` / `sorted`
+  messages, the invariant's own, at position 0. A type that declares
+  nothing is not decoded, and a string member that is not declared `utf8`
+  is NOT checked for UTF-8 (neither does the official verifier by default).
+  `to_flatbuf` does not check: it writes a value outside its bounds.
 * **`maxDynamicData`** — bounds the buffer size in `validate_flatbuf`.
 
 ## File identifier, size prefix
@@ -523,15 +530,25 @@ accepts:
   kept.
 
 With `RawString` and catch-all enums the accepted set is C++'s on every
-buffer tested: `rust/psio/tests/flatbuf_conformance.rs` checks all 489
+buffer tested: `rust/psio/tests/flatbuf_conformance.rs` checks all 572
 rejected and corrupted rows of the fixture for the same verdict, message
-and position, and reproduces the fixture's ten digests — the verdict,
-message and position of the C++ verifier on 300,000 corruptions (82,459
+and position, and reproduces the fixture's eleven digests — the verdict,
+message and position of the C++ verifier on 340,000 corruptions (87,534
 accepted) that Rust draws the same way. For the same types written with
-`String` and plain enums it pins which rows differ (9 of the 62 corrupted
-rows C++ accepts are refused; in 2 of the 429 rejected rows a Rust-only
-check comes first) and checks, on the 300,000, that nothing C++ refuses is
+`String` and plain enums it pins which rows differ (9 of the 68 corrupted
+rows C++ accepts are refused; in 3 of the 504 rejected rows a Rust-only
+check comes first) and checks, on the 340,000, that nothing C++ refuses is
 accepted and that an extra refusal is one of the two above.
+
+What a type declares about its values (`#[psio(max = N)]`, `element(...)`,
+`keys(...)`, `values(...)`, `sorted`, `unique`, `unique_keys`,
+`#[psio(invariant = "path")]`) is enforced as in C++, with the C++
+message: `validate_flatbuf`, `from_flatbuf`, `FbView::new` and
+`FbView::new_with` verify the structure and then check the decoded value
+(`FbUnpack::fb_check_declared`); a type that declares nothing
+(`FbUnpack::fb_has_declarations()` is false) is not decoded. `FbError`
+carries a constant text: an invariant whose message is a computed `String`
+is reported as `flatbuf: invariant violated`. `to_flatbuf` does not check.
 
 Evidence: `rust/psio/tests/flatbuf_fuzz.rs`, the cases of the C++ fuzz
 test — every truncation and eight replacements of every byte of seven
