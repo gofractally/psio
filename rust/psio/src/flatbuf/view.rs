@@ -249,6 +249,17 @@ impl<'a, T: FbViewable> FbVec<'a, T> {
         }
     }
 
+    /// The buffer, the position of the first element and the number of
+    /// elements: what `psio::view` keeps of a list.
+    pub(crate) fn into_parts(self) -> (&'a [u8], usize, usize) {
+        (self.buf, self.data, self.count)
+    }
+
+    /// The vector `into_parts` took apart.
+    pub(crate) fn from_parts(buf: &'a [u8], data: usize, count: usize) -> Self {
+        FbVec { buf, data, count, _type: PhantomData }
+    }
+
     /// Number of elements.
     pub fn len(&self) -> usize {
         self.count

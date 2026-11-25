@@ -47,6 +47,7 @@ mod interface_macro;
 mod json_text_macro;
 mod key_macro;
 mod pssz_macro;
+mod view_macro;
 mod serde_macro;
 #[cfg(feature = "wit")]
 mod wit_macro;
@@ -169,6 +170,15 @@ pub fn derive_fb_unpack(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(FbView, attributes(psio, serde))]
 pub fn derive_fb_view(input: TokenStream) -> TokenStream {
     fb_macro::fb_view_macro_impl(input)
+}
+
+/// The view of a record that has one shape in every format
+/// (`psio::view`). `#[view(pssz, flatbuf)]` names the formats; the default
+/// is `pssz`. The record derives each named format's own view too
+/// (`PsszView`, `FbView`).
+#[proc_macro_derive(View, attributes(view, psio, pssz, json, serde))]
+pub fn derive_view(input: TokenStream) -> TokenStream {
+    view_macro::view_macro_impl(input)
 }
 
 // ── Protocol Buffers derive macro ───────────────────────────────────────

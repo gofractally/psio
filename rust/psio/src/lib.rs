@@ -308,6 +308,9 @@ pub mod pssz_dynamic;
 pub mod pssz_upgrade;
 pub mod pssz_evolves;
 pub mod pssz_view;
+pub mod view;
+pub use view::{ListView, View};
+pub use psio_macros::View;
 #[cfg(feature = "ssz")]
 pub mod ssz;
 #[cfg(feature = "ssz")]
