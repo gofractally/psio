@@ -119,3 +119,7 @@ harness = false
 [[bench]]
 name = "json_text_bench"
 harness = false
+
+[[bench]]
+name = "view_one_shape"
+harness = false
