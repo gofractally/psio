@@ -373,6 +373,9 @@ namespace
              Sparse{{{1, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 6}, {0, 2, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}, {}}});
       accept("Longs", "empty", Longs{});
       accept("Longs", "sample", Longs{{1, 0xffffffffffffffffull, 3}, {0.5, -0.0}});
+      accept("Bounded", "at_limits", conformance_bounded());
+      accept("Bounded", "empty", Bounded{});
+      accept("Bounded", "size_prefixed", conformance_bounded(), {.size_prefixed = true});
 
       // ── Buffers a verifier must refuse ────────────────────────────────
       const Bytes profile = psio::to_flatbuf(sample_profile());
@@ -619,6 +622,58 @@ namespace
          reject<Order>("Order", "shared_key_bytes", b, "flatbuf: too many key bytes compared");
       }
 
+      // ── A value outside what its type declares ────────────────────────
+      // The structure of each buffer is valid FlatBuffers; it is written
+      // from `Loose`, the same members without the declarations.
+      {
+         static constexpr const char* length = "flatbuf: member length_bound violated";
+         if (psio::to_flatbuf(conformance_loose()) != psio::to_flatbuf(conformance_bounded()))
+            die("Loose and Bounded do not have the same bytes");
+         auto outside = [&](const std::string& name, const char* error, auto&& change,
+                            psio::flatbuf::options opts = {}) {
+            Loose v = conformance_loose();
+            change(v);
+            reject<Bounded>("Bounded", name, psio::to_flatbuf(v, opts), error, opts);
+         };
+         outside("ids_over_max", length, [](Loose& v) { v.ids.push_back(11); });
+         outside("name_over_max", length, [](Loose& v) { v.name += '!'; });
+         outside("tags_over_max", length, [](Loose& v) { v.tags.push_back("d"); });
+         outside("tag_element_over_max", length, [](Loose& v) { v.tags[1] = "bbbbb"; });
+         outside("attrs_over_max", length, [](Loose& v) { v.attrs["z"] = ""; });
+         outside("attrs_key_over_max", length, [](Loose& v) {
+            v.attrs.erase("k1");
+            v.attrs["long"] = "v";
+         });
+         outside("attrs_value_over_max", length, [](Loose& v) { v.attrs["k1"] = "sixsix"; });
+         outside("ranks_not_sorted", "sorted: elements are not in order",
+                 [](Loose& v) { v.ranks = {1, 5, 4}; });
+         outside("codes_not_unique", "sorted: elements are not in strictly ascending order",
+                 [](Loose& v) { v.codes = {2, 3, 3}; });
+         outside("slot_code_over_max", length, [](Loose& v) { v.slots[1].code = "fives"; });
+         outside("spare_code_over_max", length, [](Loose& v) { v.spare->code = "fives"; });
+         outside("span_invariant", "Span: lo is greater than hi", [](Loose& v) { v.span = {4, 3}; });
+         outside("ids_over_max_size_prefixed", length, [](Loose& v) { v.ids.push_back(11); },
+                 {.size_prefixed = true});
+         // The first violation in declaration order is the one reported;
+         // what a member holds comes before the member's own bound.
+         outside("first_violation_reported", "sorted: elements are not in order", [](Loose& v) {
+            v.ranks = {2, 1};
+            v.span  = {4, 3};
+         });
+         {
+            // The structure is checked first: a buffer that is not valid
+            // FlatBuffers is refused for that, whatever its value would be.
+            Loose v = conformance_loose();
+            v.ids.push_back(11);
+            Bytes b = psio::to_flatbuf(v);
+            b.resize(b.size() - 4);
+            const auto st = psio::validate_flatbuf<Bounded>(b);
+            if (st.ok() || st.error().what == std::string_view{length})
+               die("Bounded/structure_first: the structure is not checked first");
+            reject<Bounded>("Bounded", "structure_first", b, st.error().what);
+         }
+      }
+
       // ── Corrupted buffers the verifier accepts ────────────────────────
       {
          // FlatBuffers strings are bytes: C++ `std::string` holds these, the
@@ -643,6 +698,7 @@ namespace
       mutate<Basket>("Basket", psio::to_flatbuf(conformance_basket()), 3, 60, 10);
       mutate<Order>("Order", psio::to_flatbuf(compact_order()), 4, 240, 30);
       mutate<Longs>("Longs", psio::to_flatbuf(Longs{{1, 2, 3}, {0.5}}), 5, 20, 4);
+      mutate<Bounded>("Bounded", psio::to_flatbuf(conformance_bounded()), 6, 60, 6);
 
       // ── The verdicts on many more corruptions, as one number each ─────
       digest<Profile>("Profile", "sample", sample_profile(), 11, 30000);
@@ -659,6 +715,7 @@ namespace
       digest<Sparse>("Sparse", "rows",
                      Sparse{{{1, 0, 0, 0, 0, 0}, {0, 0, 0, 0, 0, 6}, {0, 2, 0, 0, 0, 0}, {1, 0, 0, 0, 0, 0}, {}}},
                      20, 10000);
+      digest<Bounded>("Bounded", "at_limits", conformance_bounded(), 21, 40000);
    }
 
    std::string quote(const std::string& s)

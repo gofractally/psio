@@ -13,10 +13,24 @@ pub trait CapnpUnpack: Sized {
     /// Unpack from a CapnpView (pre-resolved struct within a segment).
     fn unpack_from(view: &CapnpView) -> Self;
 
-    /// Unpack from a complete flat-array message.
+    /// Unpack from a complete flat-array message: the structure of the
+    /// message, then what the type declares about its values
+    /// ([`capnp_check_declared`](Self::capnp_check_declared)).
     fn capnp_unpack(msg: &[u8]) -> Result<Self, &'static str> {
         let view = CapnpView::from_message(msg)?;
-        Ok(Self::unpack_from(&view))
+        let value = Self::unpack_from(&view);
+        value.capnp_check_declared()?;
+        Ok(value)
+    }
+
+    /// What the type declares about its values, on `self`: a member's bound
+    /// or order (`#[psio(max = N)]`, `element(...)`, `sorted`, …), the
+    /// same of the records it holds, and the invariant
+    /// (`#[psio(invariant = "path")]`). The first violation (the text C++
+    /// `validate_capnp` reports), or `Ok` (C++
+    /// `psio::check_value_contract`; `psio::contract`).
+    fn capnp_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
     }
 }
 

@@ -276,15 +276,19 @@ pub fn capnp_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn capnp_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("CapnpUnpack")) {
-        Ok(item) => item.krate().into_token_stream(),
+    let item = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("CapnpUnpack")) {
+        Ok(item) => item,
         Err(err) => return err.to_compile_error().into(),
     };
+    let mod_path = item.krate().into_token_stream();
 
     match &input.data {
         Data::Struct(data) => {
             if let Fields::Named(named) = &data.fields {
-                gen_capnp_unpack(&mod_path, &input, named)
+                match gen_capnp_declared(&item, named) {
+                    Ok(declared) => gen_capnp_unpack(&mod_path, &input, named, declared),
+                    Err(err) => err.to_compile_error().into(),
+                }
             } else {
                 panic!("CapnpUnpack only supports named structs");
             }
@@ -341,10 +345,58 @@ fn gen_capnp_pack(
     expanded.into()
 }
 
+/// `capnp_check_declared`: what the type declares about its values
+/// (psio::contract) — the members in declaration order, what each holds
+/// before its own declarations, the invariant last.
+fn gen_capnp_declared(
+    item: &crate::attrs::Attrs,
+    named: &syn::FieldsNamed,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let k = item.krate();
+    let unpack = quote!(#k::capnp::unpack::CapnpUnpack);
+    let mut checks = Vec::new();
+    for f in &named.named {
+        let ident = f.ident.as_ref().unwrap();
+        let ty = &f.ty;
+        match classify_type(ty) {
+            CapnpFieldClass::Struct => checks.push(quote!(#unpack::capnp_check_declared(&self.#ident)?;)),
+            CapnpFieldClass::VecStruct => checks.push(quote! {
+                for __element in &self.#ident {
+                    #unpack::capnp_check_declared(__element)?;
+                }
+            }),
+            _ => {}
+        }
+        let attrs = crate::attrs::field(f)?;
+        if let Some(crate::attrs::Annotated { own, spec }) = crate::attrs::annotated(f, &attrs, &k)? {
+            checks.push(quote! {
+                #k::contract::member::<#own, #spec>(&self.#ident, "capnp: member length_bound violated")?;
+            });
+        }
+    }
+    if let Some(path) = &item.invariant {
+        checks.push(quote! {
+            if let ::core::result::Result::Err(__why) = #path(self) {
+                return ::core::result::Result::Err(#k::contract::invariant(__why, "capnp: invariant violated"));
+            }
+        });
+    }
+    if checks.is_empty() {
+        return Ok(quote!());
+    }
+    Ok(quote! {
+        fn capnp_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+            #(#checks)*
+            ::core::result::Result::Ok(())
+        }
+    })
+}
+
 fn gen_capnp_unpack(
     mod_path: &proc_macro2::TokenStream,
     input: &DeriveInput,
     named: &syn::FieldsNamed,
+    declared: proc_macro2::TokenStream,
 ) -> TokenStream {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -377,6 +429,7 @@ fn gen_capnp_unpack(
                     #(#field_inits),*
                 }
             }
+            #declared
         }
     };
     expanded.into()

@@ -198,6 +198,48 @@ pub struct PbOrder {
     pub lists: BTreeMap<String, PbRepeated>,
 }
 
+/// A record whose declaration constrains its values: C++ `PbSpan`, `PbSlot`,
+/// `PbBounded` (`docs/annotations.md`).
+#[derive(Debug, Clone, PartialEq, Protobuf)]
+#[psio(invariant = "pb_span_ordered")]
+pub struct PbSpan {
+    pub lo: u32,
+    pub hi: u32,
+}
+fn pb_span_ordered(span: &PbSpan) -> Result<(), &'static str> {
+    if span.lo <= span.hi {
+        Ok(())
+    } else {
+        Err("PbSpan: lo is greater than hi")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Protobuf)]
+pub struct PbSlot {
+    #[psio(max = 4)]
+    pub code: String,
+    pub qty: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Protobuf)]
+pub struct PbBounded {
+    #[psio(max = 2)]
+    pub ids: Vec<u32>,
+    #[psio(max = 8)]
+    pub name: String,
+    #[psio(max = 3, element(max = 4))]
+    pub tags: Vec<String>,
+    #[psio(max = 2, keys(max = 3), values(max = 5))]
+    pub attrs: BTreeMap<String, String>,
+    #[psio(sorted)]
+    pub ranks: Vec<u32>,
+    #[psio(unique)]
+    pub codes: Vec<u32>,
+    pub slots: Vec<PbSlot>,
+    pub span: PbSpan,
+    pub spare: Option<PbSlot>,
+}
+
 /// `$body` with `$T` bound to the Rust type named `$name`.
 #[macro_export]
 macro_rules! with_pb_type {
@@ -223,6 +265,7 @@ macro_rules! with_pb_type {
             "PbDefaults" => arm!(PbDefaults),
             "PbEmpty" => arm!(PbEmpty),
             "PbOrder" => arm!(PbOrder),
+            "PbBounded" => arm!(PbBounded),
             other => panic!("no Rust type for {other}"),
         }
     }};

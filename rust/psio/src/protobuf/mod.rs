@@ -419,6 +419,18 @@ pub trait PbSingle: Sized {
     /// Reads the value (a message: merges into `out`); `None` checks only.
     fn pb_read_payload(r: &mut PbReader, end: usize, enc: PbEnc, out: Option<&mut Self>) -> Read;
 
+    /// Whether the type, or anything a value of it holds, declares
+    /// something a value can violate (`psio::contract`).
+    #[doc(hidden)]
+    fn pb_declares(_seen: &mut crate::contract::Seen) -> bool {
+        false
+    }
+    /// What the type declares about its values, on `self`.
+    #[doc(hidden)]
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
     // A `Vec<Self>` member: a repeated field, except for `u8` (bytes).
     #[doc(hidden)]
     fn pb_vec_size(v: &[Self], number: u32, enc: PbEnc) -> usize {
@@ -746,6 +758,12 @@ macro_rules! single_field {
             fn pb_read(r: &mut PbReader, end: usize, _slot: u32, wire: u8, enc: PbEnc, out: Option<&mut Self>) -> Read<bool> {
                 single_read(r, end, wire, enc, out)
             }
+            fn pb_declares(seen: &mut crate::contract::Seen) -> bool {
+                <$t as PbSingle>::pb_declares(seen)
+            }
+            fn pb_check_declared(&self) -> Result<(), &'static str> {
+                <$t as PbSingle>::pb_check_declared(self)
+            }
         }
     };
 }
@@ -934,6 +952,18 @@ pub trait PbField: Sized {
     /// Reads the field of number (member's number + `slot`). `false`: the
     /// wire type is not the member's (the field is skipped).
     fn pb_read(r: &mut PbReader, end: usize, slot: u32, wire: u8, enc: PbEnc, out: Option<&mut Self>) -> Read<bool>;
+
+    /// Whether the type, or anything a value of it holds, declares
+    /// something a value can violate (`psio::contract`).
+    #[doc(hidden)]
+    fn pb_declares(_seen: &mut crate::contract::Seen) -> bool {
+        false
+    }
+    /// What the type declares about its values, on `self`.
+    #[doc(hidden)]
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 impl<X: PbSingle> PbField for Option<X> {
@@ -960,6 +990,12 @@ impl<X: PbSingle> PbField for Option<X> {
         X::pb_read_payload(r, end, enc, out.map(|o| o.get_or_insert_with(X::pb_zero)))?;
         Ok(true)
     }
+    fn pb_declares(seen: &mut crate::contract::Seen) -> bool {
+        X::pb_declares(seen)
+    }
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(X::pb_check_declared)
+    }
 }
 
 impl<X: PbSingle> PbField for Vec<X> {
@@ -975,6 +1011,12 @@ impl<X: PbSingle> PbField for Vec<X> {
     }
     fn pb_read(r: &mut PbReader, end: usize, _slot: u32, wire: u8, enc: PbEnc, out: Option<&mut Self>) -> Read<bool> {
         X::pb_vec_read(r, end, wire, enc, out)
+    }
+    fn pb_declares(seen: &mut crate::contract::Seen) -> bool {
+        X::pb_declares(seen)
+    }
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(X::pb_check_declared)
     }
 }
 
@@ -1001,6 +1043,12 @@ impl<X: PbSingle + Ord> PbField for BTreeSet<X> {
             },
             |_, _| (),
         )
+    }
+    fn pb_declares(seen: &mut crate::contract::Seen) -> bool {
+        X::pb_declares(seen)
+    }
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(X::pb_check_declared)
     }
 }
 
@@ -1063,6 +1111,17 @@ impl<K: PbMapKey, V: PbSingle> PbField for BTreeMap<K, V> {
         }
         Ok(true)
     }
+    fn pb_declares(seen: &mut crate::contract::Seen) -> bool {
+        // (Both: `||` would leave the mapped type unentered.)
+        let key = K::pb_declares(seen);
+        V::pb_declares(seen) || key
+    }
+    fn pb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(|(key, value)| {
+            key.pb_check_declared()?;
+            value.pb_check_declared()
+        })
+    }
 }
 
 // ── Messages ────────────────────────────────────────────────────────────────
@@ -1077,6 +1136,29 @@ pub trait PbMessage: Sized {
     fn pb_write_body(&self, w: &mut PbWriter);
     /// The fields up to `end`, merged into `out`.
     fn pb_read_body(r: &mut PbReader, end: usize, out: Option<&mut Self>) -> Read;
+
+    /// Whether the message, or anything a value of it holds, declares
+    /// something a value can violate: a bound or an order on a member
+    /// (`#[psio(max = N)]`, `element(...)`, `sorted`, …) or an invariant.
+    /// `seen`: the types this search has entered (a message may hold
+    /// itself).
+    fn pb_message_declares(_seen: &mut crate::contract::Seen) -> bool {
+        false
+    }
+    /// [`pb_message_declares`](Self::pb_message_declares) for the message
+    /// as a root; the derive keeps the answer.
+    fn pb_has_declarations() -> bool {
+        Self::pb_message_declares(&mut crate::contract::Seen::new())
+    }
+    /// What the message declares about its values, on `self`: the first
+    /// violation (the text C++ `validate_protobuf` reports), or `Ok`. The
+    /// readers call it on the finished value: a member may be written more
+    /// than once (the last scalar wins, repeated members and messages
+    /// merge), so nothing can be said field by field (C++
+    /// `psio::check_value_contract`).
+    fn pb_message_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
 }
 
 /// `PbSingle` of a message (the derive forwards to these).
@@ -1182,6 +1264,9 @@ pub fn from_protobuf<T: PbMessage>(bytes: &[u8]) -> Result<T, PbError> {
 pub fn from_protobuf_with<T: PbMessage>(bytes: &[u8], limits: PbLimits) -> Result<T, PbError> {
     let mut out = T::pb_message_zero();
     read_root(bytes, Some(&mut out), limits)?;
+    if T::pb_has_declarations() {
+        out.pb_message_check_declared().map_err(|message| PbError { message, offset: 0 })?;
+    }
     Ok(out)
 }
 /// Whether `bytes` is one `T` (C++ `psio::validate_protobuf<T>(bytes)`):
@@ -1191,8 +1276,16 @@ pub fn validate_protobuf<T: PbMessage>(bytes: &[u8]) -> Result<(), PbError> {
     validate_protobuf_with::<T>(bytes, PbLimits::default())
 }
 /// The same under other limits (C++ `psio::validate_protobuf<T>(bytes, limits)`).
+///
+/// A message that declares something about its values (a member's bound or
+/// order, an invariant) is read into a value, which is then held against
+/// the declarations; any other message is read storing nothing.
 pub fn validate_protobuf_with<T: PbMessage>(bytes: &[u8], limits: PbLimits) -> Result<(), PbError> {
-    read_root::<T>(bytes, None, limits)
+    if T::pb_has_declarations() {
+        from_protobuf_with::<T>(bytes, limits).map(drop)
+    } else {
+        read_root::<T>(bytes, None, limits)
+    }
 }
 /// Size of the encoding of `value` (C++ `psio::protobuf_size(v)`).
 pub fn protobuf_size<T: PbMessage>(value: &T) -> usize {

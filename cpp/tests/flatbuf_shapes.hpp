@@ -241,6 +241,110 @@ struct Longs
 };
 PSIO_REFLECT(Longs, values, reals)
 
+// A record whose declaration constrains its values (docs/annotations.md):
+// a validating read path refuses a buffer that holds a value outside it,
+// in FlatBuffers as in every other format. (At most one of an order spec and
+// a bound below the member on one member: for a value that violates both,
+// which of the two is reported is not the same in every language.)
+struct Span
+{
+   std::uint32_t      lo = 0, hi = 0;
+   friend bool        operator==(const Span&, const Span&) = default;
+   static psio::codec_status ordered(const Span& s) noexcept
+   {
+      return s.lo <= s.hi ? psio::codec_ok()
+                          : psio::codec_fail("Span: lo is greater than hi", 0, "Span");
+   }
+   PSIO_REFLECT(Span, lo, hi, invariant(ordered))
+};
+
+struct Slot
+{
+   std::string   code;
+   std::uint32_t qty = 0;
+   friend bool   operator==(const Slot&, const Slot&) = default;
+};
+PSIO_REFLECT(Slot, attr(code, max<4>), qty)
+
+struct Bounded
+{
+   std::vector<std::uint32_t>         ids;
+   std::string                        name;
+   std::vector<std::string>           tags;
+   std::map<std::string, std::string> attrs;
+   std::vector<std::uint32_t>         ranks;
+   std::vector<std::uint32_t>         codes;
+   std::vector<Slot>                  slots;
+   Span                               span;
+   std::optional<Slot>                spare;
+   friend bool                        operator==(const Bounded&, const Bounded&) = default;
+};
+PSIO_REFLECT(Bounded,
+             attr(ids, max<2>),
+             attr(name, max<8>),
+             attr(tags, max<3> | element(max<4>)),
+             attr(attrs, max<2> | keys(max<3>) | values(max<5>)),
+             attr(ranks, sorted),
+             attr(codes, unique),
+             slots,
+             span,
+             spare)
+
+// The same members without the declarations: what a writer that does not
+// know them writes. The bytes of a value are the same for both.
+struct LooseSpan
+{
+   std::uint32_t lo = 0, hi = 0;
+};
+PSIO_REFLECT(LooseSpan, lo, hi)
+
+struct LooseSlot
+{
+   std::string   code;
+   std::uint32_t qty = 0;
+};
+PSIO_REFLECT(LooseSlot, code, qty)
+
+struct Loose
+{
+   std::vector<std::uint32_t>         ids;
+   std::string                        name;
+   std::vector<std::string>           tags;
+   std::map<std::string, std::string> attrs;
+   std::vector<std::uint32_t>         ranks;
+   std::vector<std::uint32_t>         codes;
+   std::vector<LooseSlot>             slots;
+   LooseSpan                          span;
+   std::optional<LooseSlot>           spare;
+};
+PSIO_REFLECT(Loose, ids, name, tags, attrs, ranks, codes, slots, span, spare)
+
+// A value at every one of its limits.
+inline Bounded conformance_bounded()
+{
+   return Bounded{{7, 9},
+                  "eightchr",
+                  {"a", "bb", "cccc"},
+                  {{"k1", "v"}, {"key", "value"}},
+                  {1, 1, 5},
+                  {2, 3, 8},
+                  {{"slot", 1}, {"", 2}},
+                  {3, 3},
+                  Slot{"sp", 4}};
+}
+inline Loose conformance_loose()
+{
+   return Loose{{7, 9},
+                "eightchr",
+                {"a", "bb", "cccc"},
+                {{"k1", "v"}, {"key", "value"}},
+                {1, 1, 5},
+                {2, 3, 8},
+                {{"slot", 1}, {"", 2}},
+                {3, 3},
+                LooseSlot{"sp", 4}};
+}
+
 inline Profile sample_profile()
 {
    return Profile{42, "Alice Example", "alice@example.com", 37, true};

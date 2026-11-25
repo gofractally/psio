@@ -73,6 +73,7 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
 #include <psio/validate_strict_walker.hpp>
+#include <psio/value_contract.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1651,7 +1652,19 @@ namespace psio {
          const std::uint64_t root = check_offset(c, start);
          if (!root || !check_table<record_def<T>>(c, root))
             return codec_fail(c.error, static_cast<std::uint32_t>(c.at), "flatbuf");
-         return codec_ok();
+         // The buffer is one T as FlatBuffers defines it. What T declares
+         // about its values — member bounds, utf8, order, invariants
+         // (value_contract.hpp) — is checked on the value the buffer decodes
+         // to; a type that declares nothing is done here.
+         if constexpr (::psio::has_value_contract_v<T>)
+         {
+            T out{};
+            decode_table<record_def<T>>(root_of(bytes.subspan(start)), out);
+            return ::psio::check_value_contract(out, "flatbuf: member length_bound violated",
+                                                "flatbuf");
+         }
+         else
+            return codec_ok();
       }
 
    }  // namespace detail::flatbuf_impl
@@ -1757,8 +1770,9 @@ namespace psio {
          return detail::flatbuf_impl::validate_buffer<T>(bytes);
       }
 
-      // `validate`, then the annotations of T (bounds, utf8, sorted, …)
-      // checked on the decoded value.
+      // `validate` (the structure, then what T declares about its values:
+      // bounds, utf8, order, invariants), then the specs of user code that
+      // have a `validate(span)` of their own, on the decoded value.
       template <typename T>
          requires detail::flatbuf_impl::Table<T>
       friend codec_status tag_invoke(decltype(::psio::validate_strict<T>), flatbuf, T*,

@@ -49,6 +49,7 @@
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/varint/leb128.hpp>
 
 #include <array>
@@ -1394,7 +1395,7 @@ namespace psio
       friend T tag_invoke(decltype(::psio::decode<T>), protobuf, T*, std::span<const char> bytes)
       {
          T out{};
-         if (auto st = detail::pb_impl::read_root(bytes, &out, limits{}.max_depth); !st.ok())
+         if (auto st = read_checked(bytes, out, limits{}.max_depth); !st.ok())
             ::psio::codec_abort(st.error());
          return out;
       }
@@ -1420,13 +1421,35 @@ namespace psio
          return check<T>(bytes, limits{});
       }
 
-      // Validate: the reader, storing nothing.
+      // The reader, then what T declares about its values — member bounds,
+      // utf8, order, invariants (value_contract.hpp) — on the value read. A
+      // member may be written more than once (the last value of a scalar
+      // wins, repeated members and messages merge), so the declarations are
+      // checked on the finished value, not field by field.
+      template <typename T>
+      static codec_status read_checked(std::span<const char> bytes, T& out,
+                                       std::uint32_t max_depth)
+      {
+         if (auto st = detail::pb_impl::read_root(bytes, &out, max_depth); !st.ok())
+            return st;
+         return ::psio::check_value_contract(out, "protobuf: member length_bound violated",
+                                             "protobuf");
+      }
+
+      // Validate: the reader, storing nothing — unless T declares something
+      // about its values, which takes the value to check.
       template <typename T>
       static codec_status check(std::span<const char> bytes, limits lim) noexcept
       {
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "protobuf"); !st.ok())
             return st;
-         return detail::pb_impl::read_root(bytes, static_cast<T*>(nullptr), lim.max_depth);
+         if constexpr (::psio::has_value_contract_v<T>)
+         {
+            T out{};
+            return read_checked(bytes, out, lim.max_depth);
+         }
+         else
+            return detail::pb_impl::read_root(bytes, static_cast<T*>(nullptr), lim.max_depth);
       }
 
       // Decode and validate in one pass (what `from_protobuf` runs).
@@ -1435,7 +1458,7 @@ namespace psio
       {
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "protobuf"); !st.ok())
             return st;
-         return detail::pb_impl::read_root(bytes, &out, lim.max_depth);
+         return read_checked(bytes, out, lim.max_depth);
       }
    };
 

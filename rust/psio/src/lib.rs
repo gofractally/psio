@@ -265,6 +265,8 @@ pub mod xxh3_64;
 pub mod dynamic_schema;
 
 // The formats a dependent asks for by cargo feature.
+#[cfg(any(feature = "capnp", feature = "flatbuf", feature = "protobuf"))]
+pub mod contract;
 #[cfg(feature = "capnp")]
 pub mod capnp;
 #[cfg(feature = "flatbuf")]

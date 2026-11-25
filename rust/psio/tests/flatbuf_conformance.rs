@@ -71,7 +71,7 @@ fn accepted_buffers() {
         assert!(raw::check_accepted(&row.id, &row.bytes, &row.opts), "unclassified row {}", row.id);
     }
     println!("flatbuf-vectors.json: {} accepted rows decoded and re-encoded to the same bytes", rows.len());
-    assert_eq!(rows.len(), 27);
+    assert_eq!(rows.len(), 30);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn rejected_buffers() {
         rows.len(),
         rust_first.len()
     );
-    assert_eq!(rows.len(), 429);
+    assert_eq!(rows.len(), 504);
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn corrupted_buffers_the_verifier_accepts() {
         rows.len(),
         stricter.len()
     );
-    assert_eq!(rows.len(), 62);
+    assert_eq!(rows.len(), 68);
     // The two rows written to show the difference.
     assert!(stricter.contains(&("Profile/name_not_utf8", RUST_ONLY[0])));
     assert!(stricter.contains(&("Order/color_out_of_range", RUST_ONLY[1])));
@@ -174,11 +174,11 @@ fn corrupt(base: &[u8], rng: &mut Rng) -> Vec<u8> {
     b
 }
 
-/// The differential check at scale: for 300,000 corruptions drawn the way
+/// The differential check at scale: for 340,000 corruptions drawn the way
 /// the C++ emitter draws them, the verdict, the reason and the position of
 /// every one agree with C++ (they fold into the number C++ computed).
 #[test]
-fn verdicts_on_300_000_corruptions_agree_with_cpp() {
+fn verdicts_on_340_000_corruptions_agree_with_cpp() {
     let fx = fixture();
     let accept = rows(&fx, "accept");
     let (mut buffers, mut accepted_total) = (0u64, 0u64);
@@ -215,5 +215,5 @@ fn verdicts_on_300_000_corruptions_agree_with_cpp() {
         accepted_total += accepted;
     }
     println!("flatbuf-vectors.json: {buffers} corruptions, {accepted_total} accepted: every verdict, reason and position as in C++");
-    assert_eq!(buffers, 300_000);
+    assert_eq!(buffers, 340_000);
 }

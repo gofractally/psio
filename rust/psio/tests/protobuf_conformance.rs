@@ -90,7 +90,7 @@ fn rejected_rows_are_refused_for_the_reason_and_where_cpp_states() {
 fn the_verdicts_on_corruptions_are_those_of_cpp() {
     let fx = fixture();
     let digests = fx["mutation_digests"].as_array().unwrap();
-    assert_eq!(digests.len(), 12);
+    assert_eq!(digests.len(), 13);
     let mut total = 0u64;
     let mut total_accepted = 0u64;
     for row in digests {
@@ -135,6 +135,6 @@ fn the_verdicts_on_corruptions_are_those_of_cpp() {
         total += count;
         total_accepted += accepted;
     }
-    assert_eq!(total, 360_000);
+    assert_eq!(total, 390_000);
     println!("{total} corruptions, {total_accepted} accepted: every verdict, message and offset as in C++");
 }

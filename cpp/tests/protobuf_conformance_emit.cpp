@@ -221,6 +221,9 @@ namespace
       family<PbDefaults>("PbDefaults", 11, 6);
       family<PbOrder>("PbOrder", 12, 24);
       accept("PbDefaults", "initialisers", PbDefaults{});
+      accept("PbBounded", "at_limits", pb_bounded_at_limits());
+      accept("PbBounded", "empty", PbBounded{});
+      digest("PbBounded", "at_limits", pb_bounded_at_limits(), 113, 30000);
 
       // What another writer may produce.
       other<PbPoint>("PbPoint", "zero_written", raw({0x08, 0, 0x10, 0}));
@@ -336,6 +339,59 @@ namespace
       reject<PbOptionals>("PbOptionals", "optional_enum_out_of_range", raw({0x30, 0x80, 0x02}));
       reject<PbOrder>("PbOrder", "nested_field_number_0", raw({0x12, 2, 0x00, 0x00}));
       reject<PbOrder>("PbOrder", "nested_length_past_end", raw({0x12, 3, 0x08, 1}));
+      // A value outside what its type declares. Each message is valid
+      // protobuf; it is written from `PbLoose`, the same members without the
+      // declarations.
+      {
+         if (psio::to_protobuf(pb_loose_at_limits()) != psio::to_protobuf(pb_bounded_at_limits()))
+            die("PbLoose and PbBounded do not have the same bytes");
+         auto outside = [&](const char* name, std::string_view error, auto&& change) {
+            PbLoose v = pb_loose_at_limits();
+            change(v);
+            const Bytes b  = psio::to_protobuf(v);
+            const auto  st = psio::validate_protobuf<PbBounded>(std::span<const char>{b});
+            if (st.ok() || st.error().what != error)
+               die(std::string{"PbBounded/"} + name + " is not refused with \"" +
+                   std::string{error} + "\"");
+            reject<PbBounded>("PbBounded", name, b);
+         };
+         static constexpr std::string_view length = "protobuf: member length_bound violated";
+         outside("ids_over_max", length, [](PbLoose& v) { v.ids.push_back(11); });
+         outside("name_over_max", length, [](PbLoose& v) { v.name += '!'; });
+         outside("tags_over_max", length, [](PbLoose& v) { v.tags.push_back("d"); });
+         outside("tag_element_over_max", length, [](PbLoose& v) { v.tags[1] = "bbbbb"; });
+         outside("attrs_over_max", length, [](PbLoose& v) { v.attrs["z"] = ""; });
+         outside("attrs_key_over_max", length, [](PbLoose& v) {
+            v.attrs.erase("k1");
+            v.attrs["long"] = "v";
+         });
+         outside("attrs_value_over_max", length, [](PbLoose& v) { v.attrs["k1"] = "sixsix"; });
+         outside("ranks_not_sorted", "sorted: elements are not in order",
+                 [](PbLoose& v) { v.ranks = {1, 5, 4}; });
+         outside("codes_not_unique", "sorted: elements are not in strictly ascending order",
+                 [](PbLoose& v) { v.codes = {2, 3, 3}; });
+         outside("slot_code_over_max", length, [](PbLoose& v) { v.slots[1].code = "fives"; });
+         outside("spare_code_over_max", length, [](PbLoose& v) { v.spare->code = "fives"; });
+         outside("span_invariant", "PbSpan: lo is greater than hi",
+                 [](PbLoose& v) { v.span = {4, 3}; });
+         outside("first_violation_reported", "sorted: elements are not in order", [](PbLoose& v) {
+            v.ranks = {2, 1};
+            v.span  = {4, 3};
+         });
+         // The declarations are held against the finished value. `name`
+         // (field 2) written twice: the last one is the value.
+         other<PbBounded>("PbBounded", "name_over_max_then_replaced",
+                          raw({0x12, 9, 'n', 'i', 'n', 'e', 'c', 'h', 'a', 'r', 's', 0x12, 2, 'o', 'k'}));
+         // `ids` (field 1, packed) written twice: the two parts are one list
+         // of three.
+         reject<PbBounded>("PbBounded", "ids_over_max_in_two_parts", raw({0x0a, 2, 7, 9, 0x0a, 1, 11}));
+         // `span` (field 8) written twice merges: lo from the first, hi from
+         // the second.
+         reject<PbBounded>("PbBounded", "span_invariant_after_merge",
+                           raw({0x42, 2, 0x08, 4, 0x42, 2, 0x10, 3}));
+         // The structure is checked first.
+         reject<PbBounded>("PbBounded", "structure_first", raw({0x0a, 3, 7, 9, 11, 0x12, 9, 'x'}));
+      }
       reject<PbTree>("PbTree", "nested_101_deep", [] {
          Bytes b;
          for (int i = 0; i < 101; ++i)

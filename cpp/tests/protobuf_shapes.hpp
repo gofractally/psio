@@ -230,6 +230,110 @@ struct PbOrder
 };
 PSIO_REFLECT(PbOrder, id, origin, scalars, text, choices, maps, tree, nothing, lists)
 
+// A record whose declaration constrains its values (docs/annotations.md): a
+// validating read path refuses a message that holds a value outside it, in
+// protobuf as in every other format. (At most one of an order spec and a
+// bound below the member on one member: for a value that violates both,
+// which of the two is reported is not the same in every language.)
+struct PbSpan
+{
+   std::uint32_t             lo = 0, hi = 0;
+   friend bool               operator==(const PbSpan&, const PbSpan&) = default;
+   static psio::codec_status ordered(const PbSpan& s) noexcept
+   {
+      return s.lo <= s.hi ? psio::codec_ok()
+                          : psio::codec_fail("PbSpan: lo is greater than hi", 0, "PbSpan");
+   }
+   PSIO_REFLECT(PbSpan, lo, hi, invariant(ordered))
+};
+
+struct PbSlot
+{
+   std::string   code;
+   std::uint32_t qty = 0;
+   friend bool   operator==(const PbSlot&, const PbSlot&) = default;
+};
+PSIO_REFLECT(PbSlot, attr(code, max<4>), qty)
+
+struct PbBounded
+{
+   std::vector<std::uint32_t>         ids;
+   std::string                        name;
+   std::vector<std::string>           tags;
+   std::map<std::string, std::string> attrs;
+   std::vector<std::uint32_t>         ranks;
+   std::vector<std::uint32_t>         codes;
+   std::vector<PbSlot>                slots;
+   PbSpan                             span;
+   std::optional<PbSlot>              spare;
+   friend bool                        operator==(const PbBounded&, const PbBounded&) = default;
+};
+PSIO_REFLECT(PbBounded,
+             attr(ids, max<2>),
+             attr(name, max<8>),
+             attr(tags, max<3> | element(max<4>)),
+             attr(attrs, max<2> | keys(max<3>) | values(max<5>)),
+             attr(ranks, sorted),
+             attr(codes, unique),
+             slots,
+             span,
+             spare)
+
+// The same members without the declarations: what a writer that does not
+// know them writes. The bytes of a value are the same for both.
+struct PbLooseSpan
+{
+   std::uint32_t lo = 0, hi = 0;
+};
+PSIO_REFLECT(PbLooseSpan, lo, hi)
+
+struct PbLooseSlot
+{
+   std::string   code;
+   std::uint32_t qty = 0;
+};
+PSIO_REFLECT(PbLooseSlot, code, qty)
+
+struct PbLoose
+{
+   std::vector<std::uint32_t>         ids;
+   std::string                        name;
+   std::vector<std::string>           tags;
+   std::map<std::string, std::string> attrs;
+   std::vector<std::uint32_t>         ranks;
+   std::vector<std::uint32_t>         codes;
+   std::vector<PbLooseSlot>           slots;
+   PbLooseSpan                        span;
+   std::optional<PbLooseSlot>         spare;
+};
+PSIO_REFLECT(PbLoose, ids, name, tags, attrs, ranks, codes, slots, span, spare)
+
+// A value at every one of its limits.
+inline PbBounded pb_bounded_at_limits()
+{
+   return PbBounded{{7, 9},
+                    "eightchr",
+                    {"a", "bb", "cccc"},
+                    {{"k1", "v"}, {"key", "value"}},
+                    {1, 1, 5},
+                    {2, 3, 8},
+                    {{"slot", 1}, {"", 2}},
+                    {3, 3},
+                    PbSlot{"sp", 4}};
+}
+inline PbLoose pb_loose_at_limits()
+{
+   return PbLoose{{7, 9},
+                  "eightchr",
+                  {"a", "bb", "cccc"},
+                  {{"k1", "v"}, {"key", "value"}},
+                  {1, 1, 5},
+                  {2, 3, 8},
+                  {{"slot", 1}, {"", 2}},
+                  {3, 3},
+                  PbLooseSlot{"sp", 4}};
+}
+
 inline psio::Schema protobuf_shapes_schema()
 {
    psio::SchemaBuilder b;

@@ -64,6 +64,7 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
 #include <psio/validate_strict_walker.hpp>
+#include <psio/value_contract.hpp>
 
 #include <algorithm>
 #include <array>
@@ -1564,7 +1565,19 @@ namespace psio {
             return codec_fail("capnp: message has no root pointer", 0, "capnp");
          if (!check_pointer<T>(c, seg0, seg0.data(), 0))
             return codec_fail(c.error, static_cast<std::uint32_t>(c.at), "capnp");
-         return codec_ok();
+         // The message is one T as Cap'n Proto defines it. What T declares
+         // about its values — member bounds, utf8, order, invariants
+         // (value_contract.hpp) — is checked on the value the message
+         // decodes to; a type that declares nothing is done here.
+         if constexpr (::psio::has_value_contract_v<T>)
+         {
+            T out{};
+            decode_struct(root_of(bytes), out);
+            return ::psio::check_value_contract(out, "capnp: member length_bound violated",
+                                                "capnp");
+         }
+         else
+            return codec_ok();
       }
 
    }  // namespace detail::capnp_impl
@@ -1627,8 +1640,9 @@ namespace psio {
          return detail::capnp_impl::validate_message<T>(bytes);
       }
 
-      // `validate`, then the annotations of T (bounds, utf8, sorted, …)
-      // checked on the decoded value.
+      // `validate` (the structure, then what T declares about its values:
+      // bounds, utf8, order, invariants), then the specs of user code that
+      // have a `validate(span)` of their own, on the decoded value.
       template <typename T>
          requires detail::capnp_impl::Record<T>
       friend codec_status tag_invoke(decltype(::psio::validate_strict<T>), capnp, T*,

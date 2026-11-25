@@ -45,7 +45,7 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
         ));
     }
     match &input.data {
-        Data::Struct(data) => message(input, &data.fields, &k),
+        Data::Struct(data) => message(input, &data.fields, item.invariant.as_ref(), &k),
         Data::Enum(_) => match c_enum::analyze(input)? {
             Some(shape) => enumeration(input, &shape, &k),
             None => oneof(input, &k),
@@ -54,7 +54,7 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
     }
 }
 
-fn message(input: &DeriveInput, fields: &Fields, k: &syn::Path) -> syn::Result<Tokens> {
+fn message(input: &DeriveInput, fields: &Fields, invariant: Option<&syn::Path>, k: &syn::Path) -> syn::Result<Tokens> {
     let name = &input.ident;
     let pb = quote!(#k::protobuf);
     let members = attrs::members(fields)?;
@@ -149,6 +149,32 @@ fn message(input: &DeriveInput, fields: &Fields, k: &syn::Path) -> syn::Result<T
         }
     });
 
+    // What the message declares about its values (psio::contract): the
+    // members in declaration order, what each holds before its own
+    // declarations, the invariant last.
+    let contract = quote!(#k::contract);
+    let mut declares = Vec::new();
+    let mut declared = Vec::new();
+    let mut own = invariant.is_some();
+    for m in &members {
+        let (member, ty) = (&m.member, &m.field.ty);
+        declares.push(quote!(__any |= <#ty as #pb::PbField>::pb_declares(__seen);));
+        declared.push(quote!(<#ty as #pb::PbField>::pb_check_declared(&self.#member)?;));
+        if let Some(attrs::Annotated { own: field, spec }) = attrs::annotated(m.field, &m.attrs, k)? {
+            own = true;
+            declared.push(quote! {
+                #contract::member::<#field, #spec>(&self.#member, "protobuf: member length_bound violated")?;
+            });
+        }
+    }
+    let invariant = invariant.map(|path| {
+        quote! {
+            if let ::core::result::Result::Err(__why) = #path(self) {
+                return ::core::result::Result::Err(#contract::invariant(__why, "protobuf: invariant violated"));
+            }
+        }
+    });
+
     Ok(quote! {
         const _: () = {
             #(#checks)*
@@ -179,8 +205,31 @@ fn message(input: &DeriveInput, fields: &Fields, k: &syn::Path) -> syn::Result<T
                 }
                 ::core::result::Result::Ok(())
             }
+            fn pb_message_declares(__seen: &mut #contract::Seen) -> bool {
+                if !__seen.enter::<Self>() {
+                    return false;
+                }
+                let mut __any = #own;
+                #(#declares)*
+                __any
+            }
+            fn pb_has_declarations() -> bool {
+                static __KEPT: #contract::Declares = #contract::Declares::new();
+                __KEPT.get(|| <Self as #pb::PbMessage>::pb_message_declares(&mut #contract::Seen::new()))
+            }
+            fn pb_message_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                #(#declared)*
+                #invariant
+                ::core::result::Result::Ok(())
+            }
         }
         impl #pb::PbSingle for #name {
+            fn pb_declares(__seen: &mut #contract::Seen) -> bool {
+                <Self as #pb::PbMessage>::pb_message_declares(__seen)
+            }
+            fn pb_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                <Self as #pb::PbMessage>::pb_message_check_declared(self)
+            }
             fn pb_zero() -> Self {
                 <Self as #pb::PbMessage>::pb_message_zero()
             }
@@ -203,6 +252,12 @@ fn message(input: &DeriveInput, fields: &Fields, k: &syn::Path) -> syn::Result<T
             }
         }
         impl #pb::PbField for #name {
+            fn pb_declares(__seen: &mut #contract::Seen) -> bool {
+                <Self as #pb::PbMessage>::pb_message_declares(__seen)
+            }
+            fn pb_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                <Self as #pb::PbMessage>::pb_message_check_declared(self)
+            }
             fn pb_new() -> Self {
                 <Self as #pb::PbMessage>::pb_message_zero()
             }
@@ -400,6 +455,21 @@ fn oneof(input: &DeriveInput, k: &syn::Path) -> syn::Result<Tokens> {
     Ok(quote! {
         impl #pb::PbField for #name {
             const SLOTS: u32 = #count;
+            fn pb_declares(__seen: &mut #k::contract::Seen) -> bool {
+                if !__seen.enter::<Self>() {
+                    return false;
+                }
+                let mut __any = false;
+                #(__any |= <#types as #pb::PbSingle>::pb_declares(__seen);)*
+                __any
+            }
+            #[allow(unreachable_patterns)]
+            fn pb_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                match self {
+                    #(Self::#idents(__v) => <#types as #pb::PbSingle>::pb_check_declared(__v),)*
+                    _ => ::core::result::Result::Ok(()),
+                }
+            }
             fn pb_new() -> Self {
                 #zero
             }

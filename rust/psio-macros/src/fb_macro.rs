@@ -65,7 +65,7 @@ fn expand(input: &DeriveInput, which: Which) -> syn::Result<Tokens> {
     }
     match &input.data {
         Data::Struct(data) => {
-            let record = Record::new(input, &data.fields, item.definition_will_not_change)?;
+            let record = Record::new(input, &data.fields, &item, &k)?;
             match which {
                 Which::Pack => record.pack(&k),
                 Which::Unpack => record.unpack(&k),
@@ -127,6 +127,9 @@ struct Member<'a> {
     number: u32,
     deprecated: bool,
     default: Option<Tokens>,
+    /// `#[psio(max = N, element(...), sorted, ...)]`: what the member
+    /// declares about its value.
+    annotation: Option<attrs::Annotated>,
 }
 
 struct Record<'a> {
@@ -135,13 +138,17 @@ struct Record<'a> {
     /// Member indices by ascending field number (ties in declaration order).
     rank: Vec<usize>,
     dwnc: bool,
+    /// `#[psio(invariant = "path")]`.
+    invariant: Option<syn::Path>,
 }
 
 impl<'a> Record<'a> {
-    fn new(input: &'a DeriveInput, fields: &'a Fields, dwnc: bool) -> syn::Result<Self> {
+    fn new(input: &'a DeriveInput, fields: &'a Fields, item: &attrs::Attrs, k: &syn::Path) -> syn::Result<Self> {
+        let dwnc = item.definition_will_not_change;
         let mut members = Vec::new();
         for (index, m) in attrs::members(fields)?.into_iter().enumerate() {
             members.push(Member {
+                annotation: attrs::annotated(m.field, &m.attrs, k)?,
                 member: m.member,
                 ty: &m.field.ty,
                 // C++ `reflect<T>::field_number<I>`: the 1-based position.
@@ -152,7 +159,7 @@ impl<'a> Record<'a> {
         }
         let mut rank: Vec<usize> = (0..members.len()).collect();
         rank.sort_by_key(|&i| members[i].number);
-        Ok(Record { input, members, rank, dwnc })
+        Ok(Record { input, members, rank, dwnc, invariant: item.invariant.clone() })
     }
 
     fn types(&self) -> Vec<&syn::Type> {
@@ -326,9 +333,60 @@ impl<'a> Record<'a> {
             }
         }
 
+        // What the type declares about its values (psio::contract): the
+        // members in declaration order, what each holds before its own
+        // declarations, the invariant last. A deprecated member is not read.
+        let contract = quote!(#k::contract);
+        let mut declares = Vec::new();
+        let mut declared = Vec::new();
+        for m in self.members.iter().filter(|m| !m.deprecated) {
+            let (member, ty) = (&m.member, m.ty);
+            declares.push(quote!(__any |= <#ty as #u>::fb_declares(__seen);));
+            declared.push(quote!(<#ty as #u>::fb_check_declared(&self.#member)?;));
+            if let Some(attrs::Annotated { own, spec }) = &m.annotation {
+                declared.push(quote! {
+                    #contract::member::<#own, #spec>(&self.#member, "flatbuf: member length_bound violated")?;
+                });
+            }
+        }
+        let own = self.invariant.is_some() || self.members.iter().any(|m| !m.deprecated && m.annotation.is_some());
+        let invariant = self.invariant.as_ref().map(|path| {
+            quote! {
+                if let ::core::result::Result::Err(__why) = #path(self) {
+                    return ::core::result::Result::Err(#contract::invariant(__why, "flatbuf: invariant violated"));
+                }
+            }
+        });
+        // A type without parameters keeps the answer.
+        let kept = self.input.generics.params.is_empty().then(|| {
+            quote! {
+                fn fb_has_declarations() -> bool {
+                    static __KEPT: #contract::Declares = #contract::Declares::new();
+                    __KEPT.get(|| <Self as #u>::fb_declares(&mut #contract::Seen::new()))
+                }
+            }
+        });
+
         Ok(quote! {
             impl #impl_g #u for #name #type_g #where_c {
                 const FIXED_CHECKED: bool = <Self as #p>::STRUCT && (false #(|| <#types as #u>::FIXED_CHECKED)*);
+
+                fn fb_declares(__seen: &mut #contract::Seen) -> bool {
+                    if !__seen.enter::<Self>() {
+                        return false;
+                    }
+                    let mut __any = #own;
+                    #(#declares)*
+                    __any
+                }
+
+                #kept
+
+                fn fb_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                    #(#declared)*
+                    #invariant
+                    ::core::result::Result::Ok(())
+                }
 
                 #[allow(unused_variables)]
                 fn fb_fixed_valid(__src: &[u8]) -> bool {
@@ -741,6 +799,25 @@ impl<'a> Union<'a> {
                 }
                 fn fb_absent() -> Self {
                     #absent
+                }
+                fn fb_declares(__seen: &mut #k::contract::Seen) -> bool {
+                    if !__seen.enter::<Self>() {
+                        return false;
+                    }
+                    let mut __any = false;
+                    #(__any |= <#types as #u>::fb_declares(__seen);)*
+                    __any
+                }
+                fn fb_has_declarations() -> bool {
+                    static __KEPT: #k::contract::Declares = #k::contract::Declares::new();
+                    __KEPT.get(|| <Self as #u>::fb_declares(&mut #k::contract::Seen::new()))
+                }
+                #[allow(unreachable_patterns)]
+                fn fb_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+                    match self {
+                        #(Self::#variants(__alt) => <#types as #u>::fb_check_declared(__alt),)*
+                        _ => ::core::result::Result::Ok(()),
+                    }
                 }
             }
         })

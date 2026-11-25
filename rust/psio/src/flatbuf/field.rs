@@ -359,15 +359,52 @@ pub trait FbUnpack: FbPack {
 
     /// Verifies under other limits, and / or a buffer with a required file
     /// identifier or a size prefix.
+    ///
+    /// The structure of the buffer first — what FlatBuffers defines — and
+    /// then what the type declares about its values
+    /// ([`fb_check_declared`](Self::fb_check_declared)), on the value the
+    /// buffer decodes to. A type that declares nothing is not decoded.
     fn fb_validate_with(bytes: &[u8], opts: &FbOptions, limits: FbLimits) -> Result<(), FbError> {
         const { assert!(Self::TABLE, "psio::flatbuf: the root of a buffer is a table") };
-        super::verify::check_buffer(bytes, opts, limits, Self::fb_check_table)
+        super::verify::check_buffer(bytes, opts, limits, Self::fb_check_table)?;
+        if Self::fb_has_declarations() {
+            let inner = if opts.size_prefixed { bytes.get(4..).unwrap_or(&[]) } else { bytes };
+            Self::fb_unpack_trusted(inner).fb_check_declared().map_err(|why| FbError::new(why, 0))?;
+        }
+        Ok(())
     }
 
     /// Verifies, then decodes.
     fn fb_unpack(bytes: &[u8]) -> Result<Self, FbError> {
-        Self::fb_validate(bytes)?;
-        Ok(Self::fb_unpack_trusted(bytes))
+        const { assert!(Self::TABLE, "psio::flatbuf: the root of a buffer is a table") };
+        super::verify::check_buffer(bytes, &FbOptions::default(), FbLimits::default(), Self::fb_check_table)?;
+        let value = Self::fb_unpack_trusted(bytes);
+        if Self::fb_has_declarations() {
+            value.fb_check_declared().map_err(|why| FbError::new(why, 0))?;
+        }
+        Ok(value)
+    }
+
+    /// Whether the type, or anything a value of it holds, declares
+    /// something a value can violate: a bound or an order on a member
+    /// (`#[psio(max = N)]`, `element(...)`, `sorted`, …) or an invariant.
+    /// `seen`: the types this search has entered (a type may hold itself).
+    fn fb_declares(_seen: &mut crate::contract::Seen) -> bool {
+        false
+    }
+
+    /// [`fb_declares`](Self::fb_declares) for the type as a root. The
+    /// derive keeps the answer of a type without parameters.
+    fn fb_has_declarations() -> bool {
+        Self::fb_declares(&mut crate::contract::Seen::new())
+    }
+
+    /// What the type declares about its values, on `self`: the first
+    /// violation (the text C++ `validate_flatbuf` reports), or `Ok`. The
+    /// verifier and the checked decode call it after the structure of the
+    /// buffer has passed (C++ `psio::check_value_contract`).
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
     }
 
     /// Decodes bytes the caller vouches for, without verifying them. Never
@@ -676,6 +713,12 @@ impl<T: FbUnpack> FbUnpack for Vec<T> {
     fn fb_absent() -> Self {
         Vec::new()
     }
+    fn fb_declares(seen: &mut crate::contract::Seen) -> bool {
+        T::fb_declares(seen)
+    }
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(T::fb_check_declared)
+    }
 }
 
 /// `[T; N]`: in a struct a fixed array, in a table a vector that must hold
@@ -725,6 +768,12 @@ impl<T: FbUnpack, const N: usize> FbUnpack for [T; N] {
     fn fb_absent() -> Self {
         std::array::from_fn(|_| T::fb_absent())
     }
+    fn fb_declares(seen: &mut crate::contract::Seen) -> bool {
+        T::fb_declares(seen)
+    }
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(T::fb_check_declared)
+    }
 }
 
 // ── Options ─────────────────────────────────────────────────────────────────
@@ -765,6 +814,12 @@ impl<T: FbUnpack> FbUnpack for Option<T> {
     }
     fn fb_absent() -> Self {
         None
+    }
+    fn fb_declares(seen: &mut crate::contract::Seen) -> bool {
+        T::fb_declares(seen)
+    }
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(T::fb_check_declared)
     }
 }
 
@@ -809,6 +864,12 @@ impl<K: FbUnpack + Ord> FbUnpack for BTreeSet<K> {
     }
     fn fb_absent() -> Self {
         BTreeSet::new()
+    }
+    fn fb_declares(seen: &mut crate::contract::Seen) -> bool {
+        K::fb_declares(seen)
+    }
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(K::fb_check_declared)
     }
 }
 
@@ -893,6 +954,17 @@ impl<K: FbUnpack + Ord, V: FbUnpack> FbUnpack for BTreeMap<K, V> {
     }
     fn fb_absent() -> Self {
         BTreeMap::new()
+    }
+    fn fb_declares(seen: &mut crate::contract::Seen) -> bool {
+        // (Both: `||` would leave the mapped type unentered.)
+        let key = K::fb_declares(seen);
+        V::fb_declares(seen) || key
+    }
+    fn fb_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(|(key, value)| {
+            key.fb_check_declared()?;
+            value.fb_check_declared()
+        })
     }
 }
 

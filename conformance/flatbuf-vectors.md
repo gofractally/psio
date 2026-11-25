@@ -52,10 +52,22 @@ position it reports. Two kinds:
   there except the three that cannot be reached or stored: "buffer larger
   than 2 GiB", "field out of bounds" and "table out of bounds" (the checks
   before them already cover the buffer);
+* `Bounded/<what>`: a value outside what its type declares
+  (`docs/annotations.md` §7.2), in a buffer that is valid FlatBuffers — it
+  is written from `Loose`, the same members without the declarations.
+  `Bounded` (`flatbuf_shapes.hpp`) bounds a list, a string, the elements
+  of a list, a map with its keys and values, orders two lists (`sorted`,
+  `unique`), and holds records with a bound (`Slot`) and an invariant
+  (`Span`). The verifier checks the structure first and then the
+  declarations on the decoded value, in declaration order, what a member
+  holds before the member's own bound; the message is
+  `flatbuf: member length_bound violated`, an order spec's or the
+  invariant's, and the position is 0. `Bounded/first_violation_reported`
+  and `Bounded/structure_first` pin the order;
 * `<type>/mutated_NNN`: deterministic corruptions (one or two edits of a
   byte, a 16-bit word, a 32-bit word, or a truncation; splitmix64, so the
   rows are the same on every platform) of `Profile/sample`, `Tree/nested`,
-  `Basket/full`, `Order/compact` and a `Longs`, with the verdict of the C++
+  `Basket/full`, `Order/compact`, a `Longs` and `Bounded/at_limits`, with the verdict of the C++
   verifier.
 
 `accept_corrupt`: `{id, type, wire_hex}`: a buffer that is not the encoding
@@ -85,7 +97,7 @@ is FNV-1a (64-bit) over, per buffer: the byte 1 when it is accepted; else
 the byte 0, the message, and the position as 4 bytes, little-endian.
 `accepted` counts the accepted ones. A consumer that draws the same
 corruptions and arrives at the same number agrees on every verdict, reason
-and position: 300,000 buffers over ten rows.
+and position: 340,000 buffers over eleven rows.
 
 Together the `reject`, `accept_corrupt` and `mutation_digests` rows pin the
 accepted set: the same bytes get the same answer, for the same reason, in
@@ -95,8 +107,8 @@ every language.
 
 | Language | Accepted rows | Rejected rows | Corrupted rows C++ accepts | Digests |
 |---|---|---|---|---|
-| C++ | all 27: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 429 refused with the stated message at the stated position | all 62 accepted; the decoded value re-encodes to a valid buffer | computed by the emitter |
-| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 27, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 429 refused; with the `raw` declarations for the same reason at the same position | all 62 accepted with the `raw` declarations; with the `natural` ones 53 accepted and 9 refused, each for one of the two reasons below | all ten reproduced with the `raw` declarations: 300,000 buffers, 82,459 accepted; with the `natural` ones every buffer C++ refuses is refused and an accepted one is refused only for the two reasons below |
+| C++ | all 30: validated, decoded, viewed, re-encoded (the emitter aborts otherwise; `--check` in ctest) | all 504 refused with the stated message at the stated position | all 68 accepted; the decoded value re-encodes to a valid buffer | computed by the emitter |
+| Rust (`rust/psio/tests/flatbuf_conformance.rs`) | all 30, for two sets of declarations (below): decoded (checked, trusted, through the view) to the value and re-encoded to the same bytes | all 504 refused; with the `raw` declarations for the same reason at the same position | all 68 accepted with the `raw` declarations; with the `natural` ones 59 accepted and 9 refused, each for one of the two reasons below | all eleven reproduced with the `raw` declarations: 340,000 buffers, 87,534 accepted; with the `natural` ones every buffer C++ refuses is refused and an accepted one is refused only for the two reasons below |
 | JavaScript, Python | none: neither package implements FlatBuffers | none | none | none |
 
 Rust declares the types twice. `raw` holds what the C++ types hold:

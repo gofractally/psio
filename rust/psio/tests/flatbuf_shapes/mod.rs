@@ -278,6 +278,63 @@ macro_rules! shapes {
             pub reals: Vec<f64>,
         }
 
+        /// A record whose declaration constrains its values: C++ `Span`,
+        /// `Slot`, `Bounded` (`docs/annotations.md`).
+        #[derive(Debug, Clone, PartialEq, FbPack, FbUnpack, FbView)]
+        #[psio(invariant = "span_ordered")]
+        pub struct Span {
+            pub lo: u32,
+            pub hi: u32,
+        }
+        fn span_ordered(span: &Span) -> Result<(), &'static str> {
+            if span.lo <= span.hi {
+                Ok(())
+            } else {
+                Err("Span: lo is greater than hi")
+            }
+        }
+
+        #[derive(Debug, Clone, PartialEq, FbPack, FbUnpack, FbView)]
+        pub struct Slot {
+            #[psio(max = 4)]
+            pub code: $Str,
+            pub qty: u32,
+        }
+
+        #[derive(Debug, Clone, PartialEq, FbPack, FbUnpack, FbView)]
+        pub struct Bounded {
+            #[psio(max = 2)]
+            pub ids: Vec<u32>,
+            #[psio(max = 8)]
+            pub name: $Str,
+            #[psio(max = 3, element(max = 4))]
+            pub tags: Vec<$Str>,
+            #[psio(max = 2, keys(max = 3), values(max = 5))]
+            pub attrs: BTreeMap<$Str, $Str>,
+            #[psio(sorted)]
+            pub ranks: Vec<u32>,
+            #[psio(unique)]
+            pub codes: Vec<u32>,
+            pub slots: Vec<Slot>,
+            pub span: Span,
+            pub spare: Option<Slot>,
+        }
+
+        /// C++ `conformance_bounded()`: a value at every one of its limits.
+        pub fn bounded_at_limits() -> Bounded {
+            Bounded {
+                ids: vec![7, 9],
+                name: s("eightchr"),
+                tags: vec![s("a"), s("bb"), s("cccc")],
+                attrs: BTreeMap::from([(s("k1"), s("v")), (s("key"), s("value"))]),
+                ranks: vec![1, 1, 5],
+                codes: vec![2, 3, 8],
+                slots: vec![Slot { code: s("slot"), qty: 1 }, Slot { code: s(""), qty: 2 }],
+                span: Span { lo: 3, hi: 3 },
+                spare: Some(Slot { code: s("sp"), qty: 4 }),
+            }
+        }
+
         /// C++ `T{}`: every member at its default.
         pub fn empty<T: FbUnpack>() -> T {
             T::fb_absent()
@@ -598,6 +655,8 @@ macro_rules! shapes {
                 "Longs/sample" => {
                     check(id, bytes, opts, &Longs { values: vec![1, u64::MAX, 3], reals: vec![0.5, -0.0] })
                 }
+                "Bounded/at_limits" | "Bounded/size_prefixed" => check(id, bytes, opts, &bounded_at_limits()),
+                "Bounded/empty" => check(id, bytes, opts, &empty::<Bounded>()),
                 _ => return false,
             }
             true
@@ -619,6 +678,7 @@ macro_rules! shapes {
                 "Scalars" => Scalars::fb_validate_with(bytes, opts, limits),
                 "Sparse" => Sparse::fb_validate_with(bytes, opts, limits),
                 "Longs" => Longs::fb_validate_with(bytes, opts, limits),
+                "Bounded" => Bounded::fb_validate_with(bytes, opts, limits),
                 other => panic!("unknown type {other}"),
             }
         }
@@ -632,6 +692,7 @@ macro_rules! shapes {
                 "Basket" => check_stable::<Basket>(id, bytes),
                 "Order" => check_stable::<Order>(id, bytes),
                 "Longs" => check_stable::<Longs>(id, bytes),
+                "Bounded" => check_stable::<Bounded>(id, bytes),
                 other => panic!("unknown type {other}"),
             }
         }

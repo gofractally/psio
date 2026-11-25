@@ -951,6 +951,10 @@ else()
    message(STATUS "psio_capnp_interop_tests: CapnProto not found — skipping")
 endif()
 
+# What a type declares about its values (bounds, utf8, order, invariants) is
+# enforced by the validating read paths of flatbuf, capnp and protobuf.
+psio_add_test(psio_value_contract_tests value_contract_tests.cpp)
+
 # psio::flatbuf (flatbuf.hpp, flatbuf_view.hpp): layout, codec, the verifier,
 # safe and trusted views, in-place writes.
 psio_add_test(psio_flatbuf_tests flatbuf_tests.cpp)
