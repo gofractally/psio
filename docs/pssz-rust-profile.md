@@ -94,6 +94,8 @@ Nothing is copied or converted for it. Visible consequences:
   record has the same bytes at every position;
   `PsszView::<Child>::trusted(view.bytes())` drops the position from the view
   of a child record.
+- `psio::view` reads a record in place with one shape for PSSZ and
+  FlatBuffers, generic over the format: [rust-views.md](rust-views.md).
 - A generic record's where-clauses name the member format: `struct W<T> {
   value: T }` implements `PsszPack<F>` where `T: PsszPack<F::Free>`. For
   `F = Pssz` that is `T: PsszPack<Pssz>`; code generic over `F` that holds a

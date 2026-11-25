@@ -2299,6 +2299,15 @@ pub mod __derive {
         PsszView::<R, F>::new(bytes).map(|_| ())
     }
 
+    /// The answer of `new` for a record that has no validator: PSSZ
+    /// derives its validators with its decoders, and a record that borrows
+    /// has no decoder. Such a record is viewed with `trusted`.
+    pub fn pssz_no_validator(_: &[u8]) -> PsszResult<()> {
+        Err(crate::pssz::PsszError::new(
+            "psio view: this record has no validator (it does not derive PsszUnpack); `trusted` makes a view of it",
+        ))
+    }
+
     /// Member `I` of the record (or tuple) `R` at `record`, as what its
     /// type `T` reads as. `T` is the type PSSZ has for the member
     /// (`PsszField::Field`), so it is read at that type's widths.

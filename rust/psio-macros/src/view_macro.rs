@@ -66,6 +66,9 @@ struct Said {
     flatbuf: bool,
     /// `no_debug`: the view of an enum with payloads is not `Debug`.
     no_debug: bool,
+    /// `no_validator`: the record has no PSSZ validator (it borrows, so it
+    /// does not derive `PsszUnpack`): only `trusted` makes a view of it.
+    no_validator: bool,
     /// `name = "Name"`: the struct or enum the derive writes.
     name: Option<syn::Ident>,
 }
@@ -74,8 +77,9 @@ fn said(input: &DeriveInput) -> syn::Result<Said> {
     let mut formats = None;
     let mut name = None;
     let mut no_debug = false;
+    let mut no_validator = false;
     for attr in input.attrs.iter().filter(|a| a.path.is_ident("view")) {
-        let usage = "expected #[view(pssz, flatbuf)] or #[view(name = \"Name\")]";
+        let usage = "expected #[view(pssz, flatbuf)], #[view(name = \"Name\")], #[view(no_debug)] or #[view(no_validator)]";
         let Meta::List(list) = attr.parse_meta()? else {
             return Err(syn::Error::new_spanned(attr, usage));
         };
@@ -84,6 +88,7 @@ fn said(input: &DeriveInput) -> syn::Result<Said> {
                 NestedMeta::Meta(Meta::Path(p)) if p.is_ident("pssz") => formats.get_or_insert((false, false)).0 = true,
                 NestedMeta::Meta(Meta::Path(p)) if p.is_ident("flatbuf") => formats.get_or_insert((false, false)).1 = true,
                 NestedMeta::Meta(Meta::Path(p)) if p.is_ident("no_debug") => no_debug = true,
+                NestedMeta::Meta(Meta::Path(p)) if p.is_ident("no_validator") => no_validator = true,
                 NestedMeta::Meta(Meta::NameValue(nv)) if nv.path.is_ident("name") => match &nv.lit {
                     Lit::Str(s) => name = Some(s.parse()?),
                     _ => return Err(syn::Error::new_spanned(nv, usage)),
@@ -93,7 +98,7 @@ fn said(input: &DeriveInput) -> syn::Result<Said> {
         }
     }
     let (pssz, flatbuf) = formats.unwrap_or((true, false));
-    Ok(Said { pssz, flatbuf, no_debug, name })
+    Ok(Said { pssz, flatbuf, no_debug, no_validator, name })
 }
 
 fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
@@ -376,12 +381,19 @@ fn record(input: &DeriveInput, fields: &Fields, k: &syn::Path, said: &Said) -> s
         // members is required.
         let mut pssz_bounds = Vec::new();
         if p.generic {
-            pssz_bounds.push(quote!(#this: #k::pssz::PsszPack<__F> + #k::pssz::PsszValidate<__F>));
+            if !said.no_validator {
+                pssz_bounds.push(quote!(#this: #k::pssz::PsszPack<__F> + #k::pssz::PsszValidate<__F>));
+            }
             for (index, ty) in types.iter().enumerate() {
                 pssz_bounds.push(quote!(#this: #k::pssz_view::PsszField<__F, #index, Field = #ty>));
                 pssz_bounds.push(quote!(#ty: #v::ViewIn<#family, <#this as #k::pssz_view::PsszField<__F, #index>>::Beneath>));
             }
         }
+        let validate = if said.no_validator {
+            quote!(#d::pssz_no_validator(bytes))
+        } else {
+            quote!(#d::pssz_validate::<#this, __F>(bytes))
+        };
         out.extend(quote! {
             #[doc(hidden)]
             #[allow(non_camel_case_types)]
@@ -395,7 +407,7 @@ fn record(input: &DeriveInput, fields: &Fields, k: &syn::Path, said: &Said) -> s
                 type Fields = #fields_ty<#used_lifetimes #used __F, 0usize>;
                 #[inline]
                 fn validate(bytes: &[u8]) -> #k::pssz::PsszResult<()> {
-                    #d::pssz_validate::<#this, __F>(bytes)
+                    #validate
                 }
                 #[inline]
                 fn trusted_root<'__v>(bytes: &'__v [u8]) -> #view<'__v, #used_lifetimes #used __F> {

@@ -172,10 +172,13 @@ pub fn derive_fb_view(input: TokenStream) -> TokenStream {
     fb_macro::fb_view_macro_impl(input)
 }
 
-/// The view of a record that has one shape in every format
-/// (`psio::view`). `#[view(pssz, flatbuf)]` names the formats; the default
-/// is `pssz`. The record derives each named format's own view too
-/// (`PsszView`, `FbView`).
+/// The view of a type that has one shape in every format (`psio::view`):
+/// for a record `Order`, the struct `OrderView` that `View<'_, Order, F>`
+/// names; for an enum with payloads, an enum to match on.
+/// `#[view(pssz, flatbuf)]` names the formats (`pssz` when none is named);
+/// the type derives each named format's own view too (`PsszView`,
+/// `FbView`). Also `#[view(name = "Name")]`, `#[view(no_validator)]`,
+/// `#[view(no_debug)]`: see `docs/rust-views.md`.
 #[proc_macro_derive(View, attributes(view, psio, pssz, json, serde))]
 pub fn derive_view(input: TokenStream) -> TokenStream {
     view_macro::view_macro_impl(input)

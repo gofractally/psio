@@ -239,3 +239,26 @@ fn views_print_what_they_are_of() {
     assert_eq!(node.unpack(), value);
     assert_eq!(node.children().unpack(), value.children);
 }
+
+// ── A record with a type parameter ──────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, psio::View)]
+struct Pair<T> {
+    one: T,
+    many: Vec<T>,
+}
+
+fn count<T: ViewShape, F: Reads<Pair<T>>>(pair: View<'_, Pair<T>, F>) -> usize {
+    pair.many().len()
+}
+
+#[test]
+fn a_record_with_a_type_parameter() {
+    let value = Pair { one: inner::Item { product: "a".into(), qty: 1 }, many: vec![inner::Item { product: "b".into(), qty: 2 }] };
+    let bytes = psio::to_pssz(&value);
+    let pair = View::<Pair<inner::Item>, Pssz>::new(&bytes).unwrap();
+    assert_eq!((pair.one().qty(), pair.many().at_index(0).product(), count(pair)), (1, "b", 1));
+    let bytes = psio::to_pssz(&Pair { one: 7u32, many: vec![8, 9] });
+    let pair = View::<Pair<u32>, Pssz>::new(&bytes).unwrap();
+    assert_eq!((pair.one(), pair.many().iter().sum::<u32>()), (7, 17));
+}
