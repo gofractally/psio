@@ -474,13 +474,19 @@ pub mod pssz {
 
     /// Member `I` of the record `R` whose bytes are `record`, as what its
     /// type `T` reads as. What `#[derive(View)]` calls.
+    ///
+    /// `T` is the member's type as PSSZ has it (`Field = T`): a member
+    /// whose PSSZ type is not its declared type (one with a length bound
+    /// from `#[psio(max = ...)]`) does not compile here, where it would
+    /// otherwise be read at the wrong widths. The prototype does not
+    /// support such members.
     #[inline]
     pub fn field<'a, R, F, T, const I: usize>(
         record: &'a [u8],
     ) -> T::Shape<'a, <R as PsszField<F, I>>::Beneath>
     where
         F: PsszFormat,
-        R: PsszField<F, I> + ?Sized,
+        R: PsszField<F, I, Field = T> + ?Sized,
         T: PsszShape<<R as PsszField<F, I>>::Beneath>,
     {
         T::from_pssz(PsszView::<R, F>::trusted(record).field::<I>().bytes())
