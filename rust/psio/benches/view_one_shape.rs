@@ -11,7 +11,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use psio::flatbuf::{FbView as FbViewOf, Flatbuf};
 use psio::pssz::Pssz;
-use psio::view::View;
+use psio::view::{Reads, View};
 use psio::{FbPack, FbUnpack, FbView, PsszPack, PsszUnpack, PsszView};
 
 #[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, FbPack, FbUnpack, FbView, psio::View)]
@@ -54,7 +54,7 @@ fn order() -> Order {
 
 // ── One shape: the same two functions for both formats ──────────────────────
 
-fn members<F: OrderFormat>(order: View<'_, Order, F>) -> u64 {
+fn members<F: Reads<Order>>(order: View<'_, Order, F>) -> u64 {
     let origin = order.origin();
     let first = order.items().at_index(0);
     order.id()
@@ -68,7 +68,7 @@ fn members<F: OrderFormat>(order: View<'_, Order, F>) -> u64 {
         + first.price() as u64
 }
 
-fn iterate<F: OrderFormat>(order: View<'_, Order, F>) -> u64 {
+fn iterate<F: Reads<Order>>(order: View<'_, Order, F>) -> u64 {
     let mut sum = 0;
     for item in order.items() {
         sum += item.product().len() as u64 + item.qty() as u64 + item.price() as u64;

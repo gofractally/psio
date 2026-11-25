@@ -5,7 +5,7 @@
 
 use psio::flatbuf::Flatbuf;
 use psio::pssz::{Pssz, PsszUnder};
-use psio::view::{ListView, View};
+use psio::view::{ListView, Reads, View};
 use psio::pssz::PsszPack as PsszPackTrait;
 use psio::{FbPack, FbUnpack, FbView, PsszPack, PsszUnpack, PsszView};
 
@@ -58,7 +58,7 @@ fn order() -> Order {
 // ── Written once, for every format ──────────────────────────────────────────
 
 /// The quantity of the items that have a product name.
-fn total<F: OrderFormat>(order: View<'_, Order, F>) -> u64 {
+fn total<F: Reads<Order>>(order: View<'_, Order, F>) -> u64 {
     let mut total = 0;
     for item in order.items() {
         if !item.product().is_empty() {
@@ -69,16 +69,16 @@ fn total<F: OrderFormat>(order: View<'_, Order, F>) -> u64 {
 }
 
 /// The note, or "" when there is none.
-fn note<'a, F: OrderFormat>(order: View<'a, Order, F>) -> &'a str {
+fn note<'a, F: Reads<Order>>(order: View<'a, Order, F>) -> &'a str {
     order.note().unwrap_or("")
 }
 
-fn point<F: PointFormat>(point: View<'_, Point, F>) -> Point {
+fn point<F: Reads<Point>>(point: View<'_, Point, F>) -> Point {
     Point { x: point.x(), y: point.y() }
 }
 
 /// Every member, read through the view.
-fn read<F: OrderFormat>(order: View<'_, Order, F>) -> Order {
+fn read<F: Reads<Order>>(order: View<'_, Order, F>) -> Order {
     let grid = order.grid();
     Order {
         id: order.id(),
@@ -99,7 +99,7 @@ fn read<F: OrderFormat>(order: View<'_, Order, F>) -> Order {
 }
 
 /// What a list gives.
-fn lists<F: OrderFormat>(order: View<'_, Order, F>) {
+fn lists<F: Reads<Order>>(order: View<'_, Order, F>) {
     let items = order.items();
     assert_eq!(items.len(), 3);
     assert!(!items.is_empty());
@@ -174,7 +174,7 @@ struct Small {
     label: Option<String>,
 }
 
-fn small_tags<F: SmallFormat>(small: View<'_, Small, F>) -> Vec<String> {
+fn small_tags<F: Reads<Small>>(small: View<'_, Small, F>) -> Vec<String> {
     let mut out: Vec<String> = small.tags().iter().map(str::to_owned).collect();
     for item in small.inner() {
         out.push(format!("{}x{}", item.qty(), item.product()));

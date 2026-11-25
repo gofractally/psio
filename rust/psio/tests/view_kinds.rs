@@ -9,7 +9,7 @@ use psio::flatbuf::Flatbuf;
 use psio::pssz::{
     BoundedList, BoundedMap, BoundedSet, BoundedString, Pssz, Pssz16, Pssz32, Pssz8, PsszUnder, RawString, Uint256,
 };
-use psio::view::{self, ListView, MapView, RecordFormat, SetView, View};
+use psio::view::{self, ListView, MapView, Reads, SetView, View};
 use psio::{FbPack, FbUnpack, FbView, PsszPack, PsszUnpack, PsszView};
 
 /// Runs `f`, which may panic; reports whether it did.
@@ -125,12 +125,12 @@ fn catalog() -> Catalog {
 
 // ── Written once, for every format ──────────────────────────────────────────
 
-fn item<F: ItemFormat>(item: View<'_, Item, F>) -> Item {
+fn item<F: Reads<Item>>(item: View<'_, Item, F>) -> Item {
     Item { product: item.product().to_owned(), qty: item.qty() }
 }
 
 /// An enum with payloads reads as an enum to `match` on.
-fn figure<F: FigureFormat>(figure: FigureView<'_, F>) -> Figure {
+fn figure<F: Reads<Figure>>(figure: View<'_, Figure, F>) -> Figure {
     match figure {
         FigureView::Nothing => Figure::Nothing,
         FigureView::Circle(circle) => Figure::Circle(Circle { radius: circle.radius(), label: circle.label().to_owned() }),
@@ -139,7 +139,7 @@ fn figure<F: FigureFormat>(figure: FigureView<'_, F>) -> Figure {
 }
 
 /// Every member, read through the view.
-fn read<F: CatalogFormat>(catalog: View<'_, Catalog, F>) -> Catalog {
+fn read<F: Reads<Catalog>>(catalog: View<'_, Catalog, F>) -> Catalog {
     Catalog {
         name: catalog.name().to_owned(),
         color: catalog.color(),
@@ -158,7 +158,7 @@ fn read<F: CatalogFormat>(catalog: View<'_, Catalog, F>) -> Catalog {
 }
 
 /// What maps and sets give.
-fn lookups<F: CatalogFormat>(catalog: View<'_, Catalog, F>) {
+fn lookups<F: Reads<Catalog>>(catalog: View<'_, Catalog, F>) {
     let prices = catalog.prices();
     assert_eq!(prices.len(), 3);
     assert!(!prices.is_empty());
@@ -282,17 +282,15 @@ struct Tree {
     children: Vec<Tree>,
 }
 
-fn tree<F: TreeFormat>(node: View<'_, Tree, F>) -> Tree {
+fn tree<F: Reads<Tree>>(node: View<'_, Tree, F>) -> Tree {
     Tree { label: node.label().to_owned(), children: node.children().into_iter().map(tree).collect() }
 }
 
-fn depth<F: TreeFormat>(node: View<'_, Tree, F>) -> usize {
+fn depth<F: Reads<Tree>>(node: View<'_, Tree, F>) -> usize {
     1 + node.children().iter().map(depth).max().unwrap_or(0)
 }
 
-// Two records that hold each other. The traits the derive writes cannot
-// name each other in a circle, so one of the two members says that it closes
-// one: nothing is then required of the format for it.
+// Two records that hold each other.
 #[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, FbPack, FbUnpack, FbView, psio::View)]
 #[view(pssz, flatbuf)]
 struct Folder {
@@ -304,23 +302,11 @@ struct Folder {
 #[view(pssz, flatbuf)]
 struct Entry {
     size: u32,
-    #[view(recursive)]
     folder: Option<Folder>,
 }
 
-/// With a format named, nothing more is needed.
-fn sizes_in_pssz(folder: View<'_, Folder, Pssz>) -> u32 {
-    folder.entries().iter().map(|entry| entry.size() + entry.folder().map(sizes_in_pssz).unwrap_or(0)).sum()
-}
-
-/// Generic code states what the member left out: here, that the format is
-/// one whose records have their members at the format itself (every format
-/// but PSSZ beneath a record with a cap).
-fn sizes<F>(folder: View<'_, Folder, F>) -> u32
-where
-    F: FolderFormat + RecordFormat<Folder, Beneath = F> + RecordFormat<Entry, Beneath = F>,
-{
-    folder.entries().iter().map(|entry| entry.size() + entry.folder().map(sizes).unwrap_or(0)).sum()
+fn sizes<F: Reads<Folder>>(folder: View<'_, Folder, F>) -> u32 {
+    folder.entries().iter().map(|entry| entry.size() + entry.folder().map(|folder| sizes(folder)).unwrap_or(0)).sum()
 }
 
 #[test]
@@ -344,9 +330,7 @@ fn records_that_hold_themselves() {
             Entry { size: 2, folder: Some(Folder { name: "in".into(), entries: vec![Entry { size: 40, folder: None }] }) },
         ],
     };
-    let pssz = psio::to_pssz(&value);
-    assert_eq!(sizes_in_pssz(View::<Folder, Pssz>::new(&pssz).unwrap()), 43);
-    assert_eq!(sizes(View::<Folder, Pssz>::new(&pssz).unwrap()), 43);
+    assert_eq!(sizes(View::<Folder, Pssz>::new(&psio::to_pssz(&value)).unwrap()), 43);
     assert_eq!(sizes(View::<Folder, Flatbuf>::new(&psio::to_flatbuf(&value)).unwrap()), 43);
 }
 
@@ -421,7 +405,7 @@ fn extra() -> Extra {
     }
 }
 
-fn token<F: TokenFormat>(token: TokenView<'_, F>) -> Token {
+fn token<F: Reads<Token>>(token: View<'_, Token, F>) -> Token {
     match token {
         TokenView::End => Token::End,
         TokenView::Number(n) => Token::Number(n),
@@ -433,7 +417,7 @@ fn token<F: TokenFormat>(token: TokenView<'_, F>) -> Token {
     }
 }
 
-fn read_extra<F: ExtraFormat>(extra: View<'_, Extra, F>) -> Extra {
+fn read_extra<F: Reads<Extra>>(extra: View<'_, Extra, F>) -> Extra {
     let (n, word) = extra.pair();
     let (flag, thing, numbers) = extra.triple();
     let grid = extra.grid();
@@ -515,7 +499,7 @@ fn any_value_is_read_from_the_root() {
     assert_eq!(read_catalog(view::read::<Catalog, Pssz>(&psio::to_pssz(&value)).unwrap()), value);
 }
 
-fn read_catalog<F: CatalogFormat>(catalog: View<'_, Catalog, F>) -> Catalog {
+fn read_catalog<F: Reads<Catalog>>(catalog: View<'_, Catalog, F>) -> Catalog {
     read(catalog)
 }
 
@@ -541,7 +525,7 @@ fn a_record_is_viewed_under_every_pssz_tag() {
     assert_eq!(read_extra(View::<Extra, Pssz32>::new(&bytes).unwrap()), value);
 }
 
-// ── What a member says about its type ───────────────────────────────────────
+// ── A member's type under another name ──────────────────────────────────────
 
 mod elsewhere {
     pub(super) use super::Item as Thing;
@@ -549,28 +533,24 @@ mod elsewhere {
 }
 use elsewhere::{Count, Thing};
 
-/// `#[derive(View)]` reads a member's type as it is written. A type it does
-/// not know is taken to derive `View`, with `<Name>Format` beside it: an
-/// alias or a renamed import says what it stands for.
+/// `#[derive(View)]` never asks what kind of type a member is: an alias, a
+/// renamed import and a path are the type they name.
 #[derive(Debug, Clone, PartialEq, PsszPack, PsszUnpack, PsszView, FbPack, FbUnpack, FbView, psio::View)]
 #[view(pssz, flatbuf)]
 struct Aliased {
     /// A value under another name.
-    #[view(value)]
     count: Count,
     /// A record under another name.
-    #[view(format = "ItemFormat")]
     thing: Thing,
-    #[view(format = "ItemFormat")]
     more: Vec<elsewhere::Thing>,
 }
 
-fn aliased<F: AliasedFormat>(view: View<'_, Aliased, F>) -> (u32, String, u32) {
+fn aliased<F: Reads<Aliased>>(view: View<'_, Aliased, F>) -> (u32, String, u32) {
     (view.count(), view.thing().product().to_owned(), view.more().iter().map(|thing| thing.qty()).sum())
 }
 
 #[test]
-fn a_member_says_what_its_type_stands_for() {
+fn a_member_whose_type_has_another_name() {
     let value = Aliased {
         count: 3,
         thing: Item { product: "aliased".into(), qty: 1 },
