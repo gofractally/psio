@@ -403,6 +403,17 @@ impl<K> std::fmt::Debug for FbSet<'_, K> {
 }
 
 impl<'a, K: FbViewable> FbSet<'a, K> {
+    /// The buffer, the position of the first key and the number of keys:
+    /// what `psio::view` keeps of a set.
+    pub(crate) fn into_parts(self) -> (&'a [u8], usize, usize) {
+        self.items.into_parts()
+    }
+
+    /// The set `into_parts` took apart.
+    pub(crate) fn from_parts(buf: &'a [u8], data: usize, count: usize) -> Self {
+        FbSet { items: FbVec::from_parts(buf, data, count) }
+    }
+
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -476,6 +487,17 @@ impl<K, V> std::fmt::Debug for FbMap<'_, K, V> {
 }
 
 impl<'a, K: FbViewable, V: FbViewable> FbMap<'a, K, V> {
+    /// The buffer, the position of the first entry's offset and the number
+    /// of entries: what `psio::view` keeps of a map.
+    pub(crate) fn into_parts(self) -> (&'a [u8], usize, usize) {
+        (self.buf, self.data, self.count)
+    }
+
+    /// The map `into_parts` took apart.
+    pub(crate) fn from_parts(buf: &'a [u8], data: usize, count: usize) -> Self {
+        FbMap { buf, data, count, _type: PhantomData }
+    }
+
     fn entry(&self, i: usize) -> FbTable<'a> {
         FbTable::follow(self.buf, self.data + i * 4)
     }
