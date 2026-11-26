@@ -59,6 +59,15 @@ fn pack_message<T: pack::WitPack>(value: &T) -> Vec<u8> {
 fn unpack_message<T: view::WitUnpack>(bytes: &[u8]) -> Result<T, view::WitViewError> {
     T::wit_unpack(bytes)
 }
+
+/// The validated write (C++ `psio::to_wit_checked(v)`): the encoding of
+/// `value`, or the declaration it violates — what [`validate_wit`] would
+/// refuse the bytes for. [`to_wit`] is the fast write: it holds nothing
+/// against what the type declares.
+pub fn try_to_wit<T: pack::WitPack + view::WitUnpack>(value: &T) -> Result<Vec<u8>, view::WitViewError> {
+    value.wit_check_declared().map_err(|message| view::WitViewError::Declaration { message })?;
+    Ok(value.wit_pack())
+}
 crate::format::message_format_helpers! {
     tag Wit, "wit", error view::WitViewError,
     pack pack::WitPack => pack_message, unpack view::WitUnpack => unpack_message,

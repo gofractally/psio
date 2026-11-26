@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 const FB: &str = "flatbuf: member length_bound violated";
 const PB: &str = "protobuf: member length_bound violated";
 const CP: &str = "capnp: member length_bound violated";
+const WT: &str = "wit: member length_bound violated";
 const UNSORTED: &str = "sorted: elements are not in order";
 const NOT_ASCENDING: &str = "sorted: elements are not in strictly ascending order";
 
@@ -23,11 +24,13 @@ macro_rules! twin {
     ($loose:ident, $declared:ident, [$($ty:tt)*], $(#[$ann:meta])*) => {
         #[derive(Debug, Clone, PartialEq, Default)]
         #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+        #[derive(psio::WitPack, psio::WitUnpack)]
         struct $loose {
             v: $($ty)*,
         }
         #[derive(Debug, Clone, PartialEq, Default)]
         #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+        #[derive(psio::WitPack, psio::WitUnpack)]
         struct $declared {
             $(#[$ann])*
             v: $($ty)*,
@@ -62,11 +65,13 @@ twin_map!(OptionalLoose, Optional, [Option<String>], #[psio(max = 2)]);
 
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+#[derive(psio::WitPack, psio::WitUnpack)]
 struct EvenLoose {
     v: u32,
 }
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+#[derive(psio::WitPack, psio::WitUnpack)]
 #[psio(invariant = "even")]
 struct Even {
     v: u32,
@@ -82,6 +87,7 @@ fn even(e: &Even) -> Result<(), &'static str> {
 /// An invariant whose message is computed from the value.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(psio::FbPack, psio::FbUnpack, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+#[derive(psio::WitPack, psio::WitUnpack)]
 #[psio(invariant = "small")]
 struct Small {
     v: u32,
@@ -97,12 +103,14 @@ fn small(s: &Small) -> Result<(), String> {
 /// A declaration below a record that declares nothing itself.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+#[derive(psio::WitPack, psio::WitUnpack)]
 struct OuterLoose {
     rows: Vec<MaxListLoose>,
     one: EvenLoose,
 }
 #[derive(Debug, Clone, PartialEq, Default)]
 #[derive(psio::FbPack, psio::FbUnpack, psio::FbView, psio::CapnpPack, psio::CapnpUnpack, psio::Protobuf)]
+#[derive(psio::WitPack, psio::WitUnpack)]
 struct Outer {
     rows: Vec<MaxList>,
     one: Even,
@@ -419,4 +427,76 @@ fn the_verdict_is_the_one_of_pssz_key_and_json() {
     assert_eq!(psio::from_flatbuf::<Everywhere>(&psio::to_flatbuf(&within)).unwrap().ids, [1, 2]);
     assert_eq!(psio::from_capnp::<Everywhere>(&psio::to_capnp(&within)).unwrap().ids, [1, 2]);
     assert_eq!(psio::from_protobuf::<Everywhere>(&psio::to_protobuf(&within)).unwrap().ids, [1, 2]);
+}
+
+// ── WIT ─────────────────────────────────────────────────────────────────────
+
+macro_rules! wit {
+    ($declared:ty, $bad:expr, $good:expr, $why:expr) => {{
+        let (bad, good) = (psio::to_wit(&$bad), psio::to_wit(&$good));
+        assert_eq!(psio::validate_wit::<$declared>(&bad).expect_err("validate").to_string(), $why);
+        assert_eq!(psio::from_wit::<$declared>(&bad).expect_err("decode").to_string(), $why);
+        assert_eq!(
+            <$declared as psio::wit::view::WitUnpack>::wit_unpack(&bad).expect_err("unpack"),
+            psio::wit::view::WitViewError::Declaration { message: $why }
+        );
+        psio::validate_wit::<$declared>(&good).expect("validate");
+        psio::from_wit::<$declared>(&good).expect("decode");
+    }};
+}
+
+#[test]
+fn wit_refuses_a_value_outside_what_its_type_declares() {
+    wit!(MaxList, MaxListLoose { v: vec![1, 2, 3] }, MaxListLoose { v: vec![1, 2] }, WT);
+    wit!(MaxString, MaxStringLoose { v: text("abc") }, MaxStringLoose { v: text("ab") }, WT);
+    wit!(MaxBytes, MaxBytesLoose { v: vec![1, 2, 3] }, MaxBytesLoose { v: vec![1, 2] }, WT);
+    wit!(Element, ElementLoose { v: vec![text("ab"), text("abc")] }, ElementLoose { v: vec![text("ab")] }, WT);
+    wit!(Sorted, SortedLoose { v: vec![2, 1] }, SortedLoose { v: vec![1, 1, 2] }, UNSORTED);
+    wit!(Unique, UniqueLoose { v: vec![1, 1] }, UniqueLoose { v: vec![1, 2] }, NOT_ASCENDING);
+    wit!(Even, EvenLoose { v: 3 }, EvenLoose { v: 4 }, "Even: v is odd");
+    wit!(Small, Small { v: 11 }, Small { v: 9 }, "wit: invariant violated");
+    let row = |v: &[u32]| MaxListLoose { v: v.to_vec() };
+    let outer = |rows: Vec<MaxListLoose>, one: u32| OuterLoose { rows, one: EvenLoose { v: one } };
+    wit!(Outer, outer(vec![row(&[1]), row(&[1, 2, 3])], 0), outer(vec![row(&[1, 2])], 0), WT);
+    wit!(Outer, outer(vec![], 5), outer(vec![], 6), "Even: v is odd");
+}
+
+// ── The validated write ─────────────────────────────────────────────────────
+
+/// `to_F` is the fast write: it holds nothing against what the type
+/// declares. `try_to_F` is the validated write: it refuses what the
+/// format's validating reader refuses, with its message.
+#[test]
+fn try_to_f_is_the_validated_write_of_the_foreign_formats() {
+    let over = MaxList { v: vec![1, 2, 3] };
+    let fits = MaxList { v: vec![1, 2] };
+    let loose = MaxListLoose { v: vec![1, 2, 3] };
+
+    assert_eq!(psio::to_flatbuf(&over), psio::to_flatbuf(&loose));
+    assert_eq!(psio::try_to_flatbuf(&over).expect_err("flatbuf").message(), FB);
+    assert_eq!(psio::try_to_flatbuf(&fits).unwrap(), psio::to_flatbuf(&fits));
+    assert_eq!(psio::try_to_flatbuf(&loose).unwrap(), psio::to_flatbuf(&loose));
+
+    assert_eq!(psio::to_protobuf(&over), psio::to_protobuf(&loose));
+    assert_eq!(psio::try_to_protobuf(&over).expect_err("protobuf").message(), PB);
+    assert_eq!(psio::try_to_protobuf(&fits).unwrap(), psio::to_protobuf(&fits));
+
+    assert_eq!(psio::to_capnp(&over), psio::to_capnp(&loose));
+    assert_eq!(psio::try_to_capnp(&over).expect_err("capnp"), CP);
+    assert_eq!(psio::try_to_capnp(&fits).unwrap(), psio::to_capnp(&fits));
+
+    assert_eq!(psio::to_wit(&over), psio::to_wit(&loose));
+    assert_eq!(psio::try_to_wit(&over).expect_err("wit").to_string(), WT);
+    assert_eq!(psio::try_to_wit(&fits).unwrap(), psio::to_wit(&fits));
+
+    // An invariant, and a declaration below the root.
+    assert_eq!(psio::try_to_flatbuf(&Even { v: 3 }).expect_err("flatbuf").message(), "Even: v is odd");
+    assert_eq!(psio::try_to_protobuf(&Even { v: 3 }).expect_err("protobuf").message(), "Even: v is odd");
+    assert_eq!(psio::try_to_capnp(&Even { v: 3 }).expect_err("capnp"), "Even: v is odd");
+    assert_eq!(psio::try_to_wit(&Even { v: 3 }).expect_err("wit").to_string(), "Even: v is odd");
+    let outer = Outer { rows: vec![over.clone()], one: Even { v: 2 } };
+    assert!(psio::try_to_flatbuf(&outer).is_err());
+    assert!(psio::try_to_protobuf(&outer).is_err());
+    assert!(psio::try_to_capnp(&outer).is_err());
+    assert!(psio::try_to_wit(&outer).is_err());
 }

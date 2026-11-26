@@ -43,6 +43,13 @@ pub enum WitViewError {
         value: u32,
         max: u32,
     },
+    /// The bytes are a value of the type's shape, and the value is outside
+    /// what the type declares: a member's bound or order
+    /// (`#[psio(max = N)]`, `sorted`, …) or the invariant. `message` is the
+    /// text C++ `validate_wit` reports.
+    Declaration {
+        message: &'static str,
+    },
 }
 
 impl std::fmt::Display for WitViewError {
@@ -67,6 +74,7 @@ impl std::fmt::Display for WitViewError {
             Self::InvalidDiscriminant { value, max } => {
                 write!(f, "invalid discriminant {} (max {})", value, max)
             }
+            Self::Declaration { message } => f.write_str(message),
         }
     }
 }
@@ -402,7 +410,21 @@ pub trait WitUnpack: Sized + WitLayout {
             });
         }
         let view = WitView::from_buffer(buf);
-        Self::wit_unpack_from(&view)
+        let value = Self::wit_unpack_from(&view)?;
+        // The structure is a value of the type; now what the type declares
+        // about its values.
+        value.wit_check_declared().map_err(|message| WitViewError::Declaration { message })?;
+        Ok(value)
+    }
+
+    /// What the type declares about its values, on `self`: a member's bound
+    /// or order (`#[psio(max = N)]`, `element(...)`, `sorted`, …), the same
+    /// of what it holds, and the invariant (`#[psio(invariant = "path")]`).
+    /// The first violation (the text C++ `validate_wit` reports), or `Ok`
+    /// (`psio::contract`). [`wit_unpack`](Self::wit_unpack) — the checked
+    /// decode and `validate_wit` — calls it after the structure has passed.
+    fn wit_check_declared(&self) -> Result<(), &'static str> {
+        Ok(())
     }
 }
 
@@ -501,6 +523,9 @@ impl<T: WitUnpack> WitUnpack for Vec<T> {
         }
         Ok(result)
     }
+    fn wit_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(T::wit_check_declared)
+    }
 }
 
 // ── Option<T> unpack ────────────────────────────────────────────────────────
@@ -515,6 +540,9 @@ impl<T: WitUnpack> WitUnpack for Option<T> {
             Ok(Some(T::wit_unpack_from(&payload_view)?))
         }
     }
+    fn wit_check_declared(&self) -> Result<(), &'static str> {
+        self.iter().try_for_each(T::wit_check_declared)
+    }
 }
 
 // ── Result<T, E> unpack ─────────────────────────────────────────────────────
@@ -527,6 +555,12 @@ impl<T: WitUnpack, E: WitUnpack> WitUnpack for Result<T, E> {
             0 => Ok(Ok(T::wit_unpack_from(&payload_view)?)),
             1 => Ok(Err(E::wit_unpack_from(&payload_view)?)),
             _ => Err(WitViewError::InvalidDiscriminant { value: disc as u32, max: 1 }),
+        }
+    }
+    fn wit_check_declared(&self) -> Result<(), &'static str> {
+        match self {
+            Ok(value) => value.wit_check_declared(),
+            Err(error) => error.wit_check_declared(),
         }
     }
 }

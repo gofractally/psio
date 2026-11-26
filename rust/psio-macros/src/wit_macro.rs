@@ -158,20 +158,25 @@ pub fn wit_pack_macro_impl(input: TokenStream) -> TokenStream {
 
 pub fn wit_unpack_macro_impl(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let mod_path = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("WitUnpack")) {
-        Ok(item) => item.krate().into_token_stream(),
+    let item = match crate::attrs::item(&input, crate::attrs::Derive::Interchange("WitUnpack")) {
+        Ok(item) => item,
+        Err(err) => return err.to_compile_error().into(),
+    };
+    let mod_path = item.krate().into_token_stream();
+    let declared = match gen_wit_declared(&item, &input.data) {
+        Ok(declared) => declared,
         Err(err) => return err.to_compile_error().into(),
     };
 
     match &input.data {
         Data::Struct(data) => {
             if let Fields::Named(named) = &data.fields {
-                gen_wit_unpack(&mod_path, &input, named)
+                gen_wit_unpack(&mod_path, &input, named, declared)
             } else {
                 panic!("WitUnpack only supports named structs");
             }
         }
-        Data::Enum(data) => gen_wit_unpack_enum(&mod_path, &input, data),
+        Data::Enum(data) => gen_wit_unpack_enum(&mod_path, &input, data, declared),
         _ => panic!("WitUnpack only supports structs and enums"),
     }
 }
@@ -256,10 +261,89 @@ fn gen_wit_pack(
     expanded.into()
 }
 
+/// `wit_check_declared`: what the type declares about its values
+/// (psio::contract) — the members in declaration order, what each holds
+/// before its own declarations, the invariant last.
+fn gen_wit_declared(item: &crate::attrs::Attrs, data: &Data) -> syn::Result<proc_macro2::TokenStream> {
+    let k = item.krate();
+    let unpack = quote!(#k::wit::view::WitUnpack);
+    // The checks of one field held in `place` (an expression of type &Field).
+    let field = |f: &syn::Field, place: proc_macro2::TokenStream| -> syn::Result<proc_macro2::TokenStream> {
+        let mut checks = quote!(#unpack::wit_check_declared(#place)?;);
+        let attrs = crate::attrs::field(f)?;
+        if let Some(crate::attrs::Annotated { own, spec }) = crate::attrs::annotated(f, &attrs, &k)? {
+            checks.extend(quote! {
+                #k::contract::member::<#own, #spec>(#place, "wit: member length_bound violated")?;
+            });
+        }
+        Ok(checks)
+    };
+    let body = match data {
+        Data::Struct(data) => {
+            let mut checks = Vec::new();
+            for (index, f) in data.fields.iter().enumerate() {
+                let member = match &f.ident {
+                    Some(ident) => quote!(#ident),
+                    None => {
+                        let index = syn::Index::from(index);
+                        quote!(#index)
+                    }
+                };
+                checks.push(field(f, quote!(&self.#member))?);
+            }
+            quote!(#(#checks)*)
+        }
+        Data::Enum(data) => {
+            let mut arms = Vec::new();
+            for v in &data.variants {
+                let ident = &v.ident;
+                match &v.fields {
+                    Fields::Unit => arms.push(quote!(Self::#ident => {})),
+                    Fields::Unnamed(fields) => {
+                        let names: Vec<_> =
+                            (0..fields.unnamed.len()).map(|i| quote::format_ident!("__f{}", i)).collect();
+                        let mut checks = Vec::new();
+                        for (f, name) in fields.unnamed.iter().zip(&names) {
+                            checks.push(field(f, quote!(#name))?);
+                        }
+                        arms.push(quote!(Self::#ident(#(#names),*) => { #(#checks)* }));
+                    }
+                    Fields::Named(fields) => {
+                        let names: Vec<_> = fields.named.iter().map(|f| f.ident.clone().unwrap()).collect();
+                        let mut checks = Vec::new();
+                        for (f, name) in fields.named.iter().zip(&names) {
+                            checks.push(field(f, quote!(#name))?);
+                        }
+                        arms.push(quote!(Self::#ident { #(#names),* } => { #(#checks)* }));
+                    }
+                }
+            }
+            quote!(match self { #(#arms)* })
+        }
+        Data::Union(_) => quote!(),
+    };
+    let invariant = item.invariant.as_ref().map(|path| {
+        quote! {
+            if let ::core::result::Result::Err(__why) = #path(self) {
+                return ::core::result::Result::Err(#k::contract::invariant(__why, "wit: invariant violated"));
+            }
+        }
+    });
+    Ok(quote! {
+        #[allow(unused_variables)]
+        fn wit_check_declared(&self) -> ::core::result::Result<(), &'static str> {
+            #body
+            #invariant
+            ::core::result::Result::Ok(())
+        }
+    })
+}
+
 fn gen_wit_unpack(
     mod_path: &proc_macro2::TokenStream,
     input: &DeriveInput,
     named: &syn::FieldsNamed,
+    declared: proc_macro2::TokenStream,
 ) -> TokenStream {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -300,6 +384,7 @@ fn gen_wit_unpack(
                     #(#field_inits),*
                 })
             }
+            #declared
         }
     };
     expanded.into()
@@ -656,6 +741,7 @@ fn gen_wit_unpack_enum(
     mod_path: &proc_macro2::TokenStream,
     input: &DeriveInput,
     data: &DataEnum,
+    declared: proc_macro2::TokenStream,
 ) -> TokenStream {
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -774,6 +860,7 @@ fn gen_wit_unpack_enum(
                     }),
                 }
             }
+            #declared
         }
     };
     expanded.into()

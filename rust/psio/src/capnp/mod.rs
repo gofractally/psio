@@ -53,6 +53,15 @@ fn unpack_message<T: CapnpUnpack>(msg: &[u8]) -> Result<T, &'static str> {
     }
     T::capnp_unpack(msg)
 }
+/// The validated write (C++ `psio::to_capnp_checked(v)`): the message of
+/// `value`, or the declaration it violates — what [`validate_capnp`] would
+/// refuse the bytes for. [`to_capnp`] is the fast write: it holds nothing
+/// against what the type declares.
+pub fn try_to_capnp<T: CapnpPack + CapnpUnpack>(value: &T) -> Result<Vec<u8>, &'static str> {
+    value.capnp_check_declared()?;
+    Ok(value.capnp_pack())
+}
+
 crate::format::message_format_helpers! {
     tag Capnp, "capnp", error &'static str,
     pack CapnpPack => pack_message, unpack CapnpUnpack => unpack_message,

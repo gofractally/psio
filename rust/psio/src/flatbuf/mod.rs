@@ -82,6 +82,16 @@ impl<T: FbUnpack> crate::Validate<Flatbuf> for T {
 pub fn to_flatbuf<T: FbPack>(value: &T) -> Vec<u8> {
     value.fb_pack()
 }
+/// The validated write (C++ `psio::to_flatbuf_checked(v)`): the encoding of
+/// `value`, or the declaration it violates — what
+/// [`validate_flatbuf`] would refuse the bytes for. [`to_flatbuf`] is the
+/// fast write: it holds nothing against what the type declares.
+pub fn try_to_flatbuf<T: FbUnpack>(value: &T) -> Result<Vec<u8>, FbError> {
+    if T::fb_has_declarations() {
+        value.fb_check_declared().map_err(|why| FbError::new(why, 0))?;
+    }
+    Ok(value.fb_pack())
+}
 /// Encodes with a file identifier and / or a size prefix (C++
 /// `psio::to_flatbuf(v, {.file_identifier = "ABCD", .size_prefixed = true})`).
 pub fn to_flatbuf_with<T: FbPack>(value: &T, opts: &FbOptions) -> Vec<u8> {

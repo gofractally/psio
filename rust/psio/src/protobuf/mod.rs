@@ -1243,6 +1243,16 @@ pub fn to_protobuf<T: PbMessage>(value: &T) -> Vec<u8> {
     to_protobuf_into(value, &mut out);
     out
 }
+/// The validated write (C++ `psio::to_protobuf_checked(v)`): the encoding of
+/// `value`, or the declaration it violates — what [`validate_protobuf`]
+/// would refuse the bytes for. [`to_protobuf`] is the fast write: it holds
+/// nothing against what the type declares.
+pub fn try_to_protobuf<T: PbMessage>(value: &T) -> Result<Vec<u8>, PbError> {
+    if T::pb_has_declarations() {
+        value.pb_message_check_declared().map_err(|message| PbError { message, offset: 0 })?;
+    }
+    Ok(to_protobuf(value))
+}
 /// Appends the encoding of `value` to `out` (C++ `psio::to_protobuf(v, sink)`).
 ///
 /// Panics when the message exceeds 2 GiB - 1 (protobuf's limit).

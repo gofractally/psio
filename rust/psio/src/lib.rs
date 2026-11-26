@@ -205,19 +205,22 @@ pub use psio_macros::interface;
 // `try_to_F`, `to_F_into`, `from_F`, `from_F_trusted`, `validate_F`,
 // `F_size`, and the view / buffer types.
 #[cfg(feature = "capnp")]
-pub use capnp::{capnp_size, from_capnp, from_capnp_trusted, to_capnp, to_capnp_into, validate_capnp};
+pub use capnp::{
+    capnp_size, from_capnp, from_capnp_trusted, to_capnp, to_capnp_into, try_to_capnp, validate_capnp,
+};
 #[cfg(feature = "flatbuf")]
 pub use flatbuf::{
     flatbuf_has_identifier, flatbuf_identifier, flatbuf_size, flatbuf_size_prefixed, from_flatbuf,
-    from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, to_flatbuf_with, validate_flatbuf, validate_flatbuf_with,
+    from_flatbuf_trusted, to_flatbuf, to_flatbuf_into, to_flatbuf_with, try_to_flatbuf, validate_flatbuf,
+    validate_flatbuf_with,
 };
 #[cfg(feature = "protobuf")]
 pub use protobuf::{
-    from_protobuf, from_protobuf_with, protobuf_size, to_protobuf, to_protobuf_into, validate_protobuf,
-    validate_protobuf_with,
+    from_protobuf, from_protobuf_with, protobuf_size, to_protobuf, to_protobuf_into, try_to_protobuf,
+    validate_protobuf, validate_protobuf_with,
 };
 #[cfg(feature = "wit")]
-pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, validate_wit, wit_size};
+pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, try_to_wit, validate_wit, wit_size};
 pub use json::{
     from_ijson, from_ijson_trusted, from_json, from_json_trusted, ijson_size, json_size, to_ijson,
     to_ijson_into, to_json, to_json_into, try_to_ijson, try_to_json, validate_ijson, validate_json,
@@ -265,7 +268,7 @@ pub mod xxh3_64;
 pub mod dynamic_schema;
 
 // The formats a dependent asks for by cargo feature.
-#[cfg(any(feature = "capnp", feature = "flatbuf", feature = "protobuf"))]
+#[cfg(any(feature = "capnp", feature = "flatbuf", feature = "protobuf", feature = "wit"))]
 pub mod contract;
 #[cfg(feature = "capnp")]
 pub mod capnp;
