@@ -531,7 +531,15 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
     let fixed_reads: Vec<_> = types
         .iter()
         .zip(&bounds)
-        .map(|(ty, bound)| trusted_value(k, m, ty, bound, quote!(&bytes[__at..__at + __size])))
+        .map(|(ty, bound)| {
+            trusted_value(
+                k,
+                m,
+                ty,
+                bound,
+                quote!(#k::pssz::trusted_span::<Self>(bytes, __at, __at + __size, "a member")),
+            )
+        })
         .collect();
     let starts: Vec<_> = (0..types.len()).map(|i| format_ident!("__pssz_start_{i}")).collect();
     let ends: Vec<_> = (0..types.len()).map(|i| format_ident!("__pssz_end_{i}")).collect();
@@ -540,7 +548,7 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
         .zip(&bounds)
         .zip(starts.iter().zip(&ends))
         .map(|((ty, bound), (start, end))| {
-            trusted_as(k, bound, quote!(#k::pssz_checked::trusted_frame_field::<#m, #ty>(bytes, #start, #end)))
+            trusted_as(k, bound, quote!(__frame.value::<#m, #ty>(bytes, #start, #end)))
         })
         .collect();
     let mut rev: Vec<_> = types.iter().zip(&starts).zip(&ends).map(|((t, s), e)| (*t, s.clone(), e.clone())).collect();
@@ -572,7 +580,7 @@ fn record_decode_trusted(k: &syn::Path, fields: &Fields, construct: Tokens, dwnc
         let __width: usize = #width;
         let __known = 0usize #(.saturating_add(#k::pssz_checked::slot::<#m, #types>(__width)))*;
         #[allow(unused_mut)]
-        let mut __frame = #k::pssz_checked::TrustedFrame::begin(__width, __known, #dwnc, bytes);
+        let mut __frame = #k::pssz_checked::TrustedFrame::begin::<Self>(__width, __known, #dwnc, bytes);
         #(let #starts: usize = __frame.field::<#m, #types>(bytes);)*
         #[allow(unused_mut)]
         let mut __end: usize = __frame.finish(__known, bytes);

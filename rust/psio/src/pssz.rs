@@ -525,6 +525,36 @@ pub fn trusted_bytes_invalid(error: PsszError) -> ! {
     panic!("from_pssz_trusted: the bytes are not valid: {error}")
 }
 
+/// A trusted reader was handed bytes that are not a frame of the type: the
+/// frame of `owner` needs `what` at `start..end`, and has `len` bytes.
+///
+/// Every structural failure of a trusted read comes here (or to
+/// [`trusted_bytes_invalid`]): the message names the type and what did not
+/// fit, so that a service reading a damaged or older row of its own table
+/// learns which row type it was. No trusted reader indexes a slice in a way
+/// that can panic with the standard library's message.
+#[doc(hidden)]
+#[cold]
+#[inline(never)]
+#[track_caller]
+pub fn trusted_frame_invalid(owner: &str, what: &str, start: usize, end: usize, len: usize) -> ! {
+    panic!(
+        "from_pssz_trusted: the bytes are not a frame of {owner}: {what} needs bytes {start}..{end} of {len}"
+    )
+}
+
+/// `bytes[start..end]` in a trusted reader of `T`, or
+/// [`trusted_frame_invalid`]. The compare is the one a slice index makes.
+#[doc(hidden)]
+#[inline(always)]
+#[track_caller]
+pub fn trusted_span<'a, T: ?Sized>(bytes: &'a [u8], start: usize, end: usize, what: &'static str) -> &'a [u8] {
+    match bytes.get(start..end) {
+        Some(span) => span,
+        None => trusted_frame_invalid(std::any::type_name::<T>(), what, start, end, bytes.len()),
+    }
+}
+
 /// Structural validator — walks the tree checking everything decode checks,
 /// without materializing.
 pub trait PsszValidate<F: PsszFormat> {
@@ -644,7 +674,7 @@ macro_rules! pssz_impl_primitive_le {
             fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
                 const S: usize = std::mem::size_of::<$ty>();
                 let mut buf = [0u8; S];
-                buf.copy_from_slice(&bytes[..S]);
+                buf.copy_from_slice(trusted_span::<$ty>(bytes, 0, S, "the value"));
                 <$ty>::from_le_bytes(buf)
             }
         }
@@ -788,7 +818,7 @@ impl<F: PsszFormat> PsszUnpack<F> for bool {
     }
     #[inline]
     fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
-        bytes[0] != 0
+        trusted_span::<bool>(bytes, 0, 1, "the value")[0] != 0
     }
 }
 impl<F: PsszFormat> PsszValidate<F> for bool {
@@ -1550,11 +1580,20 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
         }
         let size = T::FIXED_SIZE;
         if T::BULK {
-            if let Some(array) = T::pssz_unpack_bulk_array::<N>(&bytes[..N * size]) {
+            if let Some(array) =
+                T::pssz_unpack_bulk_array::<N>(trusted_span::<Self>(bytes, 0, N.saturating_mul(size), "the elements"))
+            {
                 return array;
             }
         }
-        std::array::from_fn(|index| T::pssz_unpack_trusted(&bytes[index * size..index * size + size]))
+        std::array::from_fn(|index| {
+            T::pssz_unpack_trusted(trusted_span::<Self>(
+                bytes,
+                index.saturating_mul(size),
+                index.saturating_mul(size).saturating_add(size),
+                "an element",
+            ))
+        })
     }
 }
 impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValidate<F> for [T; N] {
@@ -1654,7 +1693,7 @@ fn trusted_sequence<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>>(w: usize, byt
     }
     let offset = |index: usize| -> usize {
         let mut raw = [0u8; 8];
-        raw[..w].copy_from_slice(&bytes[index * w..index * w + w]);
+        raw[..w].copy_from_slice(trusted_span::<Vec<T>>(bytes, index * w, index * w + w, "an offset of the list"));
         u64::from_le_bytes(raw) as usize
     };
     // The first offset is the size of the table. The count is clamped to
@@ -1664,7 +1703,7 @@ fn trusted_sequence<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>>(w: usize, byt
     for index in 0..count {
         let start = offset(index);
         let end = if index + 1 < count { offset(index + 1) } else { bytes.len() };
-        items.push(T::pssz_unpack_trusted(&bytes[start..end]));
+        items.push(T::pssz_unpack_trusted(trusted_span::<Vec<T>>(bytes, start, end, "an element")));
     }
     items
 }
@@ -2130,12 +2169,12 @@ macro_rules! pssz_tuple {
             fn pssz_unpack_trusted(bytes: &[u8]) -> Self {
                 let w = <Self as PsszPack<F>>::OFFSET_WIDTH;
                 let known = 0usize $(.saturating_add(checked::slot::<F, $ty>(w)))*;
-                let mut frame = checked::TrustedFrame::begin(w, known, false, bytes);
+                let mut frame = checked::TrustedFrame::begin::<Self>(w, known, false, bytes);
                 let starts: &[usize] = &[$(frame.field::<F, $ty>(bytes)),*];
                 let variable: &[bool] = &[$(!<$ty as PsszPack<F>>::IS_FIXED_SIZE),*];
                 let tail = frame.finish(known, bytes);
                 let _ = (&starts, &variable, &tail);
-                ($(checked::trusted_frame_field::<F, $ty>(
+                ($(frame.value::<F, $ty>(
                     bytes, starts[$index], checked::field_end(starts, variable, $index, tail)),)*)
             }
         }
@@ -2416,11 +2455,18 @@ pub fn from_pssz<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> PsszResu
 /// function: every slice access is bounds-checked and a `String`'s bytes
 /// are verified to be UTF-8.
 ///
-/// **On bytes that are not valid** it panics, or returns some value of `T`
-/// (which then may be outside a bound or an invariant the checked reader
-/// would have enforced); it never has undefined behaviour. Deeply nested
-/// hostile input can exhaust the stack. Use [`from_pssz`] for anything a
-/// caller, a peer or another service supplied.
+/// **On bytes that are not a frame of `T`** it panics — the contract of a
+/// function that returns `T` and was told the bytes are one — with a
+/// message that names the type and what did not fit
+/// (`from_pssz_trusted: the bytes are not a frame of app::Row: the offset of
+/// a member needs bytes 12..16 of 10`), never with a slice-index message.
+/// Bytes that place every member but are not what a writer of `T` wrote
+/// read as some value of `T` (which then may be outside a bound or an
+/// invariant the checked reader would have enforced). It never has
+/// undefined behaviour and never reads outside `bytes`. Deeply nested
+/// hostile input can exhaust the stack. [`try_from_pssz_trusted`] returns
+/// the structural failure as an error instead; use [`from_pssz`] for
+/// anything a caller, a peer or another service supplied.
 ///
 /// A reader that also skipped the bounds checks and the UTF-8 check would
 /// have to be an `unsafe fn` (`from_pssz_unchecked`); none is provided.
@@ -2429,6 +2475,23 @@ pub fn from_pssz<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> PsszResu
 #[track_caller]
 pub fn from_pssz_trusted<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> T {
     decode_trusted::<Pssz, T>(bytes)
+}
+
+/// [`from_pssz_trusted`] for a caller that handles bytes that are not a frame
+/// of `T` instead of ending on them: a row read from a table whose type has
+/// changed, a row that may be damaged.
+///
+/// The STRUCTURE of the bytes is checked (every offset, span and header, the
+/// canonical-form rules; a `String` is UTF-8) and reported as an error;
+/// nothing `T` DECLARES is (bounds, order, invariants), exactly as the
+/// trusted read. A value the fast write wrote reads back, whatever it
+/// declares. It costs what the validating read costs without the checks of
+/// the declarations: use [`from_pssz_trusted`] where a frame that does not
+/// fit should end the program with its message.
+pub fn try_from_pssz_trusted<T: PsszPack<Pssz> + PsszUnpack<Pssz>>(bytes: &[u8]) -> PsszResult<T> {
+    let _scope = checked::TrustedScope::enter();
+    let _undeclared = checked::Undeclared::enter();
+    T::pssz_unpack(bytes)
 }
 
 /// [`from_pssz_trusted`] for any profile.

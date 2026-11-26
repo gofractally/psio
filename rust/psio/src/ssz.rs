@@ -47,6 +47,14 @@ pub trait SszPack {
 
 /// Decoding trait. `bytes` is the span belonging to exactly this value.
 pub trait SszUnpack: Sized {
+    /// Every sequence of `FIXED_SIZE` bytes is a value of the type: the
+    /// integers, the floats, arrays and packed records of those. What the
+    /// memcpy read paths require besides `FIXED_SIZE == size_of::<Self>()`:
+    /// a `bool` has the size of its encoding and is NOT such a type (a byte
+    /// other than 0 or 1 is not a `bool`), nor is anything that holds one.
+    /// False unless an implementation says otherwise.
+    const ANY_BYTES: bool = false;
+
     fn ssz_unpack(bytes: &[u8]) -> SszResult<Self>;
 }
 
@@ -63,6 +71,7 @@ macro_rules! ssz_impl_primitive_le {
             }
         }
         impl SszUnpack for $ty {
+            const ANY_BYTES: bool = true;
             fn ssz_unpack(bytes: &[u8]) -> SszResult<Self> {
                 const S: usize = std::mem::size_of::<$ty>();
                 if bytes.len() < S {
@@ -87,6 +96,7 @@ impl SszPack for Uint256 {
     }
 }
 impl SszUnpack for Uint256 {
+    const ANY_BYTES: bool = true;
     fn ssz_unpack(bytes: &[u8]) -> SszResult<Self> {
         if bytes.len() < 32 { return Err(SszError("ssz: uint256 underrun")); }
         let mut limb = [0u64; 4];
@@ -222,6 +232,7 @@ impl<T: SszPack, const N: usize> SszPack for [T; N] {
 }
 
 impl<T: SszUnpack + SszPack, const N: usize> SszUnpack for [T; N] {
+    const ANY_BYTES: bool = T::ANY_BYTES;
     fn ssz_unpack(bytes: &[u8]) -> SszResult<Self> {
         // Build a Vec then try_into — avoids requiring T: Default + Copy.
         let v: Vec<T> = if T::IS_FIXED_SIZE {
@@ -232,7 +243,7 @@ impl<T: SszUnpack + SszPack, const N: usize> SszUnpack for [T; N] {
             // Fast path (matches encode): single memcpy into `[T; N]`
             // storage when T's wire and memory layouts coincide.
             #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
+            if T::ANY_BYTES && T::FIXED_SIZE == std::mem::size_of::<T>() {
                 let byte_count = N * T::FIXED_SIZE;
                 let mut out: std::mem::MaybeUninit<[T; N]> = std::mem::MaybeUninit::uninit();
                 // SAFETY: same invariants as the encode fast path — LE
@@ -339,7 +350,7 @@ impl<T: SszUnpack + SszPack> SszUnpack for Vec<T> {
             // `vector::assign(p, p+n)` pattern from the project memory —
             // 2× decode speedup over resize+memcpy.
             #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
+            if T::ANY_BYTES && T::FIXED_SIZE == std::mem::size_of::<T>() {
                 let mut v: Vec<T> = Vec::with_capacity(n);
                 // SAFETY: capacity == n, so the first n * size_of::<T>()
                 // bytes of the allocation are owned and writable. After
@@ -493,7 +504,7 @@ impl<T: SszUnpack + SszPack, const N: usize> SszUnpack for Box<[T; N]> {
             if raw.is_null() { std::alloc::handle_alloc_error(layout); }
 
             #[cfg(target_endian = "little")]
-            if T::FIXED_SIZE == std::mem::size_of::<T>() {
+            if T::ANY_BYTES && T::FIXED_SIZE == std::mem::size_of::<T>() {
                 // Fast path: whole array is a single memcpy from wire.
                 std::ptr::copy_nonoverlapping(
                     bytes.as_ptr(), raw as *mut u8, N * es);

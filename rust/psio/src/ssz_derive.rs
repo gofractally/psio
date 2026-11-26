@@ -110,6 +110,8 @@ macro_rules! ssz_struct_dwnc {
             }
         }
         impl $crate::ssz::SszUnpack for $Ty {
+            // (A record of members that are each any bytes.)
+            const ANY_BYTES: bool = true $( && <$FTy as $crate::ssz::SszUnpack>::ANY_BYTES )+;
             fn ssz_unpack(bytes: &[u8]) -> $crate::ssz::SszResult<Self> {
                 if bytes.len() < <Self as $crate::ssz::SszPack>::FIXED_SIZE {
                     return Err($crate::ssz::SszError("ssz dwnc: underrun"));
@@ -118,7 +120,9 @@ macro_rules! ssz_struct_dwnc {
                 // as pack). Reads wire bytes directly into a freshly
                 // allocated `Self` on the stack via MaybeUninit.
                 #[cfg(target_endian = "little")]
-                if ::core::mem::size_of::<Self>() == <Self as $crate::ssz::SszPack>::FIXED_SIZE {
+                if <Self as $crate::ssz::SszUnpack>::ANY_BYTES
+                    && ::core::mem::size_of::<Self>() == <Self as $crate::ssz::SszPack>::FIXED_SIZE
+                {
                     let fs = <Self as $crate::ssz::SszPack>::FIXED_SIZE;
                     let mut out: ::core::mem::MaybeUninit<Self> =
                         ::core::mem::MaybeUninit::uninit();

@@ -199,8 +199,9 @@ impl<'a> WitView<'a> {
         let str_off = self.read_u32(field_offset);
         let str_len = self.read_u32(field_offset + 4);
 
-        let end = str_off + str_len;
-        if end as usize > self.base.len() {
+        // (In u64: a pointer and a length from the bytes can sum past u32.)
+        let end = str_off as u64 + str_len as u64;
+        if end > self.base.len() as u64 {
             return Err(WitViewError::StringOutOfBounds {
                 offset: str_off,
                 length: str_len,
@@ -220,8 +221,9 @@ impl<'a> WitView<'a> {
         let str_off = self.read_u32(field_offset);
         let str_len = self.read_u32(field_offset + 4);
 
-        let end = str_off + str_len;
-        if end as usize > self.base.len() {
+        // (In u64: a pointer and a length from the bytes can sum past u32.)
+        let end = str_off as u64 + str_len as u64;
+        if end > self.base.len() as u64 {
             return Err(WitViewError::StringOutOfBounds {
                 offset: str_off,
                 length: str_len,

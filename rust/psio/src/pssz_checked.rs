@@ -1098,14 +1098,18 @@ pub struct TrustedFrame {
     fixed_size: usize,
     cursor: usize,
     w: usize,
+    // The record being read: what a frame that does not fit is reported as.
+    owner: fn() -> &'static str,
 }
 impl TrustedFrame {
+    /// The frame of a record of type `R`.
     #[inline(always)]
-    pub fn begin(w: usize, known: usize, dwnc: bool, bytes: &[u8]) -> Self {
+    pub fn begin<R: ?Sized>(w: usize, known: usize, dwnc: bool, bytes: &[u8]) -> Self {
+        let owner: fn() -> &'static str = std::any::type_name::<R>;
         if dwnc {
-            Self { fixed_start: 0, fixed_size: known, cursor: 0, w }
+            Self { fixed_start: 0, fixed_size: known, cursor: 0, w, owner }
         } else {
-            Self { fixed_start: w, fixed_size: trusted_offset(bytes, 0, w), cursor: 0, w }
+            Self { fixed_start: w, fixed_size: trusted_offset(owner, "the header", bytes, 0, w), cursor: 0, w, owner }
         }
     }
     /// Where the next field starts, or [`ABSENT`] when the writer's fixed
@@ -1122,7 +1126,8 @@ impl TrustedFrame {
         if T::IS_FIXED_SIZE {
             at
         } else {
-            self.fixed_start.saturating_add(trusted_offset(bytes, at, self.w))
+            self.fixed_start
+                .saturating_add(trusted_offset(self.owner, "the offset of a member", bytes, at, self.w))
         }
     }
     /// Where the last variable field the reader knows ends: at the payload
@@ -1130,38 +1135,56 @@ impl TrustedFrame {
     #[inline(always)]
     pub fn finish(&self, known: usize, bytes: &[u8]) -> usize {
         if self.fixed_size > known {
-            self.fixed_start
-                .saturating_add(trusted_offset(bytes, self.fixed_start.saturating_add(known), self.w))
+            self.fixed_start.saturating_add(trusted_offset(
+                self.owner,
+                "the offset of a member",
+                bytes,
+                self.fixed_start.saturating_add(known),
+                self.w,
+            ))
         } else {
             bytes.len()
         }
     }
+    /// A field of the record, read from `start..end`. A span that is not in
+    /// `bytes`, and a required member the writer's frame does not have,
+    /// are reported as bytes that are not a frame of the record.
+    #[inline(always)]
+    pub fn value<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(&self, bytes: &[u8], start: usize, end: usize) -> T {
+        if start == ABSENT {
+            return match T::pssz_missing_optional() {
+                Ok(value) => value,
+                Err(_) => crate::pssz::trusted_frame_invalid(
+                    (self.owner)(),
+                    "a required member the frame does not have",
+                    self.fixed_start.saturating_add(self.fixed_size),
+                    self.fixed_start.saturating_add(self.fixed_size).saturating_add(slot::<F, T>(self.w)),
+                    bytes.len(),
+                ),
+            };
+        }
+        let end = if T::IS_FIXED_SIZE { start.saturating_add(T::FIXED_SIZE) } else { end };
+        match bytes.get(start..end) {
+            Some(span) => T::pssz_unpack_trusted(span),
+            None => crate::pssz::trusted_frame_invalid((self.owner)(), "a member", start, end, bytes.len()),
+        }
+    }
 }
 
-/// The offset `w` bytes wide at `at`. Panics when it is not in `bytes`.
+/// The offset `w` bytes wide at `at`, or the panic of a frame of `owner`
+/// that does not hold it.
 #[inline(always)]
-pub fn trusted_offset(bytes: &[u8], at: usize, w: usize) -> usize {
-    let slot = &bytes[at..][..w];
+pub fn trusted_offset(owner: fn() -> &'static str, what: &'static str, bytes: &[u8], at: usize, w: usize) -> usize {
+    let slot = match bytes.get(at..at.saturating_add(w)) {
+        Some(slot) => slot,
+        None => crate::pssz::trusted_frame_invalid(owner(), what, at, at.saturating_add(w), bytes.len()),
+    };
     match w {
         1 => slot[0] as usize,
         2 => u16::from_le_bytes([slot[0], slot[1]]) as usize,
         4 => u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]) as usize,
         _ => crate::pssz::trusted_bytes_invalid(PsszError::new("pssz: unsupported offset/header width")),
     }
-}
-
-/// Field of a record read through a [`TrustedFrame`]. Panics when the span
-/// is not in `bytes`.
-#[inline(always)]
-pub fn trusted_frame_field<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8], start: usize, end: usize) -> T {
-    if start == ABSENT {
-        return match T::pssz_missing_optional() {
-            Ok(value) => value,
-            Err(error) => crate::pssz::trusted_bytes_invalid(error),
-        };
-    }
-    let end = if T::IS_FIXED_SIZE { start.saturating_add(T::FIXED_SIZE) } else { end };
-    T::pssz_unpack_trusted(&bytes[start..end])
 }
 
 /// Stack-array frame resolution for generated record readers. Reports

@@ -231,7 +231,7 @@ pub use key::{
     from_key, from_key_trusted, key_size, to_key, to_key_into, try_to_key, try_to_key_into, validate_key,
 };
 pub use pssz::{
-    from_pssz, from_pssz_trusted, pssz_size, to_pssz, to_pssz_into, try_to_pssz, try_to_pssz_into,
+    from_pssz, from_pssz_trusted, try_from_pssz_trusted, pssz_size, to_pssz, to_pssz_into, try_to_pssz, try_to_pssz_into,
     validate_pssz,
     Pssz, PsszBuffer, SharedPssz,
 };
