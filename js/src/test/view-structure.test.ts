@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PsszError, list, optional, record, u32, u64, utf8, type ListView, type RecordView,
+  PsszError, bool, list, nested, optional, record, u32, u64, utf8, type ListView, type RecordView,
 } from '../index.js';
 
 const Wide = record('VsWide', { id: u32, a: utf8, b: list(u64), c: optional(utf8) });
@@ -95,4 +95,66 @@ test('view: every truncation and single-byte corruption reads inside the bytes o
   for (let i = 0; i + 1 < good.length; ++i) probe(withBytes(good, [[i, 0xff], [i + 1, 0xff]]));
   assert.ok(failed > 100, `failed ${failed}`);
   assert.ok(read > 0, `read ${read}`);
+});
+
+test('validating an outer value validates a nested member as its type', () => {
+  // What a node relies on when it reads a message off the network: the
+  // validating read of the outer value validates a `nested(T)` member as a
+  // T. `nested(T, { deferred: true })` is the documented exception.
+  const Header = record('VsHeader', { num: u32, producer: utf8, xs: list(u64) });
+  const Block = record('VsBlock', { header: Header, trx: list(utf8), sig: optional(utf8), final: bool });
+  const block = (n: number) => ({ header: { num: n, producer: 'prod', xs: [1n, 2n, 3n] }, trx: ['a', 'bb'], sig: 'sig', final: true });
+  const inner = Block.encode(block(7));
+  const find = (outer: Uint8Array): number => {
+    for (let at = 0; at + inner.length <= outer.length; ++at)
+      if (inner.every((byte, i) => outer[at + i] === byte)) return at;
+    throw new Error('the member bytes are not in the outer frame');
+  };
+  const mutations = (Outer: { validate(b: Uint8Array): { ok: boolean }; decode(b: Uint8Array): unknown }, good: Uint8Array, validated: boolean) => {
+    const pos = find(good);
+    assert.ok(Outer.validate(good).ok);
+    let tried = 0;
+    let accepted = 0;
+    let memberRefused = 0;
+    let seed = pos * 1000003 + inner.length;
+    const random = (): number => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) >> 16 & 0xff;
+    for (let i = 0; i < inner.length; ++i)
+      for (const v of [0xff, 0x00, 0x7f, random(), random(), random()]) {
+        if (good[pos + i] === v) continue;
+        const bad = good.slice();
+        bad[pos + i] = v;
+        ++tried;
+        const innerValid = Block.validate(bad.slice(pos, pos + inner.length)).ok;
+        const outerValid = Outer.validate(bad).ok;
+        let decoded = true;
+        try {
+          Outer.decode(bad);
+        } catch (e) {
+          assert.ok(e instanceof PsszError, `${e}`);
+          decoded = false;
+        }
+        if (validated) assert.equal(outerValid, innerValid, `byte ${i} set to ${v}`);
+        else assert.ok(outerValid, `deferred: byte ${i} set to ${v}`);
+        assert.equal(decoded, outerValid, `byte ${i} set to ${v}`);
+        if (outerValid) ++accepted;
+        if (!innerValid) ++memberRefused;
+      }
+    return { tried, accepted, memberRefused };
+  };
+  const InNested = record('VsInNested', { kind: u32, packed: nested(Block), after: utf8 });
+  const InOptional = record('VsInOptional', { kind: u32, packed: optional(nested(Block)), after: utf8 });
+  const InList = record('VsInList', { kind: u32, packed: list(nested(Block)), after: utf8 });
+  for (const t of [
+    mutations(InNested, InNested.encode({ kind: 1, packed: block(7), after: 'z' }), true),
+    mutations(InOptional, InOptional.encode({ kind: 1, packed: block(7), after: 'z' }), true),
+    mutations(InList, InList.encode({ kind: 1, packed: [block(1), block(7), block(3)], after: 'z' }), true),
+  ]) {
+    assert.ok(t.tried > 150, `${t.tried}`);
+    assert.ok(t.accepted > 0 && t.memberRefused > 0 && t.accepted + t.memberRefused === t.tried, JSON.stringify(t));
+  }
+  // The exception: a deferred member's bytes are not looked at.
+  const InDeferred = record('VsInDeferred', { kind: u32, packed: nested(Block, { deferred: true }), after: utf8 });
+  const d = mutations(InDeferred, InDeferred.encode({ kind: 1, packed: inner, after: 'z' }), false);
+  assert.equal(d.accepted, d.tried);
+  assert.ok(d.memberRefused > 0);
 });

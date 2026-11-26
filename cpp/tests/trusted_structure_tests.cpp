@@ -29,6 +29,7 @@
 
 #include <catch.hpp>
 
+#include <algorithm>
 #include <array>
 #include <map>
 #include <set>
@@ -733,4 +734,160 @@ TEST_CASE("canonical ABI: views on bytes that are not a frame",
    const tally t = mutations<TsRow>(psio::wit{}, psio::to_wit(row()), 6, false);
    CHECK(t.failed > t.tried / 10);
    CHECK(t.value > 0);
+}
+
+// ── A packed member is validated as its type ────────────────────────────────
+//
+// What a node relies on when it reads a message off the network: the outer
+// message is read with the validating `from_pssz`, and its packed members
+// (`psio::shared_pssz<Block>`) are then walked through trusted views with no
+// further check. So validating the outer value must validate every packed
+// member as ITS type: `validate_pssz<Outer>` accepts a frame exactly when
+// `validate_pssz<T>` accepts the member's bytes inside it.
+// `psio::nested<T, psio::nested_validation::deferred>` is the documented
+// exception: nothing looks at its bytes until its holder asks.
+namespace
+{
+   struct TsHeader
+   {
+      std::uint32_t              num = 0;
+      std::string                producer;
+      std::vector<std::uint64_t> xs;
+      friend bool                operator==(const TsHeader&, const TsHeader&) = default;
+      PSIO_REFLECT(TsHeader, num, producer, xs)
+   };
+   struct TsBlock
+   {
+      TsHeader                   header;
+      std::vector<std::string>   trx;
+      std::optional<std::string> sig;
+      bool                       final = false;
+      friend bool                operator==(const TsBlock&, const TsBlock&) = default;
+      PSIO_REFLECT(TsBlock, header, trx, sig, final)
+   };
+   TsBlock block(std::uint32_t n) { return TsBlock{{n, "prod", {1, 2, 3}}, {"a", "bb"}, "sig", true}; }
+
+#define TS_HOLDER(NAME, MEMBER)                 \
+   struct NAME                                  \
+   {                                            \
+      std::uint32_t kind = 0;                   \
+      MEMBER        packed;                     \
+      std::string   after;                      \
+      PSIO_REFLECT(NAME, kind, packed, after)   \
+   };
+   TS_HOLDER(TsInBuffer, psio::pssz_buffer<TsBlock>)
+   TS_HOLDER(TsInShared, psio::shared_pssz<TsBlock>)
+   TS_HOLDER(TsInOptional, std::optional<psio::shared_pssz<TsBlock>>)
+   TS_HOLDER(TsInList, std::vector<psio::shared_pssz<TsBlock>>)
+   TS_HOLDER(TsInNested, psio::nested<TsBlock>)
+   using TsDeferredBlock = psio::nested<TsBlock, psio::nested_validation::deferred>;
+   TS_HOLDER(TsInDeferred, TsDeferredBlock)
+#undef TS_HOLDER
+
+   // The view of the packed value inside a packed member's view.
+   template <typename V>
+   auto packed_view(const V& member)
+   {
+      if constexpr (requires { member.has_value(); })
+         return (*member).get();
+      else if constexpr (requires { member.size(); member[0]; })
+         return member[1].get();
+      else
+         return member.get();
+   }
+
+   struct packed_tally
+   {
+      std::size_t mutations = 0, accepted = 0, refused = 0;
+   };
+
+   // Every byte of the packed member, inside the outer frame, set to ff / 00
+   // / 7f and to three random values.
+   template <typename Outer>
+   packed_tally packed_member_mutations(const Outer& value, const TsBlock& inner_value, bool validated)
+   {
+      const auto              good_bytes = psio::to_pssz(value);
+      const auto              inner      = psio::to_pssz(inner_value);
+      const std::vector<char> good(good_bytes.begin(), good_bytes.end());
+      const auto found = std::search(good.begin(), good.end(), inner.begin(), inner.end());
+      REQUIRE(found != good.end());
+      const std::size_t pos = static_cast<std::size_t>(found - good.begin());
+      REQUIRE(psio::validate_pssz<Outer>(good).ok());
+
+      packed_tally    t;
+      std::mt19937_64 rng{pos * 1000003 + inner.size()};
+      for (std::size_t i = 0; i < inner.size(); ++i)
+         for (int which = 0; which < 6; ++which)
+         {
+            const int v = which == 0   ? 0xff
+                          : which == 1 ? 0x00
+                          : which == 2 ? 0x7f
+                                       : static_cast<int>(rng() & 0xff);
+            if (static_cast<unsigned char>(good[pos + i]) == v)
+               continue;
+            std::vector<char> bad = good;
+            bad[pos + i]          = static_cast<char>(v);
+            ++t.mutations;
+            const exact_bytes member{std::span<const char>{bad.data() + pos, inner.size()}};
+            const exact_bytes outer{bad};
+            const bool        inner_valid = psio::validate_pssz<TsBlock>(member.span()).ok();
+            const bool        outer_valid = psio::validate_pssz<Outer>(outer.span()).ok();
+            bool              threw       = false;
+            try
+            {
+               const Outer decoded = psio::from_pssz<Outer>(outer.span());
+               // What the validating read accepted is walked through the
+               // trusted view of the packed member with no further check:
+               // it must be a frame of the member's type.
+               if (validated)
+               {
+                  const auto view = psio::pssz_trusted_view<Outer>{psio::trusted{outer.span()}};
+                  walker     w;
+                  w.begin = outer.span().data();
+                  w.end   = w.begin + outer.span().size();
+                  w.template value<TsBlock>(packed_view(view.packed()));
+                  REQUIRE(w.inside);
+               }
+            }
+            catch (const psio::codec_exception&)
+            {
+               threw = true;
+            }
+            INFO("byte " << i << " of the packed member set to " << v);
+            if (validated)
+               REQUIRE(outer_valid == inner_valid);
+            else
+               REQUIRE(outer_valid);  // deferred: the member's bytes are not looked at
+            REQUIRE(threw == !outer_valid);
+            (outer_valid ? t.accepted : t.refused) += 1;
+            if (!validated && !inner_valid)
+               ++t.refused;  // (counted: frames the outer accepted whose member is not a frame)
+         }
+      return t;
+   }
+}  // namespace
+
+TEST_CASE("validating an outer value validates a packed member as its type",
+          "[nested][trusted_structure]")
+{
+   const TsBlock b = block(7);
+   const auto    check = [](const packed_tally& t) {
+      CHECK(t.mutations > 150);
+      CHECK(t.accepted > 0);
+      CHECK(t.refused > 0);
+   };
+   check(packed_member_mutations(TsInBuffer{1, psio::pssz_buffer<TsBlock>{b}, "z"}, b, true));
+   check(packed_member_mutations(TsInShared{1, psio::shared_pssz<TsBlock>{b}, "z"}, b, true));
+   check(packed_member_mutations(TsInOptional{1, psio::shared_pssz<TsBlock>{b}, "z"}, b, true));
+   check(packed_member_mutations(
+      TsInList{1, {psio::shared_pssz<TsBlock>{block(1)}, psio::shared_pssz<TsBlock>{b}, psio::shared_pssz<TsBlock>{block(3)}}, "z"},
+      b, true));
+   check(packed_member_mutations(TsInNested{1, psio::nested<TsBlock>{b}, "z"}, b, true));
+   // The exception: a deferred nested member is not validated with its
+   // holder. Every mutation of its bytes is accepted by the outer read; the
+   // holder validates it (`member.validate()`) before reading through it.
+   const packed_tally deferred = packed_member_mutations(
+      TsInDeferred{1, psio::nested<TsBlock, psio::nested_validation::deferred>{b}, "z"}, b, false);
+   CHECK(deferred.accepted == deferred.mutations);
+   CHECK(deferred.refused > 0);
 }

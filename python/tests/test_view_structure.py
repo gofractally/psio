@@ -8,7 +8,7 @@ never a read outside the bytes.  These are the cases of the C++ test
 
 import unittest
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 import psio
 from psio import u32, u64
@@ -126,6 +126,107 @@ class ViewStructure(unittest.TestCase):
                     pass
         self.assertGreater(failed, 100)
         self.assertGreater(read, 0)
+
+
+@dataclass
+class Header:
+    num: u32
+    producer: str
+    xs: List[u64]
+
+
+@dataclass
+class Block:
+    header: Header
+    trx: List[str]
+    sig: Optional[str]
+    final: bool
+
+
+@dataclass
+class InNested:
+    kind: u32
+    packed: Annotated[Block, psio.nested()]
+    after: str
+
+
+@dataclass
+class InOptional:
+    kind: u32
+    packed: Optional[Annotated[Block, psio.nested()]]
+    after: str
+
+
+@dataclass
+class InList:
+    kind: u32
+    packed: List[Annotated[Block, psio.nested()]]
+    after: str
+
+
+@dataclass
+class InDeferred:
+    kind: u32
+    packed: Annotated[bytes, psio.nested(Block, deferred=True)]
+    after: str
+
+
+def block(n: int) -> Block:
+    return Block(Header(n, "prod", [1, 2, 3]), ["a", "bb"], "sig", True)
+
+
+class PackedMembers(unittest.TestCase):
+    """What a node relies on when it reads a message off the network: the validating read of the
+    outer value validates a nested member as its type.  A deferred nested member is the documented
+    exception."""
+
+    def mutations(self, outer_type, good: bytes, validated: bool):
+        inner = psio.to_pssz(block(7))
+        pos = good.index(inner)
+        self.assertTrue(psio.validate_pssz(outer_type, good).ok)
+        tried = accepted = member_refused = 0
+        seed = pos * 1000003 + len(inner)
+        for i in range(len(inner)):
+            values = [0xFF, 0x00, 0x7F]
+            for _ in range(3):
+                seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
+                values.append((seed >> 16) & 0xFF)
+            for v in values:
+                if good[pos + i] == v:
+                    continue
+                bad = edited(good, (pos + i, v))
+                tried += 1
+                inner_valid = psio.validate_pssz(Block, bad[pos:pos + len(inner)]).ok
+                outer_valid = psio.validate_pssz(outer_type, bad).ok
+                try:
+                    psio.from_pssz(outer_type, bad)
+                    decoded = True
+                except psio.DecodeError:
+                    decoded = False
+                if validated:
+                    self.assertEqual(outer_valid, inner_valid, f"byte {i} set to {v}")
+                else:
+                    self.assertTrue(outer_valid, f"deferred: byte {i} set to {v}")
+                self.assertEqual(decoded, outer_valid, f"byte {i} set to {v}")
+                accepted += outer_valid
+                member_refused += not inner_valid
+        return tried, accepted, member_refused
+
+    def test_validating_an_outer_value_validates_a_nested_member_as_its_type(self) -> None:
+        for outer_type, value in ((InNested, InNested(1, block(7), "z")),
+                                  (InOptional, InOptional(1, block(7), "z")),
+                                  (InList, InList(1, [block(1), block(7), block(3)], "z"))):
+            with self.subTest(outer_type.__name__):
+                tried, accepted, refused = self.mutations(outer_type, psio.to_pssz(value), True)
+                self.assertGreater(tried, 150)
+                self.assertGreater(accepted, 0)
+                self.assertGreater(refused, 0)
+                self.assertEqual(accepted + refused, tried)
+        # The exception: a deferred member's bytes are not looked at.
+        deferred = InDeferred(1, psio.to_pssz(block(7)), "z")
+        tried, accepted, refused = self.mutations(InDeferred, psio.to_pssz(deferred), False)
+        self.assertEqual(accepted, tried)
+        self.assertGreater(refused, 0)
 
 
 if __name__ == "__main__":

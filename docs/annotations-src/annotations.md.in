@@ -1867,6 +1867,23 @@ bytes only:
 | Rust `from_capnp_trusted` (and `from_capnp`) | safe (no `unsafe` on the path), but **open**: the typed read can panic with a slice message, or walk a count the message does not back |
 | TypeScript `T.view(bytes)` (lazy), Python `psio.pssz_view`, `psio.from_pssz(T, psio.trusted(data))` | 1, 2, 3: `PsszError` of kind `bytes` / `DecodeError`, when the member is read |
 
+**Bytes that validate are a frame.** A view of either kind and the trusted
+decode never fail on bytes `validate_F<T>` accepted, whatever else those
+bytes are (a newer writer's unknown trailing fields, pruned trailing
+optionals), and read inside them. Validating an outer value validates a
+packed member (`psio::pssz_buffer<T>`, `psio::shared_pssz<T>`, an optional
+or a list of them, `psio::nested<T>`) as a `T`, so a message read with the
+validating `from_pssz` may have its packed members walked through trusted
+views with no further check. `psio::nested<T,
+psio::nested_validation::deferred>` (Rust `Nested<T, Deferred>`, TypeScript
+`nested(T, { deferred: true })`, Python `psio.nested(T, deferred=True)`) is
+the exception: its bytes are not looked at until its holder validates them.
+(`cpp/tests/accepted_frames_probe.cpp` walks every accepted frame of a
+mutation corpus; the pssz validator accepts no frame that is not the
+canonical bytes of its value apart from unknown trailing fields. The ssz
+and canonical-ABI validators accept a `bool` byte other than 0 / 1, which
+their views read as true.)
+
 `cpp/tests/trusted_structure_tests.cpp` (also built with AddressSanitizer
 and UndefinedBehaviorSanitizer), `rust/psio/tests/trusted_structure.rs`,
 `js/src/test/view-structure.test.ts` and

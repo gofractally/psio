@@ -995,6 +995,26 @@ if(PSIO_HAVE_ASAN_UBSAN)
    target_link_options(psio_trusted_structure_tests_sanitized PRIVATE -fsanitize=address,undefined)
 endif()
 
+# Views and the trusted decode over frames the validator ACCEPTS (what a node
+# walks after validating a network message once): random values, every
+# single-byte change of a few of them and random edits; every accepted frame
+# is walked through both kinds of view and the trusted decode. A small run
+# here; `psio_accepted_frames_probe 200 5000` walks about two million.
+add_executable(psio_accepted_frames_probe accepted_frames_probe.cpp)
+target_link_libraries(psio_accepted_frames_probe PRIVATE psio)
+target_compile_features(psio_accepted_frames_probe PRIVATE cxx_std_23)
+add_test(NAME psio_accepted_frames_probe COMMAND psio_accepted_frames_probe 3 300)
+if(PSIO_HAVE_ASAN_UBSAN)
+   add_executable(psio_accepted_frames_probe_sanitized accepted_frames_probe.cpp)
+   target_link_libraries(psio_accepted_frames_probe_sanitized PRIVATE psio)
+   target_compile_features(psio_accepted_frames_probe_sanitized PRIVATE cxx_std_23)
+   target_compile_options(psio_accepted_frames_probe_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_accepted_frames_probe_sanitized PRIVATE -fsanitize=address,undefined)
+   add_test(NAME psio_accepted_frames_probe_sanitized
+            COMMAND psio_accepted_frames_probe_sanitized 3 300)
+endif()
+
 # The schema-text parsers (fbs_parser.hpp, capnp_parser.hpp) on arbitrary
 # text: every prefix and every byte of the test schemas, random edits, random
 # bytes, inputs built to exhaust a parser. Again with the sanitizers.

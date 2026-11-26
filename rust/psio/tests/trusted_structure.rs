@@ -537,3 +537,133 @@ fn capnp_reads_a_list_of_another_element_size() {
     ];
     assert!(psio::from_capnp::<Message>(BYTES).is_err());
 }
+
+// ── A packed member is validated as its type ────────────────────────────────
+//
+// What a node relies on when it reads a message off the network (C++
+// `trusted_structure_tests.cpp`, "validating an outer value validates a
+// packed member as its type"): the validating read of the outer value
+// validates a `Nested<T>` member as a `T`. `Nested<T, Deferred>` is the
+// documented exception.
+mod packed {
+    use psio::pssz::{Deferred, Nested};
+
+    #[derive(Debug, Clone, PartialEq, Default, psio::PsszPack, psio::PsszUnpack)]
+    pub struct Header {
+        pub num: u32,
+        pub producer: String,
+        pub xs: Vec<u64>,
+    }
+    #[derive(Debug, Clone, PartialEq, Default, psio::PsszPack, psio::PsszUnpack)]
+    pub struct Block {
+        pub header: Header,
+        pub trx: Vec<String>,
+        pub sig: Option<String>,
+        pub is_final: bool,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    pub struct InNested {
+        pub kind: u32,
+        pub packed: Nested<Block>,
+        pub after: String,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    pub struct InOptional {
+        pub kind: u32,
+        pub packed: Option<Nested<Block>>,
+        pub after: String,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    pub struct InList {
+        pub kind: u32,
+        pub packed: Vec<Nested<Block>>,
+        pub after: String,
+    }
+    #[derive(Debug, Clone, PartialEq, psio::PsszPack, psio::PsszUnpack)]
+    pub struct InDeferred {
+        pub kind: u32,
+        pub packed: Nested<Block, Deferred>,
+        pub after: String,
+    }
+    pub fn block(n: u32) -> Block {
+        Block {
+            header: Header { num: n, producer: "prod".into(), xs: vec![1, 2, 3] },
+            trx: vec!["a".into(), "bb".into()],
+            sig: Some("sig".into()),
+            is_final: true,
+        }
+    }
+}
+
+/// Every byte of the packed member, inside the outer frame, set to ff / 00 /
+/// 7f and to three other values: (mutations, outer accepted, member refused).
+fn packed_member_mutations<Outer>(good: &[u8], inner: &[u8], validated: bool) -> (usize, usize, usize)
+where
+    Outer: psio::pssz::PsszPack<psio::Pssz> + psio::pssz::PsszUnpack<psio::Pssz> + psio::pssz::PsszValidate<psio::Pssz>,
+{
+    let pos = good.windows(inner.len()).position(|window| window == inner).expect("the member's bytes are in the outer frame");
+    assert!(psio::validate_pssz::<Outer>(good).is_ok());
+    let mut rng = Rng(pos as u64 * 1_000_003 + inner.len() as u64);
+    let (mut mutations, mut accepted, mut member_refused) = (0, 0, 0);
+    for i in 0..inner.len() {
+        for which in 0..6 {
+            let v = match which {
+                0 => 0xff,
+                1 => 0x00,
+                2 => 0x7f,
+                _ => rng.next() as u8,
+            };
+            if good[pos + i] == v {
+                continue;
+            }
+            let mut bad = good.to_vec();
+            bad[pos + i] = v;
+            mutations += 1;
+            let inner_valid = psio::validate_pssz::<packed::Block>(&bad[pos..pos + inner.len()]).is_ok();
+            let outer_valid = psio::validate_pssz::<Outer>(&bad).is_ok();
+            let decoded = psio::from_pssz::<Outer>(&bad).is_ok();
+            if validated {
+                assert_eq!(outer_valid, inner_valid, "byte {i} of the packed member set to {v:#x}");
+            } else {
+                assert!(outer_valid, "deferred: byte {i} set to {v:#x}");
+            }
+            assert_eq!(decoded, outer_valid, "byte {i} of the packed member set to {v:#x}");
+            accepted += outer_valid as usize;
+            member_refused += !inner_valid as usize;
+        }
+    }
+    (mutations, accepted, member_refused)
+}
+
+#[test]
+fn validating_an_outer_value_validates_a_packed_member_as_its_type() {
+    use packed::*;
+    use psio::pssz::Nested;
+    let b = block(7);
+    let inner = psio::to_pssz(&b);
+    let nested = |n: u32| Nested::<Block>::new(&block(n)).unwrap();
+    let check = |(mutations, accepted, refused): (usize, usize, usize)| {
+        assert!(mutations > 150, "{mutations}");
+        assert!(accepted > 0 && refused > 0 && accepted + refused == mutations, "{accepted} + {refused} of {mutations}");
+    };
+    check(packed_member_mutations::<InNested>(
+        &psio::to_pssz(&InNested { kind: 1, packed: nested(7), after: "z".into() }),
+        &inner,
+        true,
+    ));
+    check(packed_member_mutations::<InOptional>(
+        &psio::to_pssz(&InOptional { kind: 1, packed: Some(nested(7)), after: "z".into() }),
+        &inner,
+        true,
+    ));
+    check(packed_member_mutations::<InList>(
+        &psio::to_pssz(&InList { kind: 1, packed: vec![nested(1), nested(7), nested(3)], after: "z".into() }),
+        &inner,
+        true,
+    ));
+    // The exception: a deferred member's bytes are not looked at.
+    let deferred = InDeferred { kind: 1, packed: psio::pssz::Nested::<Block, psio::pssz::Deferred>::new(&b).unwrap(), after: "z".into() };
+    let (mutations, accepted, refused) = packed_member_mutations::<InDeferred>(&psio::to_pssz(&deferred), &inner, false);
+    assert_eq!(accepted, mutations);
+    assert!(refused > 0);
+}
