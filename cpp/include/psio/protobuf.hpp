@@ -1394,8 +1394,12 @@ namespace psio
       template <typename T>
       friend T tag_invoke(decltype(::psio::decode<T>), protobuf, T*, std::span<const char> bytes)
       {
+         // The TRUSTED read (from_protobuf(psio::trusted{bytes})): the reader
+         // parses as it always does — protobuf has no cheaper way to find
+         // its fields — and the value is not held against what T declares.
+         // from_protobuf(bytes) is the validating read (decode_checked).
          T out{};
-         if (auto st = read_checked(bytes, out, limits{}.max_depth); !st.ok())
+         if (auto st = detail::pb_impl::read_root(bytes, &out, limits{}.max_depth); !st.ok())
             ::psio::codec_abort(st.error());
          return out;
       }

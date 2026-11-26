@@ -96,7 +96,7 @@ namespace
       if (ok)
          CHECK(psio::encode(Fmt{}, psio::decode<LbRec>(Fmt{}, bytes)) == bytes);
       else
-         CHECK_THROWS_AS(psio::decode<LbRec>(Fmt{}, bytes), psio::codec_exception);
+         CHECK_THROWS_AS(psio_test::decode_validated<LbRec>(Fmt{}, bytes), psio::codec_exception);
       // Every checked entry point agrees with validate.
       CHECK(psio::validate_strict<LbRec>(Fmt{}, bytes).ok() == ok);
       LbRec out;
@@ -179,7 +179,7 @@ TEST_CASE("pssz length_bound violation reports its own error", "[pssz][length_bo
    // The fail-fast decode enforces the bound too, with the same message.
    try
    {
-      (void)psio::decode<LbRec>(psio::pssz32{}, bytes);
+      (void)psio_test::decode_validated<LbRec>(psio::pssz32{}, bytes);
       FAIL("decode accepted a member outside its length_bound");
    }
    catch (const psio::codec_exception& e)

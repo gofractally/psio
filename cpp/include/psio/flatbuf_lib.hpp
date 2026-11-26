@@ -298,29 +298,14 @@ namespace psio {
          return fbb.GetSize();
       }
 
-      template <typename T>
-         requires detail::flatbuf_lib_impl::is_table<T>::value
-      friend codec_status tag_invoke(decltype(::psio::validate<T>),
-                                     flatbuf_lib, T*,
-                                     std::span<const char> bytes) noexcept
-      {
-         if (bytes.size() < 4)
-            return codec_fail("flatbuf_lib: buffer too small", 0,
-                              "flatbuf_lib");
-         return codec_ok();
-      }
-
-      template <typename T>
-         requires detail::flatbuf_lib_impl::is_table<T>::value
-      friend codec_status
-      tag_invoke(decltype(::psio::validate_strict<T>), flatbuf_lib, T*,
-                 std::span<const char> bytes) noexcept
-      {
-         if (bytes.size() < 4)
-            return codec_fail("flatbuf_lib: buffer too small", 0,
-                              "flatbuf_lib");
-         return codec_ok();
-      }
+      // No `validate`: this adapter has no verifier of its own (it used to
+      // answer "ok" for any buffer of four bytes, which is not a
+      // validation). Its bytes are FlatBuffers, the format psio::flatbuf
+      // implements: validate a buffer with psio::validate_flatbuf<T>(bytes)
+      // (psio/flatbuf.hpp), which checks the structure and what T declares.
+      // So there is no validate_flatbuf_lib and no from_flatbuf_lib(bytes);
+      // psio::decode / from_flatbuf_lib(psio::trusted{bytes}) read bytes the
+      // caller vouches for.
 
       template <typename T>
          requires detail::flatbuf_lib_impl::is_table<T>::value

@@ -19,6 +19,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -394,7 +396,7 @@ TEST_CASE("a member's length_bound is enforced when a key is read", "[key][bound
       REQUIRE_FALSE(status.ok());
       CHECK(status.error().what.find("length_bound") !=
             std::string_view::npos);
-      CHECK_THROWS(psio::decode<Bounded>(psio::key{}, std::span<const char>{*bad}));
+      CHECK_THROWS(psio_test::decode_validated<Bounded>(psio::key{}, std::span<const char>{*bad}));
    }
    // pssz reads enforce the same bounds on the same values.
    CHECK_FALSE(psio::validate<Bounded>(

@@ -2202,13 +2202,8 @@ namespace psio {
          {
             decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>(
                src, pos, end, ::psio::transparent_inner(out));
-            // The fail-fast decode refuses a member outside its bounds, as
-            // it does for a record member.
-            if constexpr (::psio::transparent_member_checked_v<T>)
-               if (auto st = ::psio::check_transparent_member(
-                      out, "pssz: member length_bound violated", "pssz");
-                   !st.ok())
-                  status_failure(st);
+            // (The trusted read holds nothing against what the type
+            // declares: the member's bounds are the validator's to check.)
          }
          else if constexpr (std::is_same_v<T, std::string>)
          {
@@ -2526,30 +2521,17 @@ namespace psio {
                    fref = borrow_value<W, Auto, std::remove_cvref_t<decltype(fref)>, F,
                                        field_ann<T, A, Is>>(src, spans[Is].begin,
                                                             spans[Is].end);
-                   if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
-                      if (auto st = ::psio::check_member_annotations(
-                             decode_value<W, Auto, F, field_ann<T, A, Is>>(
-                                src, spans[Is].begin, spans[Is].end),
-                             record_member_annotations<T, Is>::value,
-                             "pssz: member length_bound violated", "pssz");
-                          !st.ok())
-                         status_failure(st);
                 }
                 else
                 {
                    decode_into<W, Auto, F, field_ann<T, A, Is>>(src, spans[Is].begin,
                                                                 spans[Is].end, fref);
-                   // A member's declared annotations are part of its type
-                   // (they selected the offset widths this frame was read
-                   // with): the fail-fast decode refuses a member outside
-                   // its length_bound / utf8 at any depth, as the validator
-                   // and the encoder do.
-                   if constexpr (ann::has_value_checks_v<std::remove_cvref_t<F>, eff>)
-                      if (auto st = ::psio::check_member_annotations(
-                             fref, record_member_annotations<T, Is>::value,
-                             "pssz: member length_bound violated", "pssz");
-                          !st.ok())
-                         status_failure(st);
+                   // This is the TRUSTED read: a member's declared
+                   // annotations selected the offset widths this frame is
+                   // read with, and nothing more is asked of the value
+                   // here. Bounds, utf8, order specs and invariants are
+                   // what validate / from_pssz(bytes) check (docs/
+                   // annotations.md "Reading and writing: the two modes").
                 }
              }()),
             ...);
@@ -2623,13 +2605,8 @@ namespace psio {
          {
             decode_into<W, Auto, ::psio::transparent_inner_t<T>, ann::transparent_ann<T, A>>(
                src, pos, end, ::psio::transparent_inner(out));
-            // The fail-fast decode refuses a member outside its bounds, as
-            // it does for a record member.
-            if constexpr (::psio::transparent_member_checked_v<T>)
-               if (auto st = ::psio::check_transparent_member(
-                      out, "pssz: member length_bound violated", "pssz");
-                   !st.ok())
-                  status_failure(st);
+            // (The trusted read holds nothing against what the type
+            // declares: the member's bounds are the validator's to check.)
          }
             return out;
          }
@@ -2642,9 +2619,12 @@ namespace psio {
             // The list, with this type's own table width.
             auto items = decode_vector<W, Auto, typename T::value_type, ann::element_ann<A>>(
                src, pos, end);
-            if (items.size() > T::max_size_value)
-               size_failure("pssz: bounded list exceeds its bound");
-            return T{std::move(items)};
+            // The trusted read does not hold the list against N (the
+            // validator does): the wrapper is filled as it is through
+            // storage().
+            T out;
+            out.storage() = std::move(items);
+            return out;
          }
          else if constexpr (std::is_same_v<T, bool>)
             return static_cast<unsigned char>(src[pos]) != 0;
@@ -2684,13 +2664,11 @@ namespace psio {
             return std::string(src.data() + pos, src.data() + end);
          else if constexpr (is_utf8_string_v<T>)
          {
-            if (pos > end || end > src.size() || end - pos > T::max_size_value)
-               size_failure("pssz: utf8_string exceeds its bound");
-            if (auto st = ::psio::utf8_spec::validate(
-                   std::span<const char>(src.data() + pos, end - pos));
-                !st.ok())
-               size_failure("pssz: utf8_string is not valid UTF-8");
-            return T{std::string(src.data() + pos, src.data() + end)};
+            // The trusted read: the bytes, not held against the bound or
+            // UTF-8 (the validator's checks).
+            if (pos > end || end > src.size())
+               size_failure("pssz: value span out of bounds");
+            return T::unchecked(std::string(src.data() + pos, src.data() + end));
          }
          else if constexpr (is_std_array_v<T>)
             return decode_array<W, Auto, typename T::value_type,

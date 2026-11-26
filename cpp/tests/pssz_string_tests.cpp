@@ -187,7 +187,7 @@ namespace
       REQUIRE_FALSE(psio::validate<T>(F{}, wire).ok());
       REQUIRE_FALSE(psio::validate_strict<T>(F{}, wire).ok());
       REQUIRE_THROWS_AS(psio::validate_or_throw<T>(F{}, wire), psio::codec_exception);
-      REQUIRE_THROWS_AS(psio::decode<T>(F{}, wire), psio::codec_exception);
+      REQUIRE_THROWS_AS(psio_test::decode_validated<T>(F{}, wire), psio::codec_exception);
       bool unknown = false;
       REQUIRE_FALSE(psio::validate_pssz_compatible<T>(F{}, wire, unknown).ok());
       T out{};
@@ -398,7 +398,7 @@ TEST_CASE("pssz bounded utf8_string members select the automatic width", "[pssz]
    std::vector<char> over{5, 7, 0, 0, 0, 5};
    over.insert(over.end(), 17, 'a');
    REQUIRE_FALSE(psio::validate<U32Text16>(psio::pssz{}, over).ok());
-   REQUIRE_THROWS_AS(psio::decode<U32Text16>(psio::pssz{}, over), psio::codec_exception);
+   REQUIRE_THROWS_AS(psio_test::decode_validated<U32Text16>(psio::pssz{}, over), psio::codec_exception);
 }
 
 TEST_CASE("SchemaBuilder: string types", "[pssz][string][schema]")

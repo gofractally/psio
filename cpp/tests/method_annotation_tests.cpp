@@ -24,6 +24,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <array>
 #include <cstdint>
 #include <optional>
@@ -172,7 +174,7 @@ namespace
       bool       decoded = true;
       try
       {
-         (void)psio::decode<T>(psio::pssz{}, std::span<const char>(bytes));
+         (void)psio_test::decode_validated<T>(psio::pssz{}, std::span<const char>(bytes));
       }
       catch (const psio::codec_exception&)
       {
@@ -522,6 +524,6 @@ TEST_CASE("method annotations: the argument tuple in JSON", "[method_annotations
                    psio::codec_exception);
    const std::string over = R"(["aaaaaaaaaaaaaaaaa",1,""])";
    CHECK_FALSE(psio::validate<TransferUncapped>(psio::json{}, std::span<const char>{over}).ok());
-   CHECK_THROWS_AS(psio::decode<TransferUncapped>(psio::json{}, std::span<const char>{over}),
+   CHECK_THROWS_AS(psio_test::decode_validated<TransferUncapped>(psio::json{}, std::span<const char>{over}),
                    psio::codec_exception);
 }

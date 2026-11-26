@@ -6,6 +6,7 @@
 #include <psio/error.hpp>
 #include <psio/helpers.hpp>
 
+#include <span>
 #include <string>
 #include <vector>
 
@@ -23,5 +24,14 @@ namespace psio_test
       ::psio::detail::helpers::checked_buffer_t<F> out;
       encode_validated(format, value, out);
       return out;
+   }
+
+   // The VALIDATING read of `bytes` as a T in format F: what
+   // psio::from_F<T>(bytes) does. (psio::decode<T>(F{}, bytes) is the trusted
+   // read: it does not hold the value against what T declares.)
+   template <typename T, typename F>
+   T decode_validated(F format, std::span<const char> bytes)
+   {
+      return ::psio::detail::helpers::decode_checked<T>(format, bytes);
    }
 }  // namespace psio_test

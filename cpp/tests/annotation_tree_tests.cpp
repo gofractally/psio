@@ -25,6 +25,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <array>
 #include <cstdint>
 #include <map>
@@ -421,7 +423,7 @@ namespace
    {
       try
       {
-         (void)psio::decode<T>(psio::pssz{}, std::span<const char>(bytes));
+         (void)psio_test::decode_validated<T>(psio::pssz{}, std::span<const char>(bytes));
          return true;
       }
       catch (const psio::codec_exception&)
@@ -608,7 +610,7 @@ TEST_CASE("annotation tree: psio::bounded is a pssz list with its bound enforced
    using B = psio::bounded<std::uint32_t, 3>;
    B three{{1, 2, 3}};
    CHECK(pssz_bytes(three) == pssz_bytes(std::vector<std::uint32_t>{1, 2, 3}));
-   CHECK(psio::decode<B>(psio::pssz{}, std::span<const char>(pssz_bytes(three))).storage() ==
+   CHECK(psio_test::decode_validated<B>(psio::pssz{}, std::span<const char>(pssz_bytes(three))).storage() ==
          three.storage());
    const auto four = pssz_bytes(std::vector<std::uint32_t>{1, 2, 3, 4});
    CHECK_FALSE(pssz_valid<B>(four));
@@ -748,7 +750,7 @@ TEST_CASE("annotation tree: the JSON readers refuse text outside the tree",
       bool       decoded = true;
       try
       {
-         (void)psio::decode<T>(fmt, std::span<const char>{text});
+         (void)psio_test::decode_validated<T>(fmt, std::span<const char>{text});
       }
       catch (const psio::codec_exception&)
       {

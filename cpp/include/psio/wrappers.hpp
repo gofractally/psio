@@ -181,6 +181,17 @@ namespace psio {
          // length bound, matching std::string semantics.
       }
 
+      // The text as given, not held against the bound: for a trusted read
+      // of bytes the caller vouches for (a codec's trusted decode), which
+      // checks nothing a type declares. A validating reader and the
+      // validated write refuse a value over its bound or not UTF-8.
+      [[nodiscard]] static utf8_string unchecked(std::string s) noexcept
+      {
+         utf8_string out;
+         out.data_ = std::move(s);
+         return out;
+      }
+
       std::size_t size() const noexcept { return data_.size(); }
       const char* data() const noexcept { return data_.data(); }
       const std::string& storage() const noexcept { return data_; }

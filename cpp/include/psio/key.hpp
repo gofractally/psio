@@ -886,6 +886,11 @@ namespace psio {
          // validate_strict: the bytes of a nested value are checked in
          // exact-schema mode (nested.hpp).
          bool strict = false;
+         // The TRUSTED read (psio::decode, from_key(psio::trusted{…})): the
+         // key is parsed as strictly as ever (escapes, terminators,
+         // canonical forms), and the value is not held against what its
+         // type declares (bounds, utf8, order specs, invariants).
+         bool trusted = false;
          // An invariant's own status, reported unchanged.
          codec_status invariant{};
 
@@ -1052,6 +1057,9 @@ namespace psio {
       template <typename E, typename A>
       bool read_list(reader& r, std::vector<E, A>* out, std::size_t limit)
       {
+         // (The trusted read does not hold the list against the bound.)
+         if (r.trusted)
+            limit = std::numeric_limits<std::size_t>::max();
          std::size_t count = 0;
          if constexpr (is_octet_v<E>)
          {
@@ -1101,6 +1109,8 @@ namespace psio {
             T* const dst = out ? out : &scratch;
             if (!read_shape<T>(r, dst))
                return false;
+            if (r.trusted)
+               return true;
             if (auto st = ::psio::check_invariant(*dst); !st.ok())
             {
                r.invariant = std::move(st);
@@ -1151,10 +1161,11 @@ namespace psio {
                T* const dst = out ? out : &scratch;
                if (!read_value<::psio::transparent_inner_t<T>>(r, &::psio::transparent_inner(*dst)))
                   return false;
-               if (auto st = ::psio::check_transparent_member(
-                      *dst, "key: member length_bound violated", "key");
-                   !st.ok())
-                  return r.fail(st.error().what.data());
+               if (!r.trusted)
+                  if (auto st = ::psio::check_transparent_member(
+                         *dst, "key: member length_bound violated", "key");
+                      !st.ok())
+                     return r.fail(st.error().what.data());
                return true;
             }
             else
@@ -1194,12 +1205,16 @@ namespace psio {
             std::string text;
             if (!read_escaped(r, [&](const char* data, std::size_t n) { text.append(data, n); }))
                return false;
-            if (text.size() > T::max_size_value)
-               return r.fail("key: utf8_string exceeds its bound");
-            if (!::psio::utf8_spec::validate(std::span<const char>(text.data(), text.size())).ok())
-               return r.fail("key: utf8_string is not valid UTF-8");
+            if (!r.trusted)
+            {
+               if (text.size() > T::max_size_value)
+                  return r.fail("key: utf8_string exceeds its bound");
+               if (!::psio::utf8_spec::validate(std::span<const char>(text.data(), text.size()))
+                       .ok())
+                  return r.fail("key: utf8_string is not valid UTF-8");
+            }
             if (out)
-               *out = T{std::move(text)};
+               *out = T::unchecked(std::move(text));
             return true;
          }
          else if constexpr (is_std_optional<T>::value)
@@ -1320,10 +1335,11 @@ namespace psio {
                      return false;
                   // The whole annotation tree: the member's length_bound /
                   // utf8 and those of every position below it.
-                  if (auto st = ::psio::check_member_annotations(
-                         *dst, Ann::value, "key: member length_bound violated", "key");
-                      !st.ok())
-                     return r.fail(st.error().what.data());
+                  if (!r.trusted)
+                     if (auto st = ::psio::check_member_annotations(
+                            *dst, Ann::value, "key: member length_bound violated", "key");
+                         !st.ok())
+                        return r.fail(st.error().what.data());
                   return true;
                }
                else
@@ -1343,10 +1359,12 @@ namespace psio {
 
       // Reads exactly one T spanning the whole buffer.
       template <typename T>
-      codec_status read_document(std::span<const char> bytes, T* out, bool strict = false)
+      codec_status read_document(std::span<const char> bytes, T* out, bool strict = false,
+                                 bool trusted = false)
       {
          reader r{bytes.data(), bytes.data(), bytes.data() + bytes.size()};
-         r.strict = strict;
+         r.strict  = strict;
+         r.trusted = trusted;
          if (!read_value<T>(r, out))
          {
             if (!r.invariant.ok())
@@ -1466,13 +1484,17 @@ namespace psio {
          return out;
       }
 
-      // Checked: fails on anything `validate` rejects.
+      // The TRUSTED read (from_key(psio::trusted{bytes})): the key is parsed
+      // as strictly as `validate` parses it — a key reader has no cheaper
+      // way to find its values — and the value is not held against what T
+      // declares (bounds, utf8, order specs, invariants). from_key(bytes)
+      // is the validating read (decode_checked below).
       template <typename T>
       friend T tag_invoke(decltype(::psio::decode<T>), key, T*,
                           std::span<const char> bytes)
       {
          T out{};
-         if (auto st = detail::key_impl::read_document<T>(bytes, &out); !st.ok())
+         if (auto st = detail::key_impl::read_document<T>(bytes, &out, false, true); !st.ok())
             ::psio::codec_abort(st.error());
          return out;
       }

@@ -15,6 +15,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <cstdio>
 #include <fstream>
 #include <functional>
@@ -200,7 +202,7 @@ namespace
    {
       try
       {
-         auto value = psio::decode<T>(F{}, wire);
+         auto value = psio_test::decode_validated<T>(F{}, wire);
          if (reencoded) *reencoded = psio::encode(F{}, value);
          return true;
       }

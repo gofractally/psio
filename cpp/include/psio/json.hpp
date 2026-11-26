@@ -2122,6 +2122,11 @@ namespace psio {
          C&   c;
          // The status of a violated invariant, reported unchanged.
          codec_status invariant{};
+         // The TRUSTED read (psio::decode, from_json(psio::trusted{…})): the
+         // text is parsed as strictly as ever, and the value is not held
+         // against what its type declares (member bounds, order specs,
+         // invariants, wrapper bounds).
+         bool trusted = false;
       };
 
       // Canonical decimal integer over exactly `text`: 0 | -?[1-9][0-9]*,
@@ -2572,10 +2577,11 @@ namespace psio {
                F* dst = fptr ? fptr : &scratch;
                if (!read_value<Fmt, mode, F>(r, dst))
                   return false;
-               if (auto st = ::psio::check_member_annotations(
-                      *dst, eff_for::value, "json: member length_bound violated", "json");
-                   !st.ok())
-                  return r.c.fail(st.error().what);
+               if (!r.trusted)
+                  if (auto st = ::psio::check_member_annotations(
+                         *dst, eff_for::value, "json: member length_bound violated", "json");
+                      !st.ok())
+                     return r.c.fail(st.error().what);
                return true;
             }
             else
@@ -2714,6 +2720,8 @@ namespace psio {
             T* const dst = out ? out : &scratch;
             if (!read_shape<Fmt, IM, T>(r, dst))
                return false;
+            if (r.trusted)
+               return true;
             if (auto st = ::psio::check_invariant(*dst); !st.ok())
             {
                const std::string_view what = st.error().what;
@@ -2756,10 +2764,11 @@ namespace psio {
                if (!read_value<Fmt, IM, ::psio::transparent_inner_t<T>>(
                       r, &::psio::transparent_inner(*dst)))
                   return false;
-               if (auto st = ::psio::check_transparent_member(
-                      *dst, "json: member length_bound violated", "json");
-                   !st.ok())
-                  return r.c.fail(st.error().what);
+               if (!r.trusted)
+                  if (auto st = ::psio::check_transparent_member(
+                         *dst, "json: member length_bound violated", "json");
+                      !st.ok())
+                     return r.c.fail(st.error().what);
                return true;
             }
             else
@@ -2854,9 +2863,9 @@ namespace psio {
             bool             escaped = false;
             if (!r.c.string(text, escaped))
                return false;
-            if (text.size() > T::max_size_value)
+            if (!r.trusted && text.size() > T::max_size_value)
                return r.c.fail("json: string exceeds its bound");
-            if (out) *out = T{std::string(text)};
+            if (out) *out = T::unchecked(std::string(text));
             return true;
          }
          else if constexpr (Fmt::i_json && byte_seq<T>::value)
@@ -2882,7 +2891,7 @@ namespace psio {
             std::vector<typename T::value_type> bytes;
             if (!read_hex(r, &bytes))
                return false;
-            if (bytes.size() > T::max_size_value)
+            if (!r.trusted && bytes.size() > T::max_size_value)
                return r.c.fail("json: array exceeds its bound");
             if (out) out->storage() = std::move(bytes);
             return true;
@@ -2909,7 +2918,7 @@ namespace psio {
                if (!has)
                   return true;
                if constexpr (is_bounded<T>::value)
-                  if (count >= T::max_size_value)
+                  if (!r.trusted && count >= T::max_size_value)
                      return r.c.fail("json: array exceeds its bound");
                ++count;
                if (dst)
@@ -3115,10 +3124,11 @@ namespace psio {
             }
             else if (!read_value<Fmt, int_mode::natural, Tuple>(r, dst))
                return false;
-            if (auto st = ::psio::detail::ann::check_value(
-                   *dst, T::psio_annotations, "json: member length_bound violated", "json");
-                !st.ok())
-               return r.c.fail(st.error().what);
+            if (!r.trusted)
+               if (auto st = ::psio::detail::ann::check_value(
+                      *dst, T::psio_annotations, "json: member length_bound violated", "json");
+                   !st.ok())
+                  return r.c.fail(st.error().what);
             return true;
          }
          else if constexpr (is_std_tuple<T>::value)
@@ -3150,9 +3160,10 @@ namespace psio {
 
       // Reads exactly one value of T, which must be the whole document.
       template <typename Fmt, typename T, typename C>
-      codec_status read_with(C& cursor, T* out)
+      codec_status read_with(C& cursor, T* out, bool trusted = false)
       {
          typed_reader<C> r{cursor};
+         r.trusted = trusted;
          if (read_value<Fmt, int_mode::natural, T>(r, out))
             (void)cursor.finish();
          if (!r.invariant.ok())
@@ -3163,7 +3174,8 @@ namespace psio {
       // Reads `bytes` as one T through the syntax layer `parser` selects.
       template <typename Fmt, typename T>
       codec_status read_document(std::span<const char> bytes, T* out,
-                                 json_parser parser = json_parser::automatic)
+                                 json_parser parser = json_parser::automatic,
+                                 bool        trusted = false)
       {
 #if PSIO_HAVE_SIMDJSON
          if (use_simdjson(bytes, parser))
@@ -3171,16 +3183,16 @@ namespace psio {
             if (parser == json_parser::simdjson)
             {
                simdjson_cursor cursor(bytes, Fmt::i_json);
-               return read_with<Fmt, T>(cursor, out);
+               return read_with<Fmt, T>(cursor, out, trusted);
             }
             simdjson_index_cursor cursor(bytes, Fmt::i_json);
-            return read_with<Fmt, T>(cursor, out);
+            return read_with<Fmt, T>(cursor, out, trusted);
          }
 #else
          (void)parser;
 #endif
          json_text_cursor cursor(bytes, Fmt::i_json);
-         return read_with<Fmt, T>(cursor, out);
+         return read_with<Fmt, T>(cursor, out, trusted);
       }
 
       // `text` has at least json_padding readable bytes after it: simdjson
@@ -3273,8 +3285,12 @@ namespace psio {
          friend T tag_invoke(decltype(::psio::decode<T>), Derived, T*,
                              std::span<const char> bytes)
          {
+            // The TRUSTED read: the text is parsed (a text that is not JSON,
+            // or not the JSON of a T, fails here), and the value is not
+            // held against what T declares. from_json(text) is the
+            // validating read (decode_checked below).
             T out{};
-            if (auto st = read_document<Derived, T>(bytes, &out);
+            if (auto st = read_document<Derived, T>(bytes, &out, json_parser::automatic, true);
                 !st.ok())
                ::psio::codec_abort(st.error());
             return out;

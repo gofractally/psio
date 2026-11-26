@@ -10,6 +10,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <fstream>
 #include <functional>
 #include <map>
@@ -111,7 +113,7 @@ namespace
          bool threw = false;
          try
          {
-            (void)psio::decode<T>(psio::key{}, std::span<const char>{*bytes});
+            (void)psio::from_key<T>(std::span<const char>{*bytes});
          }
          catch (const psio::codec_exception&)
          {
@@ -133,7 +135,7 @@ namespace
          bool threw = false;
          try
          {
-            (void)psio::decode<T>(psio::key{}, std::span<const char>{*key});
+            (void)psio_test::decode_validated<T>(psio::key{}, std::span<const char>{*key});
          }
          catch (const psio::codec_exception& e)
          {

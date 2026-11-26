@@ -30,6 +30,8 @@
 
 #include <catch.hpp>
 
+#include <algorithm>
+
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -602,4 +604,219 @@ TEST_CASE("write modes: the pssz fast write refuses only what has no frame",
    // The cap is the width budget: over it, no frame.
    CHECK(fast_write(WmCapped{std::string(150, 'a'), std::string(100, 'b')}) == 0);
    CHECK_NOTHROW(psio::to_pssz(WmCapped{std::string(100, 'a'), std::string(90, 'b')}));
+}
+
+// ── The four modes, as one property ────────────────────────────────────────
+//
+// For values drawn at random — most of them outside what their type
+// declares, in one or several ways — and for every format:
+//
+//   1. fast write, then trusted read, gives the value back (unless the
+//      format cannot represent the value at all, and then the validated
+//      write refuses it too);
+//   2. the validated write refuses exactly when the validating read of the
+//      bytes the fast write produced refuses.
+//
+// So a service's own row, written fast and read trusted, is the row it
+// wrote, whatever it declares; and a value is "valid" in one sense only,
+// whichever side asks.
+struct PropItem
+{
+   std::string   code;
+   std::uint32_t qty = 0;
+   friend bool   operator==(const PropItem&, const PropItem&) = default;
+   PSIO_REFLECT(PropItem, attr(code, max<3>), qty)
+};
+struct Prop
+{
+   std::vector<std::uint32_t> ids;
+   std::string                name;
+   std::vector<std::string>   tags;
+   std::vector<PropItem>      items;
+   VcEven                     even;
+   friend bool                operator==(const Prop&, const Prop&) = default;
+   PSIO_REFLECT(Prop,
+                attr(ids, sorted | min<1> | max<3>),
+                attr(name, utf8 | max<6>),
+                attr(tags, max<2> | element(max<3>)),
+                attr(items, max<2>),
+                even)
+};
+
+namespace
+{
+   struct prop_rng
+   {
+      std::uint64_t state;
+      std::uint64_t next() noexcept
+      {
+         std::uint64_t z = (state += 0x9e3779b97f4a7c15ull);
+         z               = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+         z               = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+         return z ^ (z >> 31);
+      }
+      std::size_t below(std::size_t n) noexcept { return static_cast<std::size_t>(next() % n); }
+   };
+
+   std::string prop_text(prop_rng& r, std::size_t max_len, bool utf8_only)
+   {
+      std::string text(r.below(max_len + 1), 'a');
+      for (char& c : text)
+         c = static_cast<char>('a' + r.below(26));
+      if (!utf8_only && !text.empty() && r.below(5) == 0)
+         text[r.below(text.size())] = static_cast<char>(0xff);
+      return text;
+   }
+
+   Prop prop_value(prop_rng& r, bool utf8_only)
+   {
+      Prop v;
+      v.ids.resize(r.below(6));
+      for (auto& id : v.ids)
+         id = static_cast<std::uint32_t>(r.below(4));
+      if (r.below(2))
+         std::sort(v.ids.begin(), v.ids.end());
+      v.name = prop_text(r, 9, utf8_only);
+      v.tags.resize(r.below(4));
+      for (auto& tag : v.tags)
+         tag = prop_text(r, 5, true);
+      v.items.resize(r.below(4));
+      for (auto& item : v.items)
+         item = PropItem{prop_text(r, 5, true), static_cast<std::uint32_t>(r.below(100))};
+      v.even.v = static_cast<std::uint32_t>(r.below(6));
+      return v;
+   }
+
+   struct prop_counts
+   {
+      int valid = 0, invalid = 0, unwritable = 0;
+   };
+
+   // `text_is_utf8`: the format's own strings are UTF-8 (JSON text, a
+   // protobuf `string`), so a value with other bytes has no encoding in it.
+   template <typename Fmt>
+   prop_counts four_modes(std::uint64_t seed, int rounds, bool text_is_utf8, bool same_message)
+   {
+      prop_counts counts;
+      prop_rng    r{seed};
+      for (int i = 0; i < rounds; ++i)
+      {
+         const Prop value   = prop_value(r, text_is_utf8);
+         const bool declared = psio::validate_value(value).ok();
+
+         psio::detail::helpers::checked_buffer_t<Fmt> validated;
+         const auto written = psio::encode_checked(Fmt{}, value, validated);
+
+         std::optional<std::string> fast;
+         try
+         {
+            const auto bytes = psio::encode(Fmt{}, value);
+            fast             = std::string(bytes.data(), bytes.size());
+         }
+         catch (const psio::codec_exception&)
+         {
+         }
+         if (!fast)
+         {
+            // No frame: the format cannot represent the value. Then it is
+            // not a value of the type either.
+            CHECK_FALSE(written.ok());
+            CHECK_FALSE(declared);
+            ++counts.unwritable;
+            continue;
+         }
+         const std::span<const char> bytes{fast->data(), fast->size()};
+
+         // 1. fast write -> trusted read.
+         CHECK(psio::decode<Prop>(Fmt{}, bytes) == value);
+
+         // 2. validated write <=> validating read of the fast bytes.
+         const auto read = psio::validate<Prop>(Fmt{}, bytes);
+         CHECK(written.ok() == read.ok());
+         CHECK(written.ok() == declared);
+         if (written.ok())
+         {
+            CHECK(std::string_view(validated.data(), validated.size()) == *fast);
+            ++counts.valid;
+         }
+         else
+         {
+            CHECK(validated.empty());
+            if (same_message && !read.ok())
+               CHECK(written.error().what == read.error().what);
+            ++counts.invalid;
+         }
+      }
+      return counts;
+   }
+
+   template <typename Fmt>
+   void four_modes_hold(std::uint64_t seed, bool text_is_utf8 = false, bool same_message = true)
+   {
+      const prop_counts c = four_modes<Fmt>(seed, 4000, text_is_utf8, same_message);
+      // The draw exercises both sides.
+      CHECK(c.valid > 20);
+      CHECK(c.invalid > 2000);
+   }
+}  // namespace
+
+TEST_CASE("the four modes: fast write / trusted read round-trip, validated write agrees with "
+          "validating read",
+          "[value_contract][write_modes][property]")
+{
+   // pssz, key, json check as they encode; their writers and readers walk a
+   // value in different orders, so a value violating two declarations may
+   // be reported for either: the verdict is compared, not the text.
+   SECTION("pssz") { four_modes_hold<psio::pssz>(1, false, false); }
+   SECTION("pssz16") { four_modes_hold<psio::pssz16>(2, false, false); }
+   SECTION("pssz32") { four_modes_hold<psio::pssz32>(3, false, false); }
+   SECTION("key") { four_modes_hold<psio::key>(4, false, false); }
+   SECTION("json") { four_modes_hold<psio::json>(5, true, false); }
+   SECTION("ijson") { four_modes_hold<psio::ijson>(6, true, false); }
+   SECTION("bin") { four_modes_hold<psio::bin>(7); }
+   SECTION("ssz") { four_modes_hold<psio::ssz>(8); }
+   SECTION("borsh") { four_modes_hold<psio::borsh>(9); }
+   SECTION("bincode") { four_modes_hold<psio::bincode>(10); }
+   SECTION("avro") { four_modes_hold<psio::avro>(11); }
+   SECTION("msgpack") { four_modes_hold<psio::msgpack>(12); }
+   SECTION("bson") { four_modes_hold<psio::bson>(13); }
+   SECTION("wit") { four_modes_hold<psio::wit>(14); }
+   SECTION("flatbuf") { four_modes_hold<psio::flatbuf>(15); }
+   SECTION("capnp") { four_modes_hold<psio::capnp>(16); }
+   SECTION("protobuf") { four_modes_hold<psio::protobuf>(17, true); }
+}
+
+TEST_CASE("the trusted read of a row the fast write wrote", "[value_contract][write_modes]")
+{
+   // What a service does with its own table: write fast, read trusted.
+   const WmOrdered row{{3, 1, 1, 9, 9, 9}, {1, 2}};   // not unique, over max, digest not exact
+   const auto      bytes = psio::to_pssz(row);
+   CHECK_FALSE(psio::validate_pssz<WmOrdered>(bytes).ok());
+   CHECK_THROWS_AS(psio::from_pssz<WmOrdered>(bytes), psio::codec_exception);
+   CHECK(psio::from_pssz<WmOrdered>(psio::trusted{bytes}) == row);
+   // The wrapper types: filled as written.
+   psio::bounded<std::uint32_t, 2> wide;
+   wide.storage() = {1, 2, 3};
+   const auto wide_bytes = psio::to_pssz(wide);
+   CHECK_THROWS_AS((psio::from_pssz<psio::bounded<std::uint32_t, 2>>(wide_bytes)),
+                   psio::codec_exception);
+   CHECK((psio::from_pssz<psio::bounded<std::uint32_t, 2>>(psio::trusted{wide_bytes})).size() == 3);
+   const auto text = psio::to_pssz(psio::utf8_string<8>{"\xff\xfe"});
+   CHECK_THROWS_AS(psio::from_pssz<psio::utf8_string<8>>(text), psio::codec_exception);
+   CHECK(psio::from_pssz<psio::utf8_string<8>>(psio::trusted{text}).storage() == "\xff\xfe");
+   // key and json: the same pattern.
+   const VcMaxList over{{1, 2, 3}};
+   {
+      const auto              k = psio::to_key(over);
+      const std::vector<char> key(k.begin(), k.end());
+      CHECK_THROWS_AS(psio::from_key<VcMaxList>(key), psio::codec_exception);
+      CHECK(psio::from_key<VcMaxList>(psio::trusted{key}).v == over.v);
+   }
+   {
+      const std::string json = psio::to_json(over);
+      CHECK_THROWS_AS(psio::from_json<VcMaxList>(json), psio::codec_exception);
+      CHECK(psio::from_json<VcMaxList>(psio::trusted{std::span<const char>{json}}).v == over.v);
+   }
+   // An invariant is not run by a trusted read either.
+   CHECK(psio::from_pssz<VcEven>(psio::trusted{psio::to_pssz(VcEven{3})}).v == 3);
 }

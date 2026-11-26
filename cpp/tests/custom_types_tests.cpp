@@ -898,7 +898,7 @@ TEST_CASE("invariant: key encode, validate and decode", "[invariant][key]")
       st = psio::validate_strict<T>(psio::key{}, sp(key));
       REQUIRE_FALSE(st.ok());
       CHECK(st.error().what == reason);
-      CHECK_THROWS_AS(psio::decode<T>(psio::key{}, sp(key)), psio::codec_exception);
+      CHECK_THROWS_AS(psio_test::decode_validated<T>(psio::key{}, sp(key)), psio::codec_exception);
    };
    rejects(std::uint64_t{1} << 60, std::type_identity<Name>{},
            "Name: value is not a canonical name");
@@ -975,7 +975,7 @@ namespace
       CHECK(psio::make_boxed<T>(Fmt{}, sp(text)) == nullptr);
       try
       {
-         (void)psio::decode<T>(Fmt{}, sp(text));
+         (void)psio_test::decode_validated<T>(Fmt{}, sp(text));
          FAIL("decode accepted");
       }
       catch (const psio::codec_exception& e)
@@ -1410,7 +1410,7 @@ TEST_CASE("invariant: mutated frames, texts and keys never get past a checked re
             CHECK(psio::encode(psio::key{}, value) == mutated);
          }
          else
-            CHECK_THROWS_AS(psio::decode<Key>(psio::key{}, sp(mutated)), psio::codec_exception);
+            CHECK_THROWS_AS(psio_test::decode_validated<Key>(psio::key{}, sp(mutated)), psio::codec_exception);
       }
    }
    CHECK(accepted > 0);

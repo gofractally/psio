@@ -788,7 +788,7 @@ TEST_CASE("sorted / unique / unique_keys: writers and checking readers", "[consi
       CHECK(std::string_view{st.error().what} == message);
       CHECK(!psio::validate_strict<Ranked>(psio::pssz{}, bytes_of(frame)).ok());
       CHECK_THROWS_AS(psio::from_pssz<Ranked>(bytes_of(frame)), psio::codec_exception);
-      CHECK_THROWS_AS(psio::decode<Ranked>(psio::pssz{}, bytes_of(frame)), psio::codec_exception);
+      CHECK_THROWS_AS(psio_test::decode_validated<Ranked>(psio::pssz{}, bytes_of(frame)), psio::codec_exception);
       Ranked decoded;
       bool   unknown = false;
       CHECK(!psio::decode_pssz_checked(psio::pssz{}, bytes_of(frame), decoded, unknown).ok());
@@ -1183,7 +1183,7 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
       const auto bytes = psio::detail::pssz_impl::encode_ignoring_length_bounds(psio::pssz{}, bad);
       CHECK(!psio::validate_pssz<AnnHolder>(bytes).ok());
       CHECK(!psio::validate_strict<AnnHolder>(psio::pssz{}, bytes).ok());
-      CHECK_THROWS_AS(psio::decode<AnnHolder>(psio::pssz{}, bytes), psio::codec_exception);
+      CHECK_THROWS_AS(psio_test::decode_validated<AnnHolder>(psio::pssz{}, bytes), psio::codec_exception);
       // The wrapper-type spelling rejects the same bytes.
       CHECK(!psio::validate_pssz<WrapHolder>(bytes).ok());
    };

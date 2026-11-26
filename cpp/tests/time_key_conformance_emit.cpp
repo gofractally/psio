@@ -1123,13 +1123,13 @@ namespace
       bool threw = false;
       try
       {
-         (void)psio::decode<T>(psio::key{}, std::span<const char>{key});
+         (void)psio::from_key<T>(std::span<const char>{key});
       }
       catch (const psio::codec_exception& e)
       {
          threw = e.error().what == reason;
       }
-      if (!threw) die(r.name + ": key decode does not fail with the invariant");
+      if (!threw) die(r.name + ": from_key does not fail with the invariant");
       auto p = psio::validate<T>(psio::pssz{}, std::span<const char>{bytes});
       if (p.ok() || p.error().what != reason)
          die(r.name + ": pssz validate does not report '" + reason + "'");

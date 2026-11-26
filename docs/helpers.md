@@ -52,7 +52,7 @@ For a format `F`:
 | `to_F_checked(v, sink)` | the validated write, appended to a `std::vector<char>` (or `std::string`); the sink is unchanged on failure | the same |
 | `encode_F_checked(v, out)` | the validated write as a `psio::codec_status`; never throws or aborts on a value | `psio::encode_checked(psio::F{}, v, out)` |
 | `from_F<T>(bytes)` | validate, then decode | `psio::validate<T>(psio::F{}, bytes)`, `psio::codec_abort` on failure, then `psio::decode<T>(psio::F{}, bytes)` |
-| `from_F<T>(psio::trusted{bytes})` | decode without the validation pass | `psio::decode<T>(psio::F{}, bytes)` |
+| `from_F<T>(psio::trusted{bytes})` | the trusted read: decode without the validation pass; nothing the type declares is checked | `psio::decode<T>(psio::F{}, bytes)` |
 | `validate_F<T>(bytes)` | `psio::codec_status`; never throws or aborts | `psio::validate<T>(psio::F{}, bytes)` |
 | `F_size(v)` | size of the encoding of `v` | `psio::size_of(psio::F{}, v)` |
 | `F_view<T>` | read-only view over borrowed bytes | `psio::view<T, psio::F>` |
@@ -88,7 +88,7 @@ is a constraint failure that names it, for example
 | `protobuf` ([protobuf.md](protobuf.md)) | `psio/protobuf.hpp` | `std::vector<char>` | appends to `std::vector<char>` | yes | no (a message has no index: [why](protobuf.md#why-there-are-no-views)) | no |
 | `capnp` | `psio/capnp.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | no | no |
 | `flatbuf` | `psio/flatbuf.hpp` | `std::vector<char>` | **replaces** the content of a `std::vector<char>` | yes | yes, safe and trusted (`psio/flatbuf_view.hpp`) | yes: fixed-size fields that are stored (`psio/flatbuf_view.hpp`) |
-| `flatbuf_lib` | `psio/flatbuf_lib.hpp` | `std::vector<char>` | no | yes | no | no |
+| `flatbuf_lib` | `psio/flatbuf_lib.hpp` | `std::vector<char>` | no | `from_flatbuf_lib(psio::trusted{…})` and `flatbuf_lib_size` only: the adapter has no verifier, validate its bytes with `validate_flatbuf` | no | no |
 | `wit` | `psio/wit.hpp` | `std::vector<char>` | no | yes | yes (`psio/wit_view.hpp`) | no |
 
 `F_buffer<T>` and `shared_F<T>` exist for every format.
@@ -267,9 +267,12 @@ own span and never the message around it:
 - `json`, `ijson`: every member that is not optional must be present, in the
   checked and in the trusted decode alike (`psio::decode<T>(psio::json{}, text)`,
   `from_json<T>(psio::trusted{text})`).
-- `json`, `ijson`, `key`: the reader checks as it reads, so the checked decode
-  reads the input once, and the trusted decode still fails through
-  `psio::codec_abort` on malformed input.
+- `json`, `ijson`, `key`, `protobuf`: the reader parses as it reads, so the
+  checked decode reads the input once, and the trusted decode still fails
+  through `psio::codec_abort` on malformed input. The trusted decode does not
+  hold the value against what its type declares (bounds, `utf8`, order,
+  invariants), in these formats as in every other
+  ([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)).
 
 ## Views and buffers
 

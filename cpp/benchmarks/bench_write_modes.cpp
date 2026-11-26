@@ -5,9 +5,14 @@
 //   fast       psio::to_F(v, sink)            holds nothing against the type
 //   validated  psio::encode_F_checked(v, out) refuses a violating value
 //
+// and the two read modes:
+//
+//   validating  psio::from_F<T>(bytes)                 structure + declaration
+//   trusted     psio::from_F<T>(psio::trusted{bytes})  nothing a type declares
+//
 // The values are inside their declarations, so both modes write the same
-// bytes; the difference is the price of the checks. ns per encode, the best
-// of `trials` runs of `iters` encodes each.
+// bytes and read the same value; the difference is the price of the checks.
+// ns per operation, the best of `trials` runs of `iters` operations each.
 //
 //   psio_bench_write_modes [iters] [trials]
 
@@ -23,6 +28,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <numeric>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -73,6 +79,15 @@ namespace
    int         g_trials = 9;
    std::size_t g_sink   = 0;
 
+   // The value was made: it is not optimised away.
+   template <typename T>
+   [[gnu::noinline]] void keep(const T& value)
+   {
+      const void* p = &value;
+      asm volatile("" : : "r,m"(p) : "memory");
+      ++g_sink;
+   }
+
    template <typename F>
    double best(F&& body)
    {
@@ -119,7 +134,33 @@ namespace
       cells.push_back({"protobuf", best([&] { out.clear(); psio::to_protobuf(value, out); g_sink += out.size(); }),
                        best([&] { out.clear(); fail(psio::encode_protobuf_checked(value, out)); g_sink += out.size(); })});
       for (const cell& c : cells)
-         std::printf("| %-12s | %-8s | %9.1f | %9.1f | %6.1fx |\n", name, c.format, c.fast,
+         std::printf("| %-12s | %-8s write | %9.1f | %9.1f | %6.1fx |\n", name, c.format, c.fast,
+                     c.validated, c.validated / c.fast);
+
+      // Reads: trusted (the "fast" column) and validating.
+      std::vector<cell> reads;
+      {
+         const std::vector<char> bytes = psio::to_pssz(value);
+         reads.push_back(
+            {"pssz", best([&] { keep(psio::from_pssz<T>(psio::trusted{bytes})); }),
+             best([&] { keep(psio::from_pssz<T>(bytes)); })});
+      }
+      {
+         const auto              k = psio::to_key(value);
+         const std::vector<char> bytes(k.begin(), k.end());
+         reads.push_back(
+            {"key", best([&] { keep(psio::from_key<T>(psio::trusted{bytes})); }),
+             best([&] { keep(psio::from_key<T>(bytes)); })});
+      }
+      {
+         const std::string           json = psio::to_json(value);
+         const std::span<const char> bytes{json.data(), json.size()};
+         reads.push_back(
+            {"json", best([&] { keep(psio::from_json<T>(psio::trusted{bytes})); }),
+             best([&] { keep(psio::from_json<T>(bytes)); })});
+      }
+      for (const cell& c : reads)
+         std::printf("| %-12s | %-8s read  | %9.1f | %9.1f | %6.1fx |\n", name, c.format, c.fast,
                      c.validated, c.validated / c.fast);
    }
 }  // namespace
@@ -130,8 +171,9 @@ int main(int argc, char** argv)
       g_iters = std::atoi(argv[1]);
    if (argc > 2)
       g_trials = std::atoi(argv[2]);
-   std::printf("| value        | format   | fast ns   | valid. ns | ratio   |\n");
-   std::printf("|--------------|----------|-----------|-----------|---------|\n");
+   std::printf("| value        | operation      | fast /    | validated | ratio   |\n");
+   std::printf("|              |                | trusted   | ns        |         |\n");
+   std::printf("|--------------|----------------|-----------|-----------|---------|\n");
    row("Account", Account{7, "alice-the-account-owner", {"vip", "beta", "early-adopter", "eu"}, 100});
    row("AccountPlain",
        AccountPlain{7, "alice-the-account-owner", {"vip", "beta", "early-adopter", "eu"}, 100});

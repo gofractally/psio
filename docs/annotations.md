@@ -720,8 +720,8 @@ static_assert(!psio::inferred_bound<AtLeast>().has_value());   // no upper bound
 
 | Format | Effect |
 |---|---|
-| pssz | `max` / `exact` enter the inferred bound (width). Enforced by the validated write — `to_pssz_checked` (throws `codec_exception`: `pssz: member length_bound violated`), `encode_pssz_checked` (status) — and by `validate_pssz`, `validate_strict`, `decode_pssz_checked`, `from_pssz`, and the fail-fast `psio::decode`. The fast write (`to_pssz`, `psio::encode`) refuses a value only when its payload does not fit the offset width the bound gave the type ([7.2](#72-reading-and-writing-the-two-modes)) |
-| key | Bytes unchanged. The validated write refuses a value outside the bound: `to_key_checked` throws `codec_exception` (`key: member length_bound violated`), `psio::encode_key_checked(value, out)` returns the status and leaves `out` unchanged. `validate_key`, `from_key`, `psio::decode` reject a key that holds one. The fast write (`to_key`, `psio::encode(psio::key{}, …)`, `key_prefix`) writes the key of any value |
+| pssz | `max` / `exact` enter the inferred bound (width). Enforced by the validated write — `to_pssz_checked` (throws `codec_exception`: `pssz: member length_bound violated`), `encode_pssz_checked` (status) — and by `validate_pssz`, `validate_strict`, `decode_pssz_checked` and `from_pssz`. The trusted read (`from_pssz(psio::trusted{…})`, `psio::decode`) does not look. The fast write (`to_pssz`, `psio::encode`) refuses a value only when its payload does not fit the offset width the bound gave the type ([7.2](#72-reading-and-writing-the-two-modes)) |
+| key | Bytes unchanged. The validated write refuses a value outside the bound: `to_key_checked` throws `codec_exception` (`key: member length_bound violated`), `psio::encode_key_checked(value, out)` returns the status and leaves `out` unchanged. `validate_key` and `from_key` reject a key that holds one; the trusted read (`from_key(psio::trusted{…})`, `psio::decode`) does not look. The fast write (`to_key`, `psio::encode(psio::key{}, …)`, `key_prefix`) writes the key of any value |
 | json / ijson | Text unchanged. The validated write (`to_json_checked` throws; `encode_json_checked` returns a status) and the readers refuse a value outside the bound; the fast write (`to_json`) does not look |
 | schema-driven codecs (`psio::pssz_ir`) | The same width and the same rejections, from the IR alone |
 | WIT | `list<T>/* @psio:max=N */` for a bounded list, map or set; a bounded string is `string` |
@@ -807,7 +807,7 @@ struct NamesSpelled   // psio::utf8_spec{} is psio::utf8
 
 | Format | Effect |
 |---|---|
-| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the validated write (`to_pssz_checked`, `encode_pssz_checked`: `utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode; the fast write (`to_pssz`) writes it. A raw string holds any bytes for every one of them: `validate_strict` means exact schema and canonical form, not "strings are text" (`tutorial 5`) |
+| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the validated write (`to_pssz_checked`, `encode_pssz_checked`: `utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict` and the checked decode; the fast write (`to_pssz`) writes it and the trusted read reads it. A raw string holds any bytes for every one of them: `validate_strict` means exact schema and canonical form, not "strings are text" (`tutorial 5`) |
 | key | Bytes unchanged (raw and UTF-8 strings have one key form). The validated write (`to_key_checked` throws, `encode_key_checked` reports) and the readers (`validate_key`, `from_key`) refuse a `utf8` string that is not UTF-8, for the annotation and for `psio::utf8_string` alike (`tutorial 7`); the fast write (`to_key`) writes it. In Rust, TypeScript and Python a text value is UTF-8 by its type |
 | json / ijson | Both kinds are JSON strings. JSON text is UTF-8, so a **raw string that is not UTF-8 has no JSON**: the writer fails |
 | flatbuf, capnp, bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Bytes unchanged (these formats hold any bytes for a C++ `std::string`). `validate_F`, `from_F`, the validated views and the validated write refuse a `utf8` string that is not UTF-8 (`utf8_spec: invalid leading byte` and similar). In Rust `String` is UTF-8 by its type and `RawString` is raw |
@@ -1419,11 +1419,10 @@ CHECK_FALSE(psio::validate_json<Symbol>(R"({"code":"usd"})").ok());
 
 **Where it runs.** In every format: the validated write (`to_F_checked`,
 `encode_F_checked`) and the validating readers (`validate_F`, `from_F`,
-`validate_strict`; pssz `decode_pssz_checked`; key `psio::decode`);
+`validate_strict`; pssz `decode_pssz_checked`);
 `psio::validate_value(v)`; GraphQL arguments and results. **Not** in the
-fast write (`to_F`, `psio::encode`), not in the trusted decode
-(`from_pssz<T>(psio::trusted{bytes})`, `psio::decode` of pssz), not in
-views.
+fast write (`to_F`, `psio::encode`), not in the trusted read
+(`from_F<T>(psio::trusted{bytes})`, `psio::decode`), not in views.
 
 **Contract.** `noexcept`, returns its verdict, never throws or aborts,
 depends only on the value. One per type; arithmetic types take none.
@@ -2024,9 +2023,9 @@ CHECK_FALSE(psio::validate_json<Ranked>(R"({"scores":[3,1,2],"names":[],"entries
 violates one (`sorted: elements are not in order`,
 `sorted: elements are not in strictly ascending order`,
 `unique_keys: two elements have the same key`), and every checking reader
-— pssz `validate_pssz`, `validate_strict`, `from_pssz`, the checked and
-fail-fast decodes; json; key — rejects bytes or text that hold one. Not the
-trusted decode, not views. The same holds on a method parameter
+— pssz `validate_pssz`, `validate_strict`, `from_pssz`, the checked
+decode; json; key — rejects bytes or text that hold one. Not the trusted
+read, not views. The same holds on a method parameter
 (`validate_method_args`, `invoke_method_pssz`) and in `returns(...)`
 (`validate_method_result`, `validated_method_result_view`,
 `decode_method_result`, `method_result_from_pssz`): a validator and the
@@ -2923,7 +2922,7 @@ check.
 
 | | ordinary call | the other mode, asked for by name |
 |---|---|---|
-| **read** | **validating**: `from_F<T>(bytes)`, `validate_F<T>(bytes)`, `psio::validated_view` — the structure of the bytes and everything `T` declares | trusted: `from_F<T>(psio::trusted{bytes})`, `F_trusted_view` — nothing is held against the declaration |
+| **read** | **validating**: `from_F<T>(bytes)`, `validate_F<T>(bytes)`, `psio::validated_view` — the structure of the bytes and everything `T` declares | **trusted**: `from_F<T>(psio::trusted{bytes})`, `psio::decode<T>(F{}, bytes)`, a view and its `unpack()` — nothing is held against the declaration |
 | **write** | **fast**: `to_F(v)`, `to_F(v, sink)`, `psio::encode(F{}, v)` — nothing is held against the declaration | **validated**: `to_F_checked(v)`, `to_F_checked(v, sink)` (fail as `from_F` does), `encode_F_checked(v, out)`, `psio::encode_checked(F{}, v, out)` (a `codec_status`; `out` unchanged on failure) |
 
 "What `T` declares": member bounds (`max` / `min` / `exact`, at the member
@@ -2967,20 +2966,31 @@ encoder makes anyway while it sizes the value:
 | pssz `to_pssz` / `encode` (fast) | — | only where the offsets cannot express the value | yes | **no** |
 | pssz `to_pssz_checked`, `encode_pssz_checked` (validated) | — | yes | yes | yes |
 | pssz `validate_pssz`, `from_pssz`, `validate_strict`, `decode_pssz_checked` | yes | yes | yes | yes |
-| pssz `from_pssz(psio::trusted{…})` / `psio::decode` | **no** | checked on the way | checked on the way | **no** |
+| pssz `from_pssz(psio::trusted{…})` / `psio::decode` / `unpack()` (trusted) | only the span arithmetic of its own walk: not a validation | **no** | the cap of a record, a comparison on its span | **no** |
 | `pssz_view` | **no** | **no** | **no** | **no** |
 | key `to_key`, `key_prefix` (fast) | — | **no** | — | **no** |
 | key `to_key_checked`, `encode_key_checked` (validated) | — | yes | — | yes |
 | key `validate_key`, `from_key` | yes | yes | — | yes |
+| key `from_key(psio::trusted{…})` / `psio::decode` (trusted) | yes (a key is parsed to be read) | **no** | — | **no** |
 | json / ijson `to_json` (fast) | — | **no** (a string must be UTF-8: it is JSON text) | — | **no** |
-| json / ijson `to_json_checked`, `encode_json_checked` and the readers | yes | yes | — (the cap is not a limit on text) | yes |
+| json / ijson `to_json_checked`, `encode_json_checked`, `validate_json`, `from_json` | yes | yes | — (the cap is not a limit on text) | yes |
+| json / ijson `from_json(psio::trusted{…})` / `psio::decode` (trusted) | yes (a text is parsed to be read) | **no** | — | **no** |
 | the other binary formats, `to_F` (fast) | — | **no** | **no** | **no** |
 | the other binary formats, `to_F_checked`, `encode_F_checked`, `validate_F`, `from_F`, `validate_strict`, `psio::validated_view` | yes | yes | the root type's, on the size of the input | yes |
 | the other binary formats, `from_F(psio::trusted{…})`, `F_trusted_view` | **no** | **no** | **no** | **no** |
 
-The trusted pssz decode is the one trusted read that still holds bounds,
-`utf8` and order against the bytes as it goes (not invariants): a frame the
-fast write produced from a violating value is refused by it, not misread.
+**The trusted read.** It holds nothing against what a type declares, in
+any format: a row a service wrote with the fast write is read back by the
+trusted read as the value that was written, whether or not it is inside
+its bounds (`psio::bounded` and `psio::utf8_string` are filled as written).
+What a trusted read still does is find its way through the bytes: the pssz
+decode keeps the span comparisons of its own walk (a value span inside the
+buffer, an element size that divides a list's span, an optional selector
+that is 0 or 1, a record's cap) — which is not a validation: a trusted read
+of bytes that are not a valid frame stays undefined for the binary
+formats — and the key, json and protobuf readers parse as they always do,
+because that is how they find their values. Read your own tables trusted;
+validate what comes from an action's caller or another service.
 
 ```cpp
 // A view checks nothing. Over bytes that were not validated it reads
@@ -3023,8 +3033,9 @@ the declaration does not apply to that format.
 | `maxDynamicData(N)` | yes, at every record | — | — | the root type's, on the size of the input | as flatbuf | as flatbuf | as flatbuf |
 | `maxFields(N)` | at the declaration (compile time), and by the compatibility check: no run-time check in any format ([5.6](#56-maxfieldsn)) | | | | | | |
 
-Not covered: the optional `flatbuf_lib` adapter (its `validate` is not a
-verifier).
+The optional `flatbuf_lib` adapter (the official library behind the same
+helpers) has no validating read: its bytes are FlatBuffers, and
+`psio::validate_flatbuf<T>` validates them.
 
 **The other languages.** The read side is the same in Rust for pssz, key,
 json, flatbuf, capnp, protobuf and wit (`#[psio(max = N)]`,

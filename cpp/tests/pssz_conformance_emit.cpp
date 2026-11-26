@@ -125,7 +125,7 @@ namespace
             bool decoded = true;
             try
             {
-               (void)psio::decode<R>(F{}, bytes);
+               (void)psio_test::decode_validated<R>(F{}, bytes);
             }
             catch (const psio::codec_exception&)
             {
