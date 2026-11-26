@@ -303,7 +303,7 @@ about the bytes.
 | Every offset read from the bytes | compared with the size of what it points into, where it is read | the same |
 | Bytes that are not a frame of `T` | navigation never leaves the bytes; a member that cannot be placed **fails** (`psio::codec_abort`: a `psio::codec_exception`, or the abort handler and `std::abort` without exceptions) | the same |
 | What `T` declares (bounds, `utf8`, order, invariants) | not looked at | not looked at |
-| Cost (PSSZ, ns, a row of 4 fixed members and 3 strings: construct and read 1 fixed member / read 1 fixed member of a view that exists / construct and read all 7 / walk a list of 16 records; `psio_bench_view_access`) | 0.6 / 0.4 / 1.5 / 15 | the same (before the compares were always made: 0.3 / 0.4 / 1.2 / 3.9) |
+| Cost (PSSZ, ns, a row of 4 fixed members and 3 strings: construct and read 1 fixed member / read 1 fixed member of a view that exists / construct and read all 7 / walk a list of 16 records; `psio_bench_view_access`) | 0.6 / 0.5 / 1.7 / 15 | the same (before the compares were always made: 0.3 / 0.4 / 1.2 / 3.9) |
 | `unpack()` | a trusted decode in both: for PSSZ it fails on bytes that are not a frame ([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)) | |
 
 A view fails where a decode of the same bytes fails; it does not hand out
