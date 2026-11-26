@@ -378,14 +378,14 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
       if (view instanceof PsszView)
         assert.equal(rejects(() => view.toValue(), row.name).message, row.reason, `${row.name}: view.toValue`);
       // No writer writes the value back: binary, key and text.
-      const written = rejects(() => checked.encode(value), `${row.name}: encode`);
+      const written = rejects(() => checked.encodeChecked(value), `${row.name}: encode`);
       assert.equal(written.message, row.reason, row.name);
       assert.equal(written.kind, 'value', row.name);
       assert.equal(written.invariant, true, row.name);
       if (automatic) {
         for (const format of ['json', 'ijson'] as const) {
           assert.equal(rejects(() => checked.psszToJson(bytes, format), row.name).message, row.reason, `${row.name}: ${format}`);
-          assert.equal(rejects(() => checked.valueToJson(value, format), row.name).message, row.reason, `${row.name}: ${format} value`);
+          assert.equal(rejects(() => checked.valueToJsonChecked(value, format), row.name).message, row.reason, `${row.name}: ${format} value`);
           // The wire type's text reads back to the frame.
           const text = plain.psszToJson(bytes, format);
           assert.equal(toHex(plain.jsonToPssz(text, format)), row.hex, `${row.name}: plain ${format}`);
@@ -540,17 +540,17 @@ for (const path of PATHS) test(`PSSZ fixture: every type and vector, ${path}`, (
             // A JavaScript string is always text: there is no value of a
             // UTF-8 position that is not UTF-8 to hand to a writer.
             if (notUtf8) continue;
-            const written = rejects(() => reader.encode(outside), `${row.name}: encode`);
+            const written = rejects(() => reader.encodeChecked(outside), `${row.name}: encode`);
             assert.equal(written.kind, 'value', row.name);
             assert.match(written.message, VALUE_BOUND, `${row.name}: encode`);
             // The key writer too (C++ `psio::encode_key_checked` / `to_key`).
-            const keyWritten = rejects(() => reader.encodeKey(outside), `${row.name}: encodeKey`);
+            const keyWritten = rejects(() => reader.encodeKeyChecked(outside), `${row.name}: encodeKey`);
             assert.equal(keyWritten.kind, 'value', row.name);
             assert.match(keyWritten.message, VALUE_BOUND, `${row.name}: encodeKey`);
             for (const format of ['json', 'ijson'] as const) {
               const text = loose.valueToJson(outside, format);
               for (const run of [
-                () => reader.valueToJson(outside, format), () => reader.jsonToValue(text, format),
+                () => reader.valueToJsonChecked(outside, format), () => reader.jsonToValue(text, format),
                 () => reader.jsonToPssz(text, format),
               ]) {
                 const refused = rejects(run, `${row.name}: ${format}`);
@@ -766,7 +766,7 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
           // (The bytes are refused first; then the value's text.)
           const bytesToText = rejects(() => required.psszToJson(bytes, format), row.name);
           assert.equal(bytesToText.message, 'pssz IR: no handler registered for a custom type', row.name);
-          const write = rejects(() => required.valueToJson(plain.decode(bytes), format), row.name);
+          const write = rejects(() => required.valueToJsonChecked(plain.decode(bytes), format), row.name);
           assert.equal(write.kind, 'value', row.name);
           assert.equal(write.message, 'pssz IR: no handler registered for a custom type', row.name);
           const read = rejects(() => required.jsonToPssz(row[format]!, format), row.name);
@@ -783,7 +783,7 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
           assert.equal(refused.error.message, 'pssz IR: no handler registered for a custom type', row.name);
           assert.equal(refused.error.kind, 'bytes', row.name);
           assert.equal(rejects(() => required.decode(bytes), row.name).kind, 'bytes', row.name);
-          const unwritten = rejects(() => required.encode(plain.decode(bytes)), row.name);
+          const unwritten = rejects(() => required.encodeChecked(plain.decode(bytes)), row.name);
           assert.equal(unwritten.kind, 'value', row.name);
           assert.equal(unwritten.message, 'pssz IR: no handler registered for a custom type', row.name);
           ++count.strictBinaryRefused;
@@ -826,11 +826,11 @@ for (const path of PATHS) test(`JSON fixture: every type and vector, ${path}`, (
       assert.equal(toHex(plain.jsonToPssz(row.plain_json!, 'json')), row.pssz, row.name);
       assert.equal(toHex(plain.jsonToPssz(row.plain_ijson!, 'ijson')), row.pssz, row.name);
       // Writers refuse the value too: binary and text.
-      const written = rejects(() => type.encode(value), `${row.name}: encode`);
+      const written = rejects(() => type.encodeChecked(value), `${row.name}: encode`);
       assert.equal(written.message, row.reason, row.name);
       assert.equal(written.kind, 'value', row.name);
       for (const f of ['json', 'ijson'] as const) {
-        const text = rejects(() => type.valueToJson(value, f), `${row.name}: value to ${f}`);
+        const text = rejects(() => type.valueToJsonChecked(value, f), `${row.name}: value to ${f}`);
         assert.equal(text.message, row.reason, row.name);
         assert.equal(text.kind, 'value', row.name);
       }

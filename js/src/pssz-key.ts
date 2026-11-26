@@ -7,6 +7,7 @@
 
 import {
   MAX_DEPTH, Node, PsszError, PsszNaN, PsszNegativeZero, assocItems, compareBytes, memberBoundAdmits, setField, settleMember,
+  writeMode,
   unwrapOption, utf8Decode, utf8Encode, utf8Valid, wellFormed, wrapSome,
   type BitsValue, type Codec, type VariantValue,
 } from './pssz-core.js';
@@ -39,7 +40,7 @@ function octetList(list: Node): boolean {
 // The byte container under a string / hex adapter admits `n` bytes.
 function containerAdmits(container: Node, n: number): boolean {
   if (container.kind === 'array') return n === container.countNum;
-  return !container.bounded || n <= container.countNum;
+  return !container.bounded || n <= container.countNum || writeMode.fast > 0;
 }
 
 // ── Writing ─────────────────────────────────────────────────────────────────
@@ -92,7 +93,8 @@ class Sink {
 // for single-byte elements, `01` + key(element) per element then `00`
 // otherwise.
 function writeList(codec: Codec, node: Node, value: unknown[], out: Sink, n: number): void {
-  if (node.bounded && value.length > node.countNum) valueError('key: list exceeds its bound');
+  if (node.bounded && value.length > node.countNum && writeMode.fast === 0)
+    valueError('key: list exceeds its bound');
   const element = node.child;
   if (octetList(node)) {
     const signed = element.kind === 'int' && element.signed;
@@ -258,7 +260,8 @@ function writeMember(codec: Codec, node: Node, index: number, value: unknown, ou
   let v = value === undefined && member.node.kind === 'option' ? null : value;
   if (member.bound) {
     v = settleMember(member.node, v);
-    if (!memberBoundAdmits(member.bound, member.node, v)) valueError('key: member length bound violated');
+    if (!memberBoundAdmits(member.bound, member.node, v) || !codec.nestedValueAdmits(member, v))
+      valueError('key: member length bound violated');
   }
   if (member.order) codec.checkOrder(member, v, valueError);
   writeKey(codec, member.node, v, out, n + 1);
@@ -536,7 +539,10 @@ function readKey(codec: Codec, node: Node, src: Source, n: number): unknown {
       const values: unknown[] = [];
       for (const member of node.members) {
         const value = readKey(codec, member.node, src, n + 1);
-        if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
+        if (
+          member.bound &&
+          (!memberBoundAdmits(member.bound, member.node, value) || !codec.nestedValueAdmits(member, value))
+        )
           bytesError('key: member length bound violated');
         if (member.order) codec.checkOrder(member, value, bytesError);
         setField(out, member.name, value);

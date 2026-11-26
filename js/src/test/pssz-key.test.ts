@@ -82,22 +82,22 @@ test('key: encodings per node', () => {
 
   // No key form: clear schema errors.
   const BL: PsszTypeInput = { Custom: { type: { BoundedList: { type: int(1, false), maxCount: 8 } }, id: 'bitlist' } };
-  throwsPssz(() => T(BL).encodeKey({ bytes: Uint8Array.of(1), bitCount: 1 }), /bitlist has no key encoding/);
+  throwsPssz(() => T(BL).encodeKeyChecked({ bytes: Uint8Array.of(1), bitCount: 1 }), /bitlist has no key encoding/);
   throwsPssz(() => T(BL).decodeKey(Uint8Array.of(1)), /bitlist has no key encoding/);
   throwsPssz(() => T(tuple(U8, BL)).decodeKey(Uint8Array.of(1, 1)), /bitlist/);
 
   // Values that are not of the type.
-  throwsPssz(() => T(U8).encodeKey(256));
-  throwsPssz(() => T(I8).encodeKey(-129));
-  throwsPssz(() => T(U64).encodeKey(-1n));
-  throwsPssz(() => T(U8).encodeKey('1'));
-  throwsPssz(() => T(STRING).encodeKey('\ud800'));
-  throwsPssz(() => T(list(I8)).encodeKey([128]));
-  throwsPssz(() => T({ BoundedList: { type: U16, maxCount: 2 } }).encodeKey([1, 2, 3]), /bound/);
-  throwsPssz(() => T({ Array: { type: U16, len: 2 } }).encodeKey([1]));
-  throwsPssz(() => T(tuple(U8, U8)).encodeKey([1]));
-  throwsPssz(() => T(V).encodeKey({ type: 'zzz', value: 1 }));
-  throwsPssz(() => T(BV).encodeKey({ bytes: Uint8Array.of(0xff, 0x1f), bitCount: 12 }));
+  throwsPssz(() => T(U8).encodeKeyChecked(256));
+  throwsPssz(() => T(I8).encodeKeyChecked(-129));
+  throwsPssz(() => T(U64).encodeKeyChecked(-1n));
+  throwsPssz(() => T(U8).encodeKeyChecked('1'));
+  throwsPssz(() => T(STRING).encodeKeyChecked('\ud800'));
+  throwsPssz(() => T(list(I8)).encodeKeyChecked([128]));
+  throwsPssz(() => T({ BoundedList: { type: U16, maxCount: 2 } }).encodeKeyChecked([1, 2, 3]), /bound/);
+  throwsPssz(() => T({ Array: { type: U16, len: 2 } }).encodeKeyChecked([1]));
+  throwsPssz(() => T(tuple(U8, U8)).encodeKeyChecked([1]));
+  throwsPssz(() => T(V).encodeKeyChecked({ type: 'zzz', value: 1 }));
+  throwsPssz(() => T(BV).encodeKeyChecked({ bytes: Uint8Array.of(0xff, 0x1f), bitCount: 12 }));
   const cyclic: unknown[] = [];
   cyclic.push(cyclic);
   throwsPssz(() => schema.type({ List: 'Self' }));
@@ -118,14 +118,14 @@ test('key: floats — zero and NaN', () => {
   assert.ok(Buffer.compare(f64.encodeKey(negative), f64.encodeKey(-Infinity)) < 0);
   const payload = new PsszNaN(0x7fc00001n, 4);
   assert.deepEqual(f32.decodeKey(f32.encodeKey(payload)), payload);
-  throwsPssz(() => f64.encodeKey(payload)); // wrong width
+  throwsPssz(() => f64.encodeKeyChecked(payload)); // wrong width
 });
 
 test('key: bounds and UTF-8 are checked on read', () => {
   const S4: PsszTypeInput = { Custom: { type: { BoundedList: { type: U8, maxCount: 4 } }, id: 'utf8' } };
   assert.equal(T(S4).decodeKey(unhex('616263640000')), 'abcd');
   throwsPssz(() => T(S4).decodeKey(unhex('61626364650000')), /bound/);
-  throwsPssz(() => T(S4).encodeKey('abcde'), /bound/);
+  throwsPssz(() => T(S4).encodeKeyChecked('abcde'), /bound/);
   throwsPssz(() => T(STRING).decodeKey(unhex('ff0000')), /UTF-8/);
   assert.deepEqual(T(BYTES).decodeKey(unhex('ff0000')), Uint8Array.of(0xff));
   const B2: PsszTypeInput = { BoundedList: { type: U16, maxCount: 2 } };
@@ -139,7 +139,7 @@ test('key: bounds and UTF-8 are checked on read', () => {
   }).type('R');
   assert.deepEqual(bounded.decodeKey(unhex('61620000')), { s: 'ab' });
   throwsPssz(() => bounded.decodeKey(unhex('6162630000')));
-  throwsPssz(() => bounded.encodeKey({ s: 'abc' }));
+  throwsPssz(() => bounded.encodeKeyChecked({ s: 'abc' }));
 });
 
 test('key: reading is checked', () => {
@@ -401,14 +401,14 @@ test('key: a raw string is bytes, a UTF-8 string is text; both share one key for
   // Uint8Array is not a text value.
   assert.equal(T(STRING).decodeKey(unhex('c3a90000')), 'é');
   throwsPssz(() => T(STRING).decodeKey(unhex('fffe0000')), /UTF-8/);
-  throwsPssz(() => T(STRING).encodeKey(Uint8Array.of(0x61)));
-  throwsPssz(() => T(RAW).encodeKey(7));
+  throwsPssz(() => T(STRING).encodeKeyChecked(Uint8Array.of(0x61)));
+  throwsPssz(() => T(RAW).encodeKeyChecked(7));
   // An enum is its underlying integer; a boxed or custom-presented value is its inner type.
   const E: PsszTypeInput = { Enum: { type: I32, members: { pending: -1, active: 2 } } };
   assert.equal(key(E, 2), key(I32, 2));
   assert.equal(key(E, 7), key(I32, 7));
   assert.equal(T(E).decodeKey(unhex(key(I32, -1))), -1);
-  throwsPssz(() => T(E).encodeKey('active'));
+  throwsPssz(() => T(E).encodeKeyChecked('active'));
   assert.equal(key({ Custom: { type: STRING, id: 'box' } }, 'x'), key(STRING, 'x'));
   assert.equal(key({ Custom: { type: U32, id: 'AccountNumber' } }, 9), key(U32, 9));
 });

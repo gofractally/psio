@@ -74,9 +74,9 @@ test('map / set: the bytes of the sorted list, whatever order and container the 
   rejects(() => counts.decode(fromHex(swapped)), 'bytes', 'pssz IR: map entries are not in strictly ascending key order');
   const repeated = toHex(schema.type('Entries').encode([['a', 1], ['a', 2]]));
   rejects(() => counts.decode(fromHex(repeated)), 'bytes', /not in strictly ascending key order/);
-  rejects(() => counts.encode([['a', 1], ['a', 2]] as never), 'value', 'pssz IR: map has duplicate keys');
-  rejects(() => counts.encode([['a']] as never), 'value', /map entry is a \[key, value\] pair/);
-  rejects(() => counts.encode(5 as never), 'value', /sequence value required/);
+  rejects(() => counts.encodeChecked([['a', 1], ['a', 2]] as never), 'value', 'pssz IR: map has duplicate keys');
+  rejects(() => counts.encodeChecked([['a']] as never), 'value', /map entry is a \[key, value\] pair/);
+  rejects(() => counts.encodeChecked(5 as never), 'value', /sequence value required/);
 
   // Set(u16) {513, 2}: 2 then 513 by key, though the wire bytes of 513 sort
   // below those of 2.
@@ -88,7 +88,7 @@ test('map / set: the bytes of the sorted list, whatever order and container the 
   assert.deepEqual([...back], [2, 513]);
   rejects(() => ids.decode(fromHex('01020200')), 'bytes', 'pssz IR: set elements are not in strictly ascending order');
   rejects(() => ids.decode(fromHex('02000200')), 'bytes', /not in strictly ascending order/);
-  rejects(() => ids.encode([2, 2] as never), 'value', 'pssz IR: set has duplicate elements');
+  rejects(() => ids.encodeChecked([2, 2] as never), 'value', 'pssz IR: set has duplicate elements');
   assert.deepEqual(schema.type('IdList').decode(fromHex('01020200')), [513, 2]);
 });
 
@@ -106,7 +106,7 @@ test('map / set: text is an object for a string key, pairs otherwise; any order 
     assert.deepEqual([...byName.jsonToValue('{"pear":3,"apple":1}', format)], [['apple', 1], ['pear', 3]]);
     rejects(() => byName.jsonToValue('{"a":1,"a":2}', format), 'json', 'json: duplicate map key');
     rejects(() => byName.jsonToValue('[["a",1]]', format), 'json', /expected an object/);
-    rejects(() => byName.valueToJson([['a', 1], ['a', 2]] as never, format), 'value', 'json: map has duplicate keys');
+    rejects(() => byName.valueToJsonChecked([['a', 1], ['a', 2]] as never, format), 'value', 'json: map has duplicate keys');
     // A raw string key is a string by type as well.
     assert.equal(schema.type('ByRaw').psszToJson(schema.type('ByRaw').jsonToPssz('{"b":2,"a":1}', format), format), '{"a":1,"b":2}');
     // An integer key is not a string by type, also where it is written as one.
@@ -120,7 +120,7 @@ test('map / set: text is an object for a string key, pairs otherwise; any order 
     const names = schema.type<Set<string>>('Names');
     assert.equal(names.valueToJson(new Set(['b', 'a']), format), '["a","b"]');
     rejects(() => names.jsonToValue('["a","a"]', format), 'json', 'json: duplicate set element');
-    rejects(() => names.valueToJson(['a', 'a'] as never, format), 'value', 'json: set has duplicate elements');
+    rejects(() => names.valueToJsonChecked(['a', 'a'] as never, format), 'value', 'json: set has duplicate elements');
     // A set of bytes is an array of numbers in both formats, not a byte string.
     assert.equal(schema.type('Bytes').valueToJson(new Set([7, 1]), format), '[1,7]');
   }
@@ -142,7 +142,7 @@ test('map / set: the float −0 key keeps its sign bit', () => {
   assert.equal(zeros.valueToJson(decoded, 'json'), '[-0]');
   assert.deepEqual(zeros.jsonToValue('[-0]', 'json'), decoded);
   // -0 and +0 are one key: they cannot both be in a set.
-  rejects(() => zeros.encode([0, -0] as never), 'value', /duplicate elements/);
+  rejects(() => zeros.encodeChecked([0, -0] as never), 'value', /duplicate elements/);
   rejects(() => zeros.decode(fromHex('0000000000000000' + negative)), 'bytes', /ascending/);
   const byFloat = schema.type<Map<number | PsszNegativeZero, number>>('ByFloat');
   const frame = byFloat.encode([[-0, 7]] as never);
@@ -167,7 +167,7 @@ test('map / set: keys, key order of nested maps, and what is not a key type', ()
     'key: map entries are not in strictly ascending key order');
   rejects(() => schema.type('Ids').decodeKey(fromHex('02010000')), 'bytes', 'key: set elements are not in strictly ascending order');
   rejects(() => schema.type('Ids').decodeKey(fromHex('01010000')), 'bytes', /ascending/);
-  rejects(() => groups.encodeKey([['a', []], ['a', []]] as never), 'value', 'key: map has duplicate keys');
+  rejects(() => groups.encodeKeyChecked([['a', []], ['a', []]] as never), 'value', 'key: map has duplicate keys');
 
   // Malformed schemas (the JSON fixture's schema_rejects hold the full list).
   const bad = (type: unknown, what: RegExp) =>
@@ -240,7 +240,7 @@ test('nested value: unknown inner fields, and the opaque option that keeps the b
     const garbage = schema.type('Raw').encode({ method: 9, args: fromHex('010203') });
     assert.deepEqual(opaque.validate(garbage), { ok: true, hasUnknown: false });
     assert.equal(schema.type('Args').validate((opaque.decode(garbage) as { args: Uint8Array }).args).ok, false);
-    rejects(() => opaque.encode({ method: 9, args }), 'value', /bytes value required for an opaque nested value/);
+    rejects(() => opaque.encodeChecked({ method: 9, args }), 'value', /bytes value required for an opaque nested value/);
     // The text is the inner value's all the same; the writer validates the bytes.
     assert.equal(opaque.valueToJson(held), '{"method":9,"args":{"to":"bob","amount":5,"memo":"rent"}}');
     rejects(() => opaque.psszToJson(garbage), 'value', 'json: nested bytes are not a valid encoding of their type');
@@ -268,9 +268,18 @@ test('nested value: a member length bound counts the bytes of the encoding; keys
   assert.deepEqual(note.validate(ok), { ok: true, hasUnknown: false });
   // The bound narrows the record's offset width, as on a byte list.
   assert.equal(note.width, 1);
-  rejects(() => note.encode({ id: 1, note: 'abcd', maybe: null }), 'value', /member length bound violated/);
-  rejects(() => note.encode({ id: 1, note: 'abc', maybe: 'abcd' }), 'value', /member length bound violated/);
-  rejects(() => note.jsonToPssz('{"id":1,"note":"abcd"}'), 'value', /member length bound violated/);
+  rejects(() => note.encodeChecked({ id: 1, note: 'abcd', maybe: null }), 'value', /member length bound violated/);
+  rejects(() => note.encodeChecked({ id: 1, note: 'abc', maybe: 'abcd' }), 'value', /member length bound violated/);
+  // (The JSON reader holds the nested bound itself now: the text is refused
+  // as text, before anything is encoded.)
+  rejects(() => note.jsonToPssz('{"id":1,"note":"abcd"}'), 'json', /member length_bound violated/);
+  rejects(() => note.jsonToValue('{"id":1,"note":"abcd"}'), 'json', /member length_bound violated/);
+  rejects(() => note.valueToJsonChecked({ id: 1, note: 'abcd', maybe: null }), 'value', /member length_bound violated/);
+  rejects(() => note.encodeKeyChecked({ id: 1, note: 'abcd', maybe: null }), 'value', /member length bound violated/);
+  // The fast writes hold nothing against the bound.
+  note.encode({ id: 1, note: 'abcd', maybe: null });
+  note.encodeKey({ id: 1, note: 'abcd', maybe: null });
+  note.valueToJson({ id: 1, note: 'abcd', maybe: null });
 
   // A nested key is ordered by its inner bytes as stored: 256 (00 01 00 00)
   // sorts before 1 (01 00 00 00).
@@ -325,7 +334,7 @@ test('nested value: the member length bound counts encoded bytes behind a named 
     assert.equal(schema.type('Args').encode(args).length, 28);
     assert.deepEqual(rec.validate(rec.encode({ id: 1, args })), { ok: true, hasUnknown: false });
     const over = { id: 1, args: { ...args, to: 'bobs' } }; // 29 bytes
-    rejects(() => rec.encode(over), 'value', violated);
+    rejects(() => rec.encodeChecked(over), 'value', violated);
     const overBytes = unbounded.type('Rec', { width: w }).encode(over);
     assert.equal(rec.validate(overBytes).ok, false);
     rejects(() => rec.decode(overBytes), 'bytes', violated);
@@ -335,14 +344,15 @@ test('nested value: the member length bound counts encoded bytes behind a named 
     assert.deepEqual(held.validate(held.encode({ id: 1, words: [1, 2], maybe: [1, 2] })), { ok: true, hasUnknown: false });
     assert.deepEqual(held.validate(held.encode({ id: 1, words: [], maybe: null })), { ok: true, hasUnknown: false });
     // Three u16: 3 elements <= 5, 6 bytes > 5.
-    rejects(() => held.encode({ id: 1, words: [1, 2, 3], maybe: null }), 'value', violated);
-    rejects(() => held.decode(plain.encode({ id: 1, words: [1, 2, 3], maybe: null })), 'bytes', violated);
+    rejects(() => held.encodeChecked({ id: 1, words: [1, 2, 3], maybe: null }), 'value', violated);
+    rejects(() => held.decode(plain.encodeChecked({ id: 1, words: [1, 2, 3], maybe: null })), 'bytes', violated);
     // One u16 through the optional alias: 2 bytes < 4. An absent one has no length.
-    rejects(() => held.encode({ id: 1, words: [], maybe: [1] }), 'value', violated);
-    rejects(() => held.decode(plain.encode({ id: 1, words: [], maybe: [1] })), 'bytes', violated);
+    rejects(() => held.encodeChecked({ id: 1, words: [], maybe: [1] }), 'value', violated);
+    rejects(() => held.decode(plain.encodeChecked({ id: 1, words: [], maybe: [1] })), 'bytes', violated);
   }
-  rejects(() => schema.type('Rec').jsonToPssz('{"id":1,"args":{"to":"bobs","amount":5,"memo":"rent"}}'), 'value', violated);
-  rejects(() => schema.type('Held').jsonToPssz('{"id":1,"words":[1,2,3]}'), 'value', violated);
+  const violatedText = /member length_bound violated/;
+  rejects(() => schema.type('Rec').jsonToPssz('{"id":1,"args":{"to":"bobs","amount":5,"memo":"rent"}}'), 'json', violatedText);
+  rejects(() => schema.type('Held').jsonToPssz('{"id":1,"words":[1,2,3]}'), 'json', violatedText);
 });
 
 // ── Invariants and handlers ─────────────────────────────────────────────────
@@ -395,10 +405,10 @@ test('invariant: a handler check runs on every entry point, binary and text, inn
     assert.equal(refused.invariant, true);
     const validation = range.validate(reversed);
     assert.ok(!validation.ok && validation.error.message === 'Range: lo is greater than hi' && validation.error.invariant);
-    assert.equal(rejects(() => range.encode({ lo: 4, hi: 2 }), 'value', 'Range: lo is greater than hi').invariant, true);
+    assert.equal(rejects(() => range.encodeChecked({ lo: 4, hi: 2 }), 'value', 'Range: lo is greater than hi').invariant, true);
     // Innermost first: the member's invariant is reported before its record's.
-    rejects(() => range.decode(wire.encode({ lo: 5, hi: 2 })), 'bytes', 'Even: odd value');
-    rejects(() => range.encode({ lo: 5, hi: 2 }), 'value', 'Even: odd value');
+    rejects(() => range.decode(wire.encodeChecked({ lo: 5, hi: 2 })), 'bytes', 'Even: odd value');
+    rejects(() => range.encodeChecked({ lo: 5, hi: 2 }), 'value', 'Even: odd value');
     // No handler: the value is its wire type. A strict registry refuses the type.
     assert.deepEqual(wire.validate(reversed), { ok: true, hasUnknown: false });
     const required = rejects(() => strict.type('Range', { width }).decode(good), 'bytes', 'pssz IR: no handler registered for a custom type');
@@ -417,8 +427,8 @@ test('invariant: a handler check runs on every entry point, binary and text, inn
   for (const format of ['json', 'ijson'] as const) {
     assert.equal(rejects(() => range.jsonToValue('{"lo":4,"hi":2}', format), 'json', 'Range: lo is greater than hi').invariant, true);
     rejects(() => range.jsonToPssz('{"lo":5,"hi":2}', format), 'json', 'Even: odd value');
-    rejects(() => range.valueToJson({ lo: 4, hi: 2 }, format), 'value', 'Range: lo is greater than hi');
-    rejects(() => range.psszToJson(plain.type('Range').encode({ lo: 4, hi: 2 }), format), 'bytes', 'Range: lo is greater than hi');
+    rejects(() => range.valueToJsonChecked({ lo: 4, hi: 2 }, format), 'value', 'Range: lo is greater than hi');
+    rejects(() => range.psszToJson(plain.type('Range').encodeChecked({ lo: 4, hi: 2 }), format), 'bytes', 'Range: lo is greater than hi');
     assert.equal(range.valueToJson({ lo: 2, hi: 4 }, format), '{"lo":2,"hi":4}');
     // A text form and an invariant: the text is read first, then the value checked.
     const tag = checked.type('Tag');
@@ -426,7 +436,7 @@ test('invariant: a handler check runs on every entry point, binary and text, inn
     assert.equal(tag.jsonToValue('"#7"', format), 7);
     rejects(() => tag.jsonToValue('"7"', format), 'json', 'json: text is not a value of the custom type');
     rejects(() => tag.jsonToValue('"#13"', format), 'json', 'Tag: unlucky');
-    rejects(() => tag.valueToJson(13, format), 'value', 'Tag: unlucky');
+    rejects(() => tag.valueToJsonChecked(13, format), 'value', 'Tag: unlucky');
     rejects(() => tag.jsonToValue('7', format), 'json', /expected a string \(custom text form\)/);
   }
   // In lists, in nested bytes, in keys.
@@ -435,7 +445,7 @@ test('invariant: a handler check runs on every entry point, binary and text, inn
   const held = plain.type('Held').encode({ lo: 4, hi: 2 });
   rejects(() => checked.type('Held').decode(held), 'bytes', 'Range: lo is greater than hi');
   assert.deepEqual(checked.type('Held', { nestedBytes: 'opaque' }).validate(held), { ok: true, hasUnknown: false });
-  rejects(() => checked.type('Even').encodeKey(3), 'value', 'Even: odd value');
+  rejects(() => checked.type('Even').encodeKeyChecked(3), 'value', 'Even: odd value');
   rejects(() => checked.type('Even').decodeKey(fromHex('03')), 'bytes', 'Even: odd value');
   assert.equal(plain.type('Even').decodeKey(fromHex('03')), 3);
   assert.equal(checked.type('Even').validateKey(fromHex('03')).ok, false);
@@ -450,15 +460,15 @@ test('invariant: in maps and sets — the key before its value, the invariant be
   const byEven = checked.type('ByEven');
   const wire = plain.type('ByEven');
   // The key's violation is reported before its mapped value's.
-  rejects(() => byEven.decode(wire.encode([[3, { lo: 4, hi: 2 }]])), 'bytes', 'Even: odd value');
-  rejects(() => byEven.decode(wire.encode([[2, { lo: 4, hi: 2 }]])), 'bytes', 'Range: lo is greater than hi');
-  rejects(() => byEven.encode([[3, { lo: 2, hi: 4 }]]), 'value', 'Even: odd value');
+  rejects(() => byEven.decode(wire.encodeChecked([[3, { lo: 4, hi: 2 }]])), 'bytes', 'Even: odd value');
+  rejects(() => byEven.decode(wire.encodeChecked([[2, { lo: 4, hi: 2 }]])), 'bytes', 'Range: lo is greater than hi');
+  rejects(() => byEven.encodeChecked([[3, { lo: 2, hi: 4 }]]), 'value', 'Even: odd value');
   // The order is defined for every key, and computing it runs no check: an
   // entry whose key violates its invariant and is in its place is refused
   // for the invariant.
   assert.deepEqual([...(wire.decode(wire.encode([[4, { lo: 0, hi: 0 }], [3, { lo: 0, hi: 0 }]])) as Map<number, unknown>).keys()], [3, 4]);
-  rejects(() => byEven.decode(wire.encode([[3, { lo: 0, hi: 0 }], [4, { lo: 0, hi: 0 }]])), 'bytes', 'Even: odd value');
-  rejects(() => checked.type('Evens').decode(plain.type('Evens').encode([2, 3])), 'bytes', 'Even: odd value');
+  rejects(() => byEven.decode(wire.encodeChecked([[3, { lo: 0, hi: 0 }], [4, { lo: 0, hi: 0 }]])), 'bytes', 'Even: odd value');
+  rejects(() => checked.type('Evens').decode(plain.type('Evens').encodeChecked([2, 3])), 'bytes', 'Even: odd value');
 
   for (const format of ['json', 'ijson'] as const) {
     // A key with a text form keys an object; without the handler the map
@@ -471,9 +481,9 @@ test('invariant: in maps and sets — the key before its value, the invariant be
     rejects(() => byTag.jsonToValue('{"7":1}', format), 'json', 'json: text is not a value of the custom type');
     // An invariant runs on a key read from, or written as, a member name.
     assert.equal(rejects(() => byTag.jsonToValue('{"#13":1}', format), 'json', 'Tag: unlucky').invariant, true);
-    rejects(() => byTag.valueToJson([[13, 1]], format), 'value', 'Tag: unlucky');
+    rejects(() => byTag.valueToJsonChecked([[13, 1]], format), 'value', 'Tag: unlucky');
     // A strict registry that lacks the key's handler refuses the map.
-    rejects(() => plain.withHandlers({}, { requireHandlers: true }).type('ByTag').valueToJson([], format), 'value', /no handler registered/);
+    rejects(() => plain.withHandlers({}, { requireHandlers: true }).type('ByTag').valueToJsonChecked([], format), 'value', /no handler registered/);
     rejects(() => plain.withHandlers({}, { requireHandlers: true }).type('ByTag').jsonToValue('[]', format), 'json', /no handler registered/);
     // A handler that only checks does not decide the form: the string under
     // it does, with or without the handler.
@@ -483,7 +493,7 @@ test('invariant: in maps and sets — the key before its value, the invariant be
     }
     assert.deepEqual([...(plain.type('ByLabel').jsonToValue('{"":1}', format) as Map<string, number>)], [['', 1]]);
     rejects(() => checked.type('ByLabel').jsonToValue('{"":1}', format), 'json', 'Label: empty');
-    rejects(() => checked.type('ByLabel').valueToJson([['', 1]], format), 'value', 'Label: empty');
+    rejects(() => checked.type('ByLabel').valueToJsonChecked([['', 1]], format), 'value', 'Label: empty');
   }
 });
 
@@ -558,7 +568,7 @@ test('typed layer: pair, map, set, nested and transparent — values, views and 
   })));
   assert.equal(Book.width, Lists.width);
   // A member length bound counts entries.
-  rejects(() => Book.encode({ ...value, limited: new Map([[1, 1], [2, 2], [3, 3]]) }), 'value', /bound/);
+  rejects(() => Book.encodeChecked({ ...value, limited: new Map([[1, 1], [2, 2], [3, 3]]) }), 'value', /bound/);
   // A deferred nested value is not looked at by the enclosing reader.
   const odd = Book.encode({ ...value, later: fromHex('010203') });
   assert.deepEqual(Book.validate(odd), { ok: true, hasUnknown: false });
@@ -684,8 +694,8 @@ test('typed layer: the Schema IR of pair, map, set, nested, transparent and cust
   };
   const frame = type.encode(value);
   assert.deepEqual(type.validate(frame), { ok: true, hasUnknown: false });
-  rejects(() => type.encode({ ...value, key: new Uint8Array(0) }), 'value', 'Key: empty');
-  rejects(() => type.encode({ ...value, level: 2 }), 'value', 'Level: not listed');
+  rejects(() => type.encodeChecked({ ...value, key: new Uint8Array(0) }), 'value', 'Key: empty');
+  rejects(() => type.encodeChecked({ ...value, level: 2 }), 'value', 'Level: not listed');
   // Fetched as bytes, the schema has neither: the node is its wire type.
   const fetched = PsszSchema.decode(schema.encode()).type('Holder');
   rejects(() => fetched.decode(frame), 'bytes', /./);
@@ -699,5 +709,5 @@ test('typed layer: the Schema IR of pair, map, set, nested, transparent and cust
   rejects(() => custom('K', u8, { check: 1 as never }), 'schema', /check .* must be a function/);
   rejects(() => custom('D', nested(Args, { deferred: true })).schema, 'schema', /deferred nested value cannot be the wire type/);
   rejects(() => record('R', { m: field(Id, { lengthBound: { max: 1 } }) }).schema, 'schema', /lengthBound does not apply/);
-  rejects(() => map(bitlist(8), u8).encode(new Map()), 'schema', /has no key encoding/);
+  rejects(() => map(bitlist(8), u8).encodeChecked(new Map()), 'schema', /has no key encoding/);
 });

@@ -234,7 +234,7 @@ test('interface-vectors.json: every row, typed and schema-driven', () => {
           assert.equal(m.resultFromPssz(bytes), undefined, name);
           assert.equal(m.resultView(bytes), undefined, name);
           assert.equal(toHex(m.resultToPssz(undefined as never)), '', name);
-          rejects(() => m.resultToPssz(1 as never), `${name}: a value`);
+          rejects(() => m.resultToPsszChecked(1 as never), `${name}: a value`);
         } else {
           const refused = m.validateResult(bytes);
           assert.ok(!refused.ok && refused.error.kind === 'bytes', `${name}: accepted`);
@@ -339,9 +339,9 @@ test('interface: the JavaScript values of arguments and results are statically t
   assert.equal(toHex(Token.methods.add.args.encodeKey([1, 2])), '0000000100000002');
   assert.deepEqual(Token.methods.add.args.decodeKey(fromHex('0000000100000002')), [1, 2]);
   assert.equal(Token.methods.add.args.view(fromHex('080100000002000000')).get('1'), 2);
-  rejects(() => Token.methods.add.args.encode([1, 2, 3] as never), 'three arguments');
-  rejects(() => Token.methods.add.args.encode({ 0: 1, 1: 2 } as never), 'an object for a positional list');
-  rejects(() => Token.methods.transfer.args.encode(['bob', 5n, null] as never), 'an array for a named list');
+  rejects(() => Token.methods.add.args.encodeChecked([1, 2, 3] as never), 'three arguments');
+  rejects(() => Token.methods.add.args.encodeChecked({ 0: 1, 1: 2 } as never), 'an object for a positional list');
+  rejects(() => Token.methods.transfer.args.encodeChecked(['bob', 5n, null] as never), 'an array for a named list');
   // Results.
   const receipt: { id: bigint; note: string } = Token.methods.transfer.result.decode(fromHex('090700000000000000096f6b'));
   assert.deepEqual(receipt, { id: 7n, note: 'ok' });
@@ -364,7 +364,7 @@ test('interface: the JavaScript values of arguments and results are statically t
   const view = Token.methods.names.resultView(fromHex('0207616c696365626f62'));
   assert.equal(view.length, 2);
   assert.equal(view.at(1), 'bob');
-  rejects(() => Token.methods.names.resultToPssz(['a', 'b', 'c', 'd', 'e']), 'five names');
+  rejects(() => Token.methods.names.resultToPsszChecked(['a', 'b', 'c', 'd', 'e']), 'five names');
   // An empty optional result is zero bytes when its payload cannot be empty ...
   assert.equal(toHex(Token.methods.find.resultToPssz(null)), '');
   const found: { id: bigint; note: string } | null = Token.methods.find.resultFromPssz(new Uint8Array(0));
@@ -377,14 +377,17 @@ test('interface: the JavaScript values of arguments and results are statically t
   // A method that returns nothing: no bytes.
   const nothing: undefined = Token.methods.ping.resultFromPssz(new Uint8Array(0));
   assert.equal(nothing, undefined);
-  // Every writer refuses a result outside returns(...).
+  // Every validated writer (and reader) refuses a result outside returns(...).
   for (const run of [
-    () => Token.methods.names.result.encode(['a', 'b', 'c', 'd', 'e']),
-    () => Token.methods.names.result.encode(['a'.repeat(17)]),
-    () => Token.methods.names.result.valueToJson(['a'.repeat(17)]),
+    () => Token.methods.names.result.encodeChecked(['a', 'b', 'c', 'd', 'e']),
+    () => Token.methods.names.result.encodeChecked(['a'.repeat(17)]),
+    () => Token.methods.names.result.valueToJsonChecked(['a'.repeat(17)]),
     () => Token.methods.names.result.jsonToValue('["a","b","c","d","e"]'),
-    () => Token.methods.names.result.encodeKey(['a', 'b', 'c', 'd', 'e']),
+    () => Token.methods.names.result.encodeKeyChecked(['a', 'b', 'c', 'd', 'e']),
   ]) rejects(run, 'a result outside its bounds');
+  // The fast writers hold nothing against returns(...).
+  Token.methods.names.result.encode(['a', 'b', 'c', 'd', 'e']);
+  Token.methods.names.resultToPssz(['a', 'b', 'c', 'd', 'e']);
 });
 
 test('interface: a result bound with no type form is result.lengthBound, enforced on both paths', () => {
@@ -401,8 +404,8 @@ test('interface: a result bound with no type form is result.lengthBound, enforce
   for (const code of [api.methods.code.result as PsszType<number[]>, fetched.method<unknown, number[]>('code').result!]) {
     assert.equal(toHex(code.encode([1, 2])), '0102');
     assert.deepEqual(code.decode(fromHex('010203')), [1, 2, 3]);
-    assert.equal(rejects(() => code.encode([]), 'below min').kind, 'value');
-    assert.equal(rejects(() => code.encode([1, 2, 3, 4]), 'above max').kind, 'value');
+    assert.equal(rejects(() => code.encodeChecked([]), 'below min').kind, 'value');
+    assert.equal(rejects(() => code.encodeChecked([1, 2, 3, 4]), 'above max').kind, 'value');
     assert.equal(code.validate(fromHex('01020304')).ok, false);
     assert.equal(code.validate(new Uint8Array(0)).ok, false);
     assert.equal(rejects(() => code.jsonToValue('[]'), 'text').kind, 'json');
@@ -410,12 +413,12 @@ test('interface: a result bound with no type form is result.lengthBound, enforce
   }
   for (const tag of [api.methods.tag.result as PsszType<string>, fetched.method<unknown, string>('tag').result!]) {
     assert.equal(toHex(tag.encode('ab')), '6162');
-    rejects(() => tag.encode('abc'), 'not exact');
+    rejects(() => tag.encodeChecked('abc'), 'not exact');
     assert.equal(tag.validate(fromHex('61')).ok, false);
   }
   // sorted / unique are typed-only: the typed codecs enforce them, a fetched schema does not know them.
-  assert.equal(rejects(() => api.methods.sorted.args.encode({ ids: [2, 1] }), 'unsorted arguments').message, 'sorted: elements are not in order');
-  assert.equal(rejects(() => api.methods.sorted.result.encode([1, 1]), 'a repeated result').message, 'sorted: elements are not in strictly ascending order');
+  assert.equal(rejects(() => api.methods.sorted.args.encodeChecked({ ids: [2, 1] }), 'unsorted arguments').message, 'sorted: elements are not in order');
+  assert.equal(rejects(() => api.methods.sorted.result.encodeChecked([1, 1]), 'a repeated result').message, 'sorted: elements are not in strictly ascending order');
   assert.equal(api.methods.sorted.result.validate(fromHex('0200000001000000')).ok, false);
   assert.equal(fetched.method('sorted').result!.validate(fromHex('0200000001000000')).ok, true);
   assert.equal(toHex(api.methods.sorted.result.encode([1, 2])), '0100000002000000');

@@ -77,7 +77,8 @@ Transfer.view(bytes).get('amount');                   // 18446744073709551615n, 
 | `PsszSchema.decode(bytes, options)` / `.fromJson(text, format, options)` | From the PSSZ bytes / the JSON or I-JSON text of `psio::Schema`. `schema.encode()` / `schema.toJson(format)` write them back ([the schema as JSON](#the-schema-as-json)); `schema.ir` is the IR. |
 | `schema.withHandlers(handlers, { requireHandlers, nestedBytes })` | The same schema with these custom handlers (text forms, invariants) added. |
 | `schema.type(root, { width, handlers, requireHandlers, nestedBytes })` | A `PsszType` for a type name or an inline type. `nestedBytes: 'opaque'` reads and writes every nested value as its bytes, unexamined (default `'typed'`: validated as the inner type). `width`: `'auto'` (default; type-derived offset widths, the `psio::pssz` format) or `1` / `2` / `4` (one inherited width, `psio::pssz_<W>`; see [explicit widths](#explicit-widths)). Throws when the type is not expressible. |
-| `type.encode(value)` | Canonical bytes. Trailing absent optionals are pruned; length bounds and caps are enforced. |
+| `type.encode(value)` | The bytes: the **fast write**. Trailing absent optionals are pruned. The value is not held against what the type declares (length bounds, order, handler checks); it throws only for a value the format cannot represent (an offset that does not fit its width, a `maxDynamicData` cap, a fixed array of the wrong length, a wrong JavaScript type). `encodeKey` and `valueToJson` are fast writes too. |
+| `type.encodeChecked(value)` | The **validated write**: the canonical bytes, or a `PsszError` for a value `validate` would refuse the bytes of. `encodeKeyChecked`, `valueToJsonChecked`, `method.resultToPsszChecked` likewise. Use it where the bytes leave the program. |
 | `type.decode(bytes, { rejectUnknown })` | The value. The bytes are fully validated first. Unknown appended optional fields are dropped unless `rejectUnknown`. |
 | `type.validate(bytes)` | `{ ok: true, hasUnknown }` or `{ ok: false, error }`. Never throws. |
 | `type.view(bytes)` | The value read in place ([views](#views)). |
@@ -381,7 +382,7 @@ import { transparent, field, rawString, boundedUtf8, toHex } from 'psio';
 const Memo = transparent('Memo', field(rawString, { utf8: true, max: 80 }));   // is a UTF-8 string of at most 80 bytes
 Memo.inferredBound;                  // 80n
 toHex(Memo.encode('hi'));            // '6869': the bytes of the string
-Memo.encode('x'.repeat(81));         // throws PsszError: pssz IR: byte count bound exceeded
+Memo.encodeChecked('x'.repeat(81));  // throws PsszError: pssz IR: byte count bound exceeded
 transparent('Memo', boundedUtf8(80));   // the same type, spelled with a wrapper type
 ```
 
@@ -467,13 +468,16 @@ is `psio::bounded<psio::utf8_string<16>, 8>` (a registered type of its own).
 Use the spelling the C++ type uses when `generateSchema` must reproduce a
 C++ schema byte for byte; otherwise either.
 
-**Every writer and reader checks every bound**, at every depth: `encode`,
-`validate`, `decode`, a view's `toValue()`, bytes to text, text to value and
-to bytes, `valueToJson`, `encodeKey` and `decodeKey`. A value outside a bound
-is an error of kind `value` (a writer) or `bytes` / `json` (a reader).
+**Every validated writer and every reader checks every bound**, at every
+depth: `encodeChecked`, `validate`, `decode`, a view's `toValue()`, bytes to
+text, text to value and to bytes, `valueToJsonChecked`, `encodeKeyChecked`
+and `decodeKey`. A value outside a bound is an error of kind `value` (a
+writer) or `bytes` / `json` (a reader). The fast writes — `encode`,
+`encodeKey`, `valueToJson` — do not look: they are for values the program
+made itself, as in C++ (`to_pssz` / `to_pssz_checked`).
 
 ```typescript
-Post.encode({ ...post, tags: ['a'.repeat(17)] });   // throws PsszError: pssz IR: byte count bound exceeded
+Post.encodeChecked({ ...post, tags: ['a'.repeat(17)] });   // throws PsszError: pssz IR: byte count bound exceeded
 ```
 
 **Method arguments** (`docs/pssz-spec.md` §16). The arguments of a method
@@ -1079,7 +1083,7 @@ const Range = custom('Range', record('Range', { lo: u32, hi: u32 }), {
 });
 
 Range.encode({ lo: 1, hi: 5 });                 // the bytes of the record
-Range.encode({ lo: 5, hi: 1 });                 // throws: 'Range: lo is greater than hi' (kind 'value')
+Range.encodeChecked({ lo: 5, hi: 1 });          // throws: 'Range: lo is greater than hi' (kind 'value')
 Range.validate(reversedBytes);                  // { ok: false, error }: the same message (kind 'bytes')
 Range.jsonToValue('{"lo":5,"hi":1}');           // throws the same (kind 'json')
 ```

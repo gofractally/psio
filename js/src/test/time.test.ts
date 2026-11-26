@@ -209,11 +209,11 @@ test('time: the codecs carry bigint ticks at every width', () => {
         }
         // A safe-integer number is accepted on input, like any integer.
         assert.deepEqual(type.encode(1), type.encode(1n));
-        throwsPssz(() => type.encode(max + 1n));
-        throwsPssz(() => type.encode(min - 1n));
-        throwsPssz(() => type.encode(1.5));
-        throwsPssz(() => type.encode('1'));
-        throwsPssz(() => type.encode(new Date(0)));
+        throwsPssz(() => type.encodeChecked(max + 1n));
+        throwsPssz(() => type.encodeChecked(min - 1n));
+        throwsPssz(() => type.encodeChecked(1.5));
+        throwsPssz(() => type.encodeChecked('1'));
+        throwsPssz(() => type.encodeChecked(new Date(0)));
       }
     }
 });
@@ -263,16 +263,16 @@ test('time: json and ijson', () => {
   const far = (1n << 63n) - 1n;
   assert.equal(sec.decode(sec.encode(far)), far);
   for (const format of ['json', 'ijson'] as const) {
-    throwsPssz(() => sec.valueToJson(far, format), /0000\.\.9999/);
-    throwsPssz(() => sec.psszToJson(sec.encode(far), format));
-    throwsPssz(() => sec.valueToJson(1.5, format));
-    throwsPssz(() => sec.valueToJson('2026-11-22T10:15:30Z', format));
+    throwsPssz(() => sec.valueToJsonChecked(far, format), /0000\.\.9999/);
+    throwsPssz(() => sec.psszToJson(sec.encodeChecked(far), format));
+    throwsPssz(() => sec.valueToJsonChecked(1.5, format));
+    throwsPssz(() => sec.valueToJsonChecked('2026-11-22T10:15:30Z', format));
   }
   // A unit that is not 1/10^k has no text form; binary and key still work.
   const minutes = schema.type(time('time-point-60/1'));
   assert.equal(minutes.decode(minutes.encode(5n)), 5n);
   assert.equal(minutes.decodeKey(minutes.encodeKey(5n)), 5n);
-  throwsPssz(() => minutes.valueToJson(5n), /no RFC 3339 text form/);
+  throwsPssz(() => minutes.valueToJsonChecked(5n), /no RFC 3339 text form/);
   throwsPssz(() => minutes.jsonToValue('"1970-01-01T00:05:00Z"'), /no RFC 3339 text form/);
   throwsPssz(() => minutes.jsonToValue('5'));
   // ... while a duration of any unit is its integer.
@@ -287,7 +287,7 @@ test('time: the ids are built-in presentations of the Custom-id mechanism', () =
   assert.equal(at.jsonToValue('"2026-11-22T10:15:30.123Z"'), T * 1000n + 123n);
   assert.equal(strict.type(time('duration-seconds', 32)).valueToJson(-5n), '-5');
   // ... while an ordinary custom id under the same schema does need one.
-  throwsPssz(() => strict.type({ Custom: { type: int(64, false), id: 'AccountNumber' } }).valueToJson(1n),
+  throwsPssz(() => strict.type({ Custom: { type: int(64, false), id: 'AccountNumber' } }).valueToJsonChecked(1n),
     /no handler registered/);
   // ... and none can be registered for them, or for a reserved spelling.
   const handler = { toText: () => 'x', fromText: () => 0n };
@@ -354,8 +354,8 @@ test('time: a monotonic time point is its tick count in every format', () => {
   for (const format of ['json', 'ijson'] as const) {
     throwsPssz(() => Timer.jsonToValue(date, format));
     throwsPssz(() => Timer.jsonToPssz(date, format));
-    throwsPssz(() => Timer.valueToJson({ ...timer, expires: '2026-11-22T10:15:30Z' as unknown as bigint }, format));
-    throwsPssz(() => Timer.valueToJson({ ...timer, expires: new Date(0) as unknown as bigint }, format));
+    throwsPssz(() => Timer.valueToJsonChecked({ ...timer, expires: '2026-11-22T10:15:30Z' as unknown as bigint }, format));
+    throwsPssz(() => Timer.valueToJsonChecked({ ...timer, expires: new Date(0) as unknown as bigint }, format));
   }
   // Member integer-form annotations apply, as to a duration.
   const Forced = record('Forced', { at: field(monotonic('seconds'), { jsonInt: 'string', ijsonInt: 'string' }) });
@@ -382,10 +382,10 @@ test('time: a monotonic time point is its tick count in every format', () => {
           }
         }
         assert.deepEqual(type.encode(1), type.encode(1n));
-        throwsPssz(() => type.encode(max + 1n));
-        throwsPssz(() => type.encode(min - 1n));
-        throwsPssz(() => type.encode(new Date(0)));
-        throwsPssz(() => type.valueToJson(max + 1n));
+        throwsPssz(() => type.encodeChecked(max + 1n));
+        throwsPssz(() => type.encodeChecked(min - 1n));
+        throwsPssz(() => type.encodeChecked(new Date(0)));
+        throwsPssz(() => type.valueToJsonChecked(max + 1n));
         throwsPssz(() => type.jsonToValue((max + 1n).toString(), 'json'));
       }
     }
@@ -459,7 +459,7 @@ test('time: schema marks a monotonic time point with its own id', () => {
   const at = strict.type(time('monotonic-micros'));
   assert.equal(at.valueToJson(-7n), '-7');
   assert.equal(at.jsonToValue('"9007199254740993"', 'ijson'), 9007199254740993n);
-  throwsPssz(() => strict.type(time('monotonically')).valueToJson(1n), /no handler registered/);
+  throwsPssz(() => strict.type(time('monotonically')).valueToJsonChecked(1n), /no handler registered/);
   const handler = { toText: () => 'x', fromText: () => 0n };
   for (const id of ['monotonic-micros', 'monotonic-60/1', 'monotonic', 'monotonic-', 'monotonic-minutes'])
     throwsPssz(() => new PsszSchema({}, { handlers: { [id]: handler } }), /built-in time presentation/);

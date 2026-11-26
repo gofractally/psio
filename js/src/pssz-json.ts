@@ -22,7 +22,7 @@
 // This file is internal. The public API is `pssz.ts`.
 
 import {
-  Codec, MAX_DEPTH, Node, PsszError, PsszJsonText, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, recordFields, setField, settleMember,
+  Codec, MAX_DEPTH, Node, PsszError, PsszJsonText, PsszNaN, PsszNegativeZero, assocItems, isNoncharacter, memberBoundAdmits, recordFields, setField, settleMember, writeMode,
   unwrapOption, utf8CodePoint, utf8Valid, utf8Decode, utf8Encode, utf8Length, utf8Multibyte, wellFormed, wrapSome,
   type IntForm, type IrEnumerator, type PsszCustomHandler, type VariantValue,
 } from './pssz-core.js';
@@ -557,7 +557,7 @@ function asciiText(s: StringEvent): string {
 // The byte container under a string / hex adapter admits `n` bytes.
 function bytesAdmit(container: Node, n: number): boolean {
   if (container.kind === 'array') return n === container.countNum;
-  return !container.bounded || n <= container.countNum;
+  return !container.bounded || n <= container.countNum || writeMode.fast > 0;
 }
 
 // How the key type of a map appears in text (docs/json.md, "Maps and sets").
@@ -1071,7 +1071,10 @@ class Reader {
     this.arrayItems(node.members.length, true, () => {
       const member = node.members[values.length];
       const value = this.read(member.text, this.ijson ? member.ijsonInt : member.jsonInt, 0);
-      if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
+      if (
+        member.bound &&
+        (!memberBoundAdmits(member.bound, member.node, value) || !this.codec.nestedValueAdmits(member, value))
+      )
         c.fail('json: member length_bound violated');
       if (member.order) this.codec.checkOrder(member, value, (m) => c.fail(m));
       values.push(value);
@@ -1102,9 +1105,10 @@ class Reader {
       }
       const member = node.members[index];
       const value = this.read(member.text, this.ijson ? member.ijsonInt : member.jsonInt, 0);
-      // (A nested member's bound counts encoded bytes: checked by the
-      // encoder, where they exist.)
-      if (member.bound && !memberBoundAdmits(member.bound, member.node, value))
+      if (
+        member.bound &&
+        (!memberBoundAdmits(member.bound, member.node, value) || !this.codec.nestedValueAdmits(member, value))
+      )
         c.fail('json: member length_bound violated');
       if (member.order) this.codec.checkOrder(member, value, (m) => c.fail(m));
       slots[index] = value;
@@ -1395,7 +1399,8 @@ class Writer {
     const map = node.assoc === 'map';
     const items = assocItems(value);
     if (!items) return fail('pssz IR: sequence value required');
-    if (node.bounded && items.length > node.countNum) fail('json: array exceeds its bound');
+    if (node.bounded && items.length > node.countNum && writeMode.fast === 0)
+      fail('json: array exceeds its bound');
     const order = this.codec.assocOrder(node, items);
     if (!order) return fail(map ? 'json: map has duplicate keys' : 'json: set has duplicate elements');
     const key: MapKeyText = map ? keyTextOf(this.codec, node.keyRef) : { form: 'pairs', missing: false };
@@ -1462,7 +1467,10 @@ class Writer {
 
   private sequence(node: Node, value: unknown, form: IntForm, n: number): void {
     if (!Array.isArray(value)) return fail('pssz IR: sequence value required');
-    if (node.bounded && (node.exact ? value.length !== node.countNum : value.length > node.countNum))
+    if (
+      node.bounded &&
+      (node.exact ? value.length !== node.countNum : writeMode.fast === 0 && value.length > node.countNum)
+    )
       fail('json: array exceeds its bound');
     this.out.push('[');
     for (let i = 0; i < value.length; ++i) {
@@ -1600,7 +1608,8 @@ class Writer {
           let field: unknown = own === undefined ? null : own;
           if (member.bound) {
             field = settleMember(member.node, field);
-            if (!memberBoundAdmits(member.bound, member.node, field)) fail('json: member length_bound violated');
+            if (!memberBoundAdmits(member.bound, member.node, field) || !this.codec.nestedValueAdmits(member, field))
+              fail('json: member length_bound violated');
           }
           if (member.order) this.codec.checkOrder(member, field, fail);
           if (i) out.push(',');

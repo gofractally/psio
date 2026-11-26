@@ -355,10 +355,10 @@ test('bounds at any depth: every writer and reader refuses a value outside a bou
     for (const format of ['json', 'ijson'] as const) assert.deepEqual(type.jsonToValue(type.valueToJson(at, format), format), at, name);
     for (const value of past) {
       // The writers: binary, text, key.
-      throwsKind(() => type.encode(value), 'value', /bound/);
-      throwsKind(() => type.encodeKey(value), 'value', /bound/);
+      throwsKind(() => type.encodeChecked(value), 'value', /bound/);
+      throwsKind(() => type.encodeKeyChecked(value), 'value', /bound/);
       for (const format of ['json', 'ijson'] as const) {
-        throwsKind(() => type.valueToJson(value, format), 'value', /bound/);
+        throwsKind(() => type.valueToJsonChecked(value, format), 'value', /bound/);
         const text = twin.valueToJson(value, format);
         // The text readers.
         assert.match(thrown(() => type.jsonToValue(text, format)).message, /bound/);
@@ -389,9 +389,9 @@ test('bounds at any depth: every writer and reader refuses a value outside a bou
   const notText = record('AnnTags', { tags: list(rawString) });
   const bad = { tags: [raw('ok'), Uint8Array.of(0xff)] };
   for (const width of [1, 2, 4] as const)
-    throwsKind(() => AnnTags.type({ width }).decode(notText.type({ width }).encode(bad)), 'bytes', /not valid UTF-8/);
-  throwsKind(() => AnnTags.decodeKey(notText.encodeKey(bad)), 'bytes', /not valid UTF-8/);
-  throwsKind(() => AnnTags.encode({ tags: [Uint8Array.of(0xff)] as never }), 'value');
+    throwsKind(() => AnnTags.type({ width }).decode(notText.type({ width }).encodeChecked(bad)), 'bytes', /not valid UTF-8/);
+  throwsKind(() => AnnTags.decodeKey(notText.encodeKeyChecked(bad)), 'bytes', /not valid UTF-8/);
+  throwsKind(() => AnnTags.encodeChecked({ tags: [Uint8Array.of(0xff)] as never }), 'value');
   // A raw bounded position takes any bytes.
   assert.deepEqual(AnnRawTags.decode(AnnRawTags.encode(bad)), bad);
 });
@@ -400,7 +400,7 @@ test('argument tuples: the cap, evolution and identity', () => {
   // The cap is checked on both sides (the fixture's note_over_cap frame).
   const note = { text: raw('n'.repeat(62)) };
   assert.equal(ArgsNote.encode(note).length, 64);
-  throwsKind(() => ArgsNote.encode({ text: raw('n'.repeat(63)) }), 'value', /maxDynamicData/);
+  throwsKind(() => ArgsNote.encodeChecked({ text: raw('n'.repeat(63)) }), 'value', /maxDynamicData/);
   const over = new Uint8Array(65).fill(0x6e);
   over.set([1, 1]);
   const refused = ArgsNote.validate(over);
@@ -487,8 +487,8 @@ test('bounds at any depth: malformed declarations are schema errors', () => {
   assert.deepEqual(both.schema.ir, record('R', { a: field(list(rawString), { lengthBound: { max: 3 } }) }).schema.ir);
   const ranged = record('R', { a: field(list(rawString), { lengthBound: { min: 1, max: 2 }, element: { max: 4 } }) });
   assert.equal(ranged.width, 1);
-  throwsKind(() => ranged.encode({ a: [] }), 'value', /length bound/);
-  throwsKind(() => ranged.encode({ a: [raw('12345')] }), 'value', /bound/);
+  throwsKind(() => ranged.encodeChecked({ a: [] }), 'value', /length bound/);
+  throwsKind(() => ranged.encodeChecked({ a: [raw('12345')] }), 'value', /bound/);
   assert.deepEqual(ranged.decode(ranged.encode({ a: [raw('1234')] })), { a: [raw('1234')] });
   // Bounds that say nothing change nothing.
   const plain = record('R', { a: list(rawString) }).schema.ir;
@@ -500,7 +500,7 @@ test('bounds at any depth: malformed declarations are schema errors', () => {
   sameType<Infer<typeof Text>, { s: string; o: string | null }>(true);
   assert.deepEqual(Text.decode(Text.encode({ s: 'é', o: 'abcd' })), { s: 'é', o: 'abcd' });
   assert.equal(toHex(Text.encode({ s: 'é', o: null })), toHex(record('Text', { s: utf8, o: optional(boundedUtf8(4)) }).encode({ s: 'é', o: null })));
-  throwsKind(() => Text.encode({ s: '', o: 'abcde' }), 'value', /bound/);
+  throwsKind(() => Text.encodeChecked({ s: '', o: 'abcde' }), 'value', /bound/);
 
   // Parameters: what the Schema IR of an argument tuple can say.
   throwsKind(() => argumentTuple({ a: field(rawString, { lengthBound: { min: 1 } }) }).schema, 'schema', /length bound is max/);

@@ -134,13 +134,13 @@ test('json value: repeated keys, values built in code, values with no JSON text'
   // The I-JSON string rule is the only difference between the formats.
   const nonchar = '￿';
   assert.equal(Any.valueToJson(nonchar, 'json'), '"￿"');
-  rejects(() => Any.valueToJson(nonchar, 'ijson'), 'value');
+  rejects(() => Any.valueToJsonChecked(nonchar, 'ijson'), 'value');
   rejects(() => Any.jsonToValue('"￿"', 'ijson'), 'json');
   rejects(() => Any.jsonToPssz('{"k":"\\uffff"}', 'ijson'), 'json');
   assert.deepEqual(Any.jsonToValue('"￿"', 'json'), nonchar);
   // (the bytes hold it either way)
   assert.equal(Any.decode(Any.encode(nonchar)), nonchar);
-  rejects(() => Any.psszToJson(Any.encode(nonchar), 'ijson'), 'value');
+  rejects(() => Any.psszToJson(Any.encodeChecked(nonchar), 'ijson'), 'value');
   // The key of a json value is the key of its text.
   assert.deepEqual(Any.encodeKey({ a: [1] }), Text.encodeKey('{"a":[1]}'));
   assert.deepEqual(Any.decodeKey(Any.encodeKey({ a: [1] })), { a: [1] });
@@ -168,7 +168,7 @@ test('json value: a member of a record, in text and in PSSZ (hand-written IR)', 
   assert.equal(q.data, null);
   assert.equal(q.more, null);
   rejects(() => Pretty.jsonToValue('{"service":"s","list":[]}'), 'json', 'json: missing required member "data"');
-  rejects(() => Pretty.encode({ service: 's', list: [] }), 'value');
+  rejects(() => Pretty.encodeChecked({ service: 's', list: [] }), 'value');
   // An optional json value reads `null` as empty.
   assert.deepEqual(Pretty.jsonToPssz('{"service":"s","data":null,"more":null,"list":[]}'),
     PrettyText.encode({ service: 's', data: 'null', more: null, list: [] }));
@@ -204,7 +204,7 @@ test('json value: the id is reserved, sits on a UTF-8 string, and is a custom id
   assert.equal(aliased.type('T').psszToJson(aliased.type('T').jsonToPssz('[1]')), '[1]');
   assert.equal(aliased.type('B').valueToJson([1, 2, 3]), '[1,2,3]');
   rejects(() => aliased.type('B').jsonToPssz('[1,2,3,4]'), 'json', 'json: string exceeds its bound');
-  rejects(() => aliased.type('B').encode([1, 2, 3, 4]), 'value');
+  rejects(() => aliased.type('B').encodeChecked([1, 2, 3, 4]), 'value');
   // The same bytes as a UTF-8 string; another type to a consumer of its text.
   assert.deepEqual(psszEquivalent(Any, Text, { compare: 'wire' }), { ok: true });
   const contract = psszEquivalent(Any, Text);
@@ -336,7 +336,7 @@ test('untagged variants in a record, in PSSZ and through the schema', () => {
   const V = ambiguous.type('V');
   for (const format of FORMATS) {
     rejects(() => V.jsonToPssz('1', format), 'json', AMBIGUOUS);
-    rejects(() => V.valueToJson({ type: '0', value: 1 }, format), 'value', AMBIGUOUS);
+    rejects(() => V.valueToJsonChecked({ type: '0', value: 1 }, format), 'value', AMBIGUOUS);
     // (a kind neither has is none of them)
     rejects(() => V.jsonToPssz('"x"', format), 'json', NONE);
   }
@@ -344,7 +344,7 @@ test('untagged variants in a record, in PSSZ and through the schema', () => {
   // The pairs docs/json.md names: a 64-bit integer may be a string, bytes
   // may be a string; an optional is also null; a json value is every kind.
   for (const [a, b] of [[u64, utf8], [utf8, bytes], [optional(u8), optional(utf8)], [jsonValue, bool], [map(utf8, u8), Point]] as const)
-    rejects(() => variant({ a, b }, { untagged: true }).valueToJson({ type: 'a', value: null as never }), 'value', AMBIGUOUS);
+    rejects(() => variant({ a, b }, { untagged: true }).valueToJsonChecked({ type: 'a', value: null as never }), 'value', AMBIGUOUS);
   // An untagged variant inside an untagged variant has its alternatives' kinds.
   const Outer = variant({ inner: Extra, n: u32 }, { untagged: true });
   assert.deepEqual(Outer.jsonToValue('["a"]'), { type: 'inner', value: { type: '1', value: ['a'] } });
@@ -431,7 +431,7 @@ test('a bool is exactly 0 or 1; only optional fields may be appended', () => {
     assert.equal(record('B', { b: bool }, { fixed: true }).validate(Uint8Array.of(byte)).ok, false);
     assert.equal(optional(bool).validate(Uint8Array.of(byte)).ok, false);
   }
-  rejects(() => bool.encode(1 as never), 'value');
+  rejects(() => bool.encodeChecked(1 as never), 'value');
   // docs/pssz-spec.md 7.1 / 7.5: an appended field is optional.
   // (a record that will grow reserves room: without the cap the appended
   // field would move the record's offset width, which is another rule)

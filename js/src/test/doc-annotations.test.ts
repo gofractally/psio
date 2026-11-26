@@ -62,8 +62,8 @@ test('doc: a bounded record', () => {
   assert.equal(toHex(data), '12070000000000000012176400000000000000616c696365020576697062657461');
   assert.equal(data.length, 33);
   assert.deepEqual(Account.decode(data), alice);
-  assert.throws(() => Account.encode({ ...alice, owner: 'x'.repeat(33) }));
-  assert.throws(() => Account.encode({ ...alice, tags: Array(9).fill('t') }));
+  assert.throws(() => Account.encodeChecked({ ...alice, owner: 'x'.repeat(33) }));
+  assert.throws(() => Account.encodeChecked({ ...alice, tags: Array(9).fill('t') }));
 });
 
 test('doc: evolution', () => {
@@ -104,7 +104,7 @@ test('doc: transparent, invariant, fixed records', () => {
   const Symbol = custom('Symbol', record('Symbol', { code: field(rawString, { max: 8 }) }), {
     check: (s) => (/^[A-Z]*$/.test(new TextDecoder().decode(s.code)) ? undefined : 'symbol is not upper case'),
   });
-  assert.throws(() => Symbol.encode({ code: new TextEncoder().encode('usd') }));
+  assert.throws(() => Symbol.encodeChecked({ code: new TextEncoder().encode('usd') }));
   const Point = record('Point', { x: u32, y: u32 }, { fixed: true });
   assert.equal(Point.encode({ x: 1, y: 2 }).length, 8);
 });
@@ -117,7 +117,7 @@ test('doc: method arguments', () => {
   const args = Transfer.encode({ from: 1n, to: 2n, amount: 500n, memo: 'rent' });
   assert.equal(args.length, 2 + 8 + 8 + 8 + 2 + 4);
   assert.deepEqual(TransferV2.decode(args), { from: 1n, to: 2n, amount: 500n, memo: 'rent', fee: null });
-  assert.throws(() => Transfer.encode({ from: 1n, to: 2n, amount: 500n, memo: 'm'.repeat(81) }));
+  assert.throws(() => Transfer.encodeChecked({ from: 1n, to: 2n, amount: 500n, memo: 'm'.repeat(81) }));
 });
 
 test('doc: wrapper spellings are the same bytes', () => {

@@ -107,7 +107,7 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
         for (const format of FORMATS) {
           const want = row[format];
           if (want === undefined) {
-            rejects(() => type.valueToJson(value, format), `${name}: ${format} text of a value without text`);
+            rejects(() => type.valueToJsonChecked(value, format), `${name}: ${format} text of a value without text`);
             rejects(() => type.psszToJson(fromHex(row.pssz!), format), `${name}: ${format} psszToJson`);
             continue;
           }
@@ -199,7 +199,7 @@ for (const path of ['schema-driven', 'typed'] as const) test(`time/key conforman
         const value = plain.decodeKey(key);
         assert.equal(toHex(plain.encode(value)), row.pssz, `${name}: wire type value`);
         assert.equal(toHex(plain.encodeKey(plain.decode(pssz))), row.key, `${name}: wire type key`);
-        const written = rejects(() => type.encodeKey(value), `${name}: encodeKey`);
+        const written = rejects(() => type.encodeKeyChecked(value), `${name}: encodeKey`);
         assert.equal(written.message, row.reason, name);
         assert.equal(written.kind, 'value', name);
         // A prefix element is checked as the value it is.

@@ -138,7 +138,7 @@ test('list width: a narrow table is checked like a wide one', () => {
     const long = reader.validate(fromHex('01' + '61'.repeat(17)));
     assert.ok(!long.ok && /byte count bound exceeded/.test(long.error.message));
   }
-  refuses(() => L.encode(Array(16).fill('')), 'value', /sequence bound exceeded/);
+  refuses(() => L.encodeChecked(Array(16).fill('')), 'value', /sequence bound exceeded/);
   // The largest value fits one-byte offsets: 15 + 15 * 16 = 255.
   const full = Array(15).fill('x'.repeat(16));
   assert.equal(L.encode(full).length, 255);
@@ -233,8 +233,8 @@ test('position cap: a tighter bound wins, a looser one is clamped', () => {
   const Loose = record('Loose', { list: field(list(rawString), { max: 1000, element: { max: 1000 } }) }, { maxDynamicData: 255 });
   agree(Loose, { list: items }, '01 01 02 04 6162 63');
   // The looser bound is legal and still limits what the cap does not.
-  refuses(() => Loose.encode({ list: [new Uint8Array(1001)] }), 'value', /byte count bound exceeded/);
-  refuses(() => Loose.encode({ list: [new Uint8Array(300)] }), 'value', /maxDynamicData/);
+  refuses(() => Loose.encodeChecked({ list: [new Uint8Array(1001)] }), 'value', /byte count bound exceeded/);
+  refuses(() => Loose.encodeChecked({ list: [new Uint8Array(300)] }), 'value', /maxDynamicData/);
   // Without the cap that list is 4 wide (its bound is over 65535).
   const Wide = record('Wide', { list: field(list(rawString), { max: 1000, element: { max: 1000 } }) });
   agree(Wide, { list: items }, '04000000 04000000 08000000 0a000000 6162 63');
@@ -305,7 +305,7 @@ test('list width: a member length bound that stays an attribute bounds the list'
   assert.equal(member.value.members[0].attributes.find((a) => a.name === 'lengthBound')?.value, 'exact=2');
   assert.deepEqual(bound(Exact), [1n + 2n * 17n, 1]);
   agree(Exact, { pair: [raw('ab'), raw('c')] }, '01 02 04 6162 63');
-  refuses(() => Exact.encode({ pair: [raw('ab')] }), 'value', /member length bound violated/);
+  refuses(() => Exact.encodeChecked({ pair: [raw('ab')] }), 'value', /member length bound violated/);
   // Through an optional.
   const Maybe = record('Maybe', { pair: field(optional(list(rawString)), { lengthBound: { exact: 2 }, element: { max: 16 } }) });
   agree(Maybe, { pair: [raw('ab'), raw('c')] }, '01 01 01 02 04 6162 63');

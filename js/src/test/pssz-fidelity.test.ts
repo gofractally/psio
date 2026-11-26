@@ -106,7 +106,7 @@ test('box: the bytes and the text are the inner type\'s', () => {
     assert.equal(boxes.type('OptBoxed').valueToJson({ id: 1, leaf, tail: 2 }, format), '{"id":1,"leaf":{"n":7,"tag":"abcd"},"tail":2}');
   }
   // Validation is the inner type's.
-  rejects(() => boxes.type('BoxedLeaf').encode({ n: 7, tag: 'abcde' }), 'value', /bound/);
+  rejects(() => boxes.type('BoxedLeaf').encodeChecked({ n: 7, tag: 'abcde' }), 'value', /bound/);
   assert.equal(boxes.type('BoxOfBox').validate(fromHex('010203')).ok, false);
 });
 
@@ -122,7 +122,7 @@ test('box: recursive types through a box', () => {
   assert.deepEqual(chain.decode(chain.encode(links)), links);
   assert.equal(chain.valueToJson(links), '{"value":1,"next":{"value":2,"next":{"value":3,"next":null}}}');
   // A box around nothing but itself is not a type.
-  rejects(() => new PsszSchema({ T: box('T') }).type('T').encode(1), 'schema', /cyclic/);
+  rejects(() => new PsszSchema({ T: box('T') }).type('T').encodeChecked(1), 'schema', /cyclic/);
 });
 
 // ── Raw strings and UTF-8 strings ───────────────────────────────────────────
@@ -169,12 +169,12 @@ test('raw string: the value is its bytes; any bytes are valid PSSZ', () => {
     // ... and without text, in both formats.
     for (const format of FORMATS) {
       rejects(() => raw.psszToJson(bytes, format), 'value', /string is not valid UTF-8/, bad);
-      rejects(() => raw.valueToJson(value, format), 'value', /string is not valid UTF-8/, bad);
+      rejects(() => raw.valueToJsonChecked(value, format), 'value', /string is not valid UTF-8/, bad);
     }
   }
-  rejects(() => raw.encode(7), 'value', /raw string value/);
-  rejects(() => raw.encode([1, 2]), 'value', /raw string value/);
-  rejects(() => raw.encode('\ud800'), 'value', /not valid UTF-8/);
+  rejects(() => raw.encodeChecked(7), 'value', /raw string value/);
+  rejects(() => raw.encodeChecked([1, 2]), 'value', /raw string value/);
+  rejects(() => raw.encodeChecked('\ud800'), 'value', /not valid UTF-8/);
 });
 
 test('raw string: text is the UTF-8 it holds; bounds count bytes', () => {
@@ -188,14 +188,14 @@ test('raw string: text is the UTF-8 it holds; bounds count bytes', () => {
     assert.equal(hex(value), hex(bytesOf('héllo')));
     assert.equal(hex(raw.jsonToPssz('"héllo"', format)), hex(bytesOf('héllo')));
     rejects(() => raw.jsonToValue('7', format), 'json', /expected a string/);
-    rejects(() => raw.valueToJson(7, format), 'value', /string value required/);
+    rejects(() => raw.valueToJsonChecked(7, format), 'value', /string value required/);
 
     const raw4 = strings.type('Raw4');
     assert.equal(hex(raw4.jsonToPssz('"abcd"', format)), '61626364');
     rejects(() => raw4.jsonToPssz('"abcde"', format), 'json', /exceeds its bound/);
     rejects(() => raw4.jsonToPssz('"ééé"', format), 'json', /exceeds its bound/);
-    rejects(() => raw4.valueToJson(bytesOf('abcde'), format), 'value', /exceeds its bound/);
-    rejects(() => raw4.valueToJson('abcde', format), 'value', /exceeds its bound/);
+    rejects(() => raw4.valueToJsonChecked(bytesOf('abcde'), format), 'value', /exceeds its bound/);
+    rejects(() => raw4.valueToJsonChecked('abcde', format), 'value', /exceeds its bound/);
   }
   // I-JSON refuses a noncharacter; JSON carries it.
   assert.equal(raw.psszToJson(bytesOf('￾'), 'json'), '"￾"');
@@ -203,12 +203,12 @@ test('raw string: text is the UTF-8 it holds; bounds count bytes', () => {
 
   const raw4 = strings.type('Raw4');
   assert.equal(hex(raw4.encode(fromHex('ffffffff'))), 'ffffffff');
-  rejects(() => raw4.encode(fromHex('ffffffffff')), 'value', /bound exceeded/);
-  rejects(() => raw4.encode('ééé'), 'value', /bound exceeded/);
+  rejects(() => raw4.encodeChecked(fromHex('ffffffffff')), 'value', /bound exceeded/);
+  rejects(() => raw4.encodeChecked('ééé'), 'value', /bound exceeded/);
   assert.equal(raw4.validate(fromHex('ffffffffff')).ok, false);
   const raw2 = strings.type('Raw2x');
   assert.equal(hex(raw2.decode(fromHex('ff00')) as Uint8Array), 'ff00');
-  rejects(() => raw2.encode('a'), 'value', /count mismatch/);
+  rejects(() => raw2.encodeChecked('a'), 'value', /count mismatch/);
 });
 
 test('utf8 string: a JavaScript string, validated on every read and write', () => {
@@ -226,7 +226,7 @@ test('utf8 string: a JavaScript string, validated on every read and write', () =
   rejects(() => utf8.encode(bytesOf('abc')), 'value', /string value required/);
   rejects(() => utf8.valueToJson(bytesOf('abc')), 'value', /string value required/);
   rejects(() => utf8.encode('\udc00'), 'value', /not valid UTF-8/);
-  rejects(() => strings.type('Utf84').encode('abcde'), 'value', /bound exceeded/);
+  rejects(() => strings.type('Utf84').encodeChecked('abcde'), 'value', /bound exceeded/);
   for (const format of FORMATS) assert.equal(utf8.jsonToValue('"héllo"', format), 'héllo');
 });
 
@@ -242,8 +242,8 @@ test('raw and utf8 strings as record members', () => {
     { raw: bytesOf('abc'), text: 'ok', maybe: bytesOf('é') },
   );
   // The member length bound counts the raw string's bytes.
-  rejects(() => message.encode({ raw: fromHex('ff00ff00'), text: '', maybe: null }), 'value', /length bound/);
-  rejects(() => message.encode({ raw: 'éé', text: '', maybe: null }), 'value', /length bound/);
+  rejects(() => message.encodeChecked({ raw: fromHex('ff00ff00'), text: '', maybe: null }), 'value', /length bound/);
+  rejects(() => message.encodeChecked({ raw: 'éé', text: '', maybe: null }), 'value', /length bound/);
   for (const format of FORMATS) {
     // One member without text makes the whole value textless.
     rejects(() => message.psszToJson(bytes, format), 'value', /string is not valid UTF-8/);
@@ -276,7 +276,7 @@ test('explicit width: the top-level cap bounds the encoding; nested caps are not
     assert.equal(outer.width, w);
     // Top level: enforced on encode, decode and validate.
     assert.equal(inner.decode(inner.encode(small)) !== null, true);
-    rejects(() => inner.encode(big), 'value', /exceeds maxDynamicData cap/, `w${w}`);
+    rejects(() => inner.encodeChecked(big), 'value', /exceeds maxDynamicData cap/, `w${w}`);
     const overInner = caps.type('Uncapped', { width: w }).encode({ inner: big });
     const innerBytes = overInner.subarray(2 * w); // header, one offset slot, then Inner
     assert.equal(hex(innerBytes), hex(caps.type({ Object: { data: { Custom: { type: { List: U8 }, id: 'hex' } } } }, { width: w }).encode(big)));
@@ -293,8 +293,8 @@ test('explicit width: the top-level cap bounds the encoding; nested caps are not
     assert.deepEqual(outer.validate(bytes), { ok: true, hasUnknown: false });
     assert.deepEqual(caps.type('Uncapped', { width: w }).decode(overInner), { inner: big });
     // ... and Outer's own cap still bounds the whole.
-    rejects(() => outer.encode({ inner: huge, more: [] }), 'value', /exceeds maxDynamicData cap/);
-    rejects(() => outer.encode({ inner: small, more: [big, big, big] }), 'value', /exceeds maxDynamicData cap/);
+    rejects(() => outer.encodeChecked({ inner: huge, more: [] }), 'value', /exceeds maxDynamicData cap/);
+    rejects(() => outer.encodeChecked({ inner: small, more: [big, big, big] }), 'value', /exceeds maxDynamicData cap/);
     // A cap is the top-level type's only when the root is that record.
     const optional = caps.type({ Option: 'Inner' }, { width: w });
     assert.deepEqual(optional.decode(optional.encode(big)), big);
@@ -304,9 +304,9 @@ test('explicit width: the top-level cap bounds the encoding; nested caps are not
   // The automatic profile derives widths from caps and enforces every record's.
   assert.equal(caps.type('Inner').width, 1);
   assert.equal(caps.type('Outer').width, 1);
-  rejects(() => caps.type('Outer').encode({ inner: big, more: [] }), 'value', /exceeds maxDynamicData cap/);
-  rejects(() => caps.type('Uncapped').encode({ inner: big }), 'value', /exceeds maxDynamicData cap/);
-  rejects(() => caps.type({ Option: 'Inner' }).encode(big), 'value', /exceeds maxDynamicData cap/);
+  rejects(() => caps.type('Outer').encodeChecked({ inner: big, more: [] }), 'value', /exceeds maxDynamicData cap/);
+  rejects(() => caps.type('Uncapped').encodeChecked({ inner: big }), 'value', /exceeds maxDynamicData cap/);
+  rejects(() => caps.type({ Option: 'Inner' }).encodeChecked(big), 'value', /exceeds maxDynamicData cap/);
   assert.deepEqual(caps.type('Outer').decode(caps.type('Outer').encode({ inner: small, more: [small] })), { inner: small, more: [small] });
 });
 
@@ -424,8 +424,8 @@ test('custom type: a registered handler carries the text as one JSON string', ()
       'json', /expected a string \(custom text form\)/,
     );
     // The value must be one of the inner type.
-    rejects(() => account.valueToJson('alice', format), 'value', /does not match its inner type/);
-    rejects(() => version.valueToJson({ major: 70000, minor: 0 }, format), 'value', /does not match its inner type/);
+    rejects(() => account.valueToJsonChecked('alice', format), 'value', /does not match its inner type/);
+    rejects(() => version.valueToJsonChecked({ major: 70000, minor: 0 }, format), 'value', /does not match its inner type/);
   }
 });
 
@@ -454,12 +454,12 @@ test('custom type: with no handler it reads and writes as its wire type', () => 
 
 test('custom type: requireHandlers makes a missing handler an error on every entry point', () => {
   for (const format of FORMATS) {
-    rejects(() => strict.type('Version').valueToJson({ major: 1, minor: 2 }, format), 'value', /no handler registered for a custom type/);
+    rejects(() => strict.type('Version').valueToJsonChecked({ major: 1, minor: 2 }, format), 'value', /no handler registered for a custom type/);
     // (The bytes are refused before any text is written.)
     rejects(() => strict.type('Version').psszToJson(fromHex('0401000200'), format), 'bytes', /no handler registered for a custom type/);
     rejects(() => strict.type('Version').jsonToValue('"1.2"', format), 'json', /no handler registered for a custom type/);
     rejects(() => strict.type('Version').jsonToPssz('{"major":1,"minor":2}', format), 'json', /no handler registered for a custom type/);
-    rejects(() => strict.type('Transfer').valueToJson(transfer, format), 'value', /no handler registered/);
+    rejects(() => strict.type('Transfer').valueToJsonChecked(transfer, format), 'value', /no handler registered/);
     // A type with no custom member, and a box, are unaffected.
     assert.equal(strict.type('Plain').valueToJson({ major: 1, minor: 2 }, format), '{"major":1,"minor":2}');
     assert.equal(strict.type({ Custom: { type: U8, id: 'box' } }).valueToJson(7, format), '7');
@@ -467,15 +467,15 @@ test('custom type: requireHandlers makes a missing handler an error on every ent
     const all = strict.withHandlers(handlers);
     assert.equal(all.type('Version').valueToJson({ major: 1, minor: 2 }, format), '"1.2"');
     assert.equal(all.type('Account').valueToJson(ALICE, format), '"alice"');
-    rejects(() => all.type('Odd').valueToJson(1, format), 'value', /no handler registered/);
-    rejects(() => all.type('Nested').valueToJson(ALICE, format), 'value', /no handler registered/);
+    rejects(() => all.type('Odd').valueToJsonChecked(1, format), 'value', /no handler registered/);
+    rejects(() => all.type('Nested').valueToJsonChecked(ALICE, format), 'value', /no handler registered/);
   }
   // A strict registry applies on the binary entry points as well: a caller
   // that must not accept or produce a value it cannot check and present.
   for (const width of ['auto', 1, 2, 4] as const) {
     const version = strict.type('Version', { width });
     const bytes = plain.type('Version', { width }).encode({ major: 1, minor: 2 });
-    rejects(() => version.encode({ major: 1, minor: 2 }), 'value', /no handler registered for a custom type/);
+    rejects(() => version.encodeChecked({ major: 1, minor: 2 }), 'value', /no handler registered for a custom type/);
     rejects(() => version.decode(bytes), 'bytes', /no handler registered for a custom type/);
     const validated = version.validate(bytes);
     assert.ok(!validated.ok && validated.error.kind === 'bytes' && !validated.error.invariant);
@@ -483,9 +483,9 @@ test('custom type: requireHandlers makes a missing handler an error on every ent
     // A view reads in place and consults no handler.
     assert.equal((version.view(bytes) as RecordView).get('major'), 1);
   }
-  rejects(() => strict.type('Transfer').encode(transfer), 'value', /no handler registered/);
-  rejects(() => strict.type('Account').encodeKey(ALICE), 'value', /no handler registered/);
-  rejects(() => strict.type('Account').decodeKey(plain.type('Account').encodeKey(ALICE)), 'bytes', /no handler registered/);
+  rejects(() => strict.type('Transfer').encodeChecked(transfer), 'value', /no handler registered/);
+  rejects(() => strict.type('Account').encodeKeyChecked(ALICE), 'value', /no handler registered/);
+  rejects(() => strict.type('Account').decodeKey(plain.type('Account').encodeKeyChecked(ALICE)), 'bytes', /no handler registered/);
   // A type with no custom member, a box and the built-in ids are unaffected.
   assert.equal(hex(strict.type('Plain').encode({ major: 1, minor: 2 })), '0401000200');
   assert.equal(hex(strict.type({ Custom: { type: U8, id: 'box' } }).encode(7)), '07');
@@ -536,7 +536,7 @@ test('custom handlers: the registry (schema, withHandlers, per type); bound once
   assert.equal(wide.width, 4);
   assert.equal(hex(wide.jsonToPssz('"1.2"')), '0400000001000200');
   assert.equal(wide.psszToJson(fromHex('0400000001000200')), '"1.2"');
-  rejects(() => custom.type('Odd', { requireHandlers: true }).valueToJson(1), 'value', /no handler registered/);
+  rejects(() => custom.type('Odd', { requireHandlers: true }).valueToJsonChecked(1), 'value', /no handler registered/);
   assert.equal(custom.type('Version', { requireHandlers: true }).valueToJson({ major: 1, minor: 2 }), '"1.2"');
 
   // Ids that are part of the binary form take no handler.
@@ -582,8 +582,8 @@ test('custom handlers: a handler that throws or misbehaves is an ordinary error'
   });
   const version = schema.type('Version');
   for (const format of FORMATS) {
-    rejects(() => version.valueToJson({ major: 13, minor: 0 }, format), 'value', /custom handler has no text for the value/);
-    rejects(() => version.valueToJson({ major: 14, minor: 0 }, format), 'value', /custom handler has no text for the value/);
+    rejects(() => version.valueToJsonChecked({ major: 13, minor: 0 }, format), 'value', /custom handler has no text for the value/);
+    rejects(() => version.valueToJsonChecked({ major: 14, minor: 0 }, format), 'value', /custom handler has no text for the value/);
     rejects(() => version.jsonToValue('"throw"', format), 'json', /not a value of the custom type/);
     for (const bad of ['string', 'range', 'missing', 'extra'])
       rejects(() => version.jsonToValue(`"${bad}"`, format), 'json', /produced a value that is not the inner type/, bad);
@@ -604,14 +604,14 @@ test('custom handlers: a handler that throws or misbehaves is an ordinary error'
   assert.equal(odd.valueToJson(1, 'json'), '"a\\"b\\\\c\\n"');
   assert.equal(odd.jsonToValue('"a\\"b\\\\c\\n"', 'json'), 6);
   assert.equal(odd.valueToJson(2, 'json'), '"￾"');
-  rejects(() => odd.valueToJson(2, 'ijson'), 'value', /noncharacter/);
+  rejects(() => odd.valueToJsonChecked(2, 'ijson'), 'value', /noncharacter/);
 });
 
 test('non-finite float: the error names the format', () => {
   const f64 = new PsszSchema({ F: { Float: { exp: 11, mantissa: 52 } } }).type('F');
   for (const value of [NaN, Infinity, -Infinity]) {
-    rejects(() => f64.valueToJson(value, 'json'), 'value', /^json: non-finite float has no JSON text$/);
-    rejects(() => f64.valueToJson(value, 'ijson'), 'value', /^ijson: non-finite float has no JSON text$/);
+    rejects(() => f64.valueToJsonChecked(value, 'json'), 'value', /^json: non-finite float has no JSON text$/);
+    rejects(() => f64.valueToJsonChecked(value, 'ijson'), 'value', /^ijson: non-finite float has no JSON text$/);
   }
   rejects(() => f64.psszToJson(fromHex('000000000000f07f'), 'json'), 'value', /^json: non-finite/);
   rejects(() => f64.psszToJson(fromHex('010000000000f07f'), 'ijson'), 'value', /^ijson: non-finite/);

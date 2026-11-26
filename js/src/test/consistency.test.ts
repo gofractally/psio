@@ -83,10 +83,10 @@ test('sorted / unique / uniqueKeys: writers and checking readers (C++ "[consiste
     change(bad);
     ++cases;
     // Writers.
-    assert.equal(rejects(() => Ranked.encode(bad), 'value').message, message, what);
-    for (const format of ['json', 'ijson'] as const) rejects(() => Ranked.valueToJson(bad, format), 'value', message);
-    rejects(() => Ranked.encodeKey(bad), 'value', message);
-    for (const width of [1, 2, 4] as const) rejects(() => Ranked.type({ width }).encode(bad), 'value', message);
+    assert.equal(rejects(() => Ranked.encodeChecked(bad), 'value').message, message, what);
+    for (const format of ['json', 'ijson'] as const) rejects(() => Ranked.valueToJsonChecked(bad, format), 'value', message);
+    rejects(() => Ranked.encodeKeyChecked(bad), 'value', message);
+    for (const width of [1, 2, 4] as const) rejects(() => Ranked.type({ width }).encodeChecked(bad), 'value', message);
     // Readers, on what an unchecked writer produces.
     const raw = Loose.encode(bad);
     const refusal = Ranked.validate(raw);
@@ -97,10 +97,10 @@ test('sorted / unique / uniqueKeys: writers and checking readers (C++ "[consiste
     rejects(() => Ranked.psszToJson(raw), 'bytes', message);
     rejects(() => (Ranked.view(raw) as RecordView).toValue(), 'bytes', message);
     for (const width of [1, 2, 4] as const)
-      rejects(() => Ranked.type({ width }).decode(Loose.type({ width }).encode(bad)), 'bytes', message);
+      rejects(() => Ranked.type({ width }).decode(Loose.type({ width }).encodeChecked(bad)), 'bytes', message);
     for (const format of ['json', 'ijson'] as const) {
-      rejects(() => Ranked.jsonToValue(Loose.valueToJson(bad, format), format), 'json', message);
-      rejects(() => Ranked.jsonToPssz(Loose.valueToJson(bad, format), format), 'json', message);
+      rejects(() => Ranked.jsonToValue(Loose.valueToJsonChecked(bad, format), format), 'json', message);
+      rejects(() => Ranked.jsonToPssz(Loose.valueToJsonChecked(bad, format), format), 'json', message);
     }
     const rawKey = Loose.encodeKey(bad);
     const keyRefusal = Ranked.validateKey(rawKey);
@@ -125,17 +125,17 @@ test('sorted / unique / uniqueKeys: order is that of the key bytes, at any posit
   // Strings order bytewise (UTF-8), not by UTF-16 code unit; a prefix sorts first.
   const Words = record('Words', { words: field(list(utf8), { unique: true }) });
   assert.ok(Words.encode({ words: ['a', 'ab', 'b', '\u{ffff}', '\u{10000}'] }));
-  rejects(() => Words.encode({ words: ['\u{10000}', '\u{ffff}'] }), 'value', STRICT);
+  rejects(() => Words.encodeChecked({ words: ['\u{10000}', '\u{ffff}'] }), 'value', STRICT);
   // Strictly descending.
   const Down = record('Down', { v: field(list(u32), { sorted: 'descending', unique: true }) });
   assert.ok(Down.encode({ v: [3, 2, 1] }));
-  rejects(() => Down.encode({ v: [3, 3] }), 'value', STRICT);
-  rejects(() => Down.encode({ v: [1, 2] }), 'value', STRICT);
+  rejects(() => Down.encodeChecked({ v: [3, 3] }), 'value', STRICT);
+  rejects(() => Down.encodeChecked({ v: [1, 2] }), 'value', STRICT);
   // uniqueKeys on plain elements, on tuples (element 0), without order.
   const Ids = record('Ids', { ids: field(list(u32), { uniqueKeys: true }), rows: field(list(tuple(u32, utf8, u8)), { uniqueKeys: true }) });
   assert.ok(Ids.encode({ ids: [3, 1, 2], rows: [[2, 'a', 0], [1, 'a', 0]] }));
-  rejects(() => Ids.encode({ ids: [3, 1, 3], rows: [] }), 'value', KEYS);
-  rejects(() => Ids.encode({ ids: [], rows: [[1, 'a', 0], [1, 'b', 1]] }), 'value', KEYS);
+  rejects(() => Ids.encodeChecked({ ids: [3, 1, 3], rows: [] }), 'value', KEYS);
+  rejects(() => Ids.encodeChecked({ ids: [], rows: [[1, 'a', 0], [1, 'b', 1]] }), 'value', KEYS);
   // Through an optional, in a map's values, in a tuple element, in a variant alternative, in a set's elements.
   const Deep = record('Deep', {
     maybe: field(optional(list(u32)), { sorted: true }),
@@ -147,20 +147,20 @@ test('sorted / unique / uniqueKeys: order is that of the key bytes, at any posit
   });
   const deep = { maybe: null, by: new Map([['k', [1, 2]]]), at: [0, [1, 1]] as [number, number[]], alt: { type: 'Many' as const, value: [1, 2] }, sets: new Set([[1, 2]]), grid: [[[1, 2]]] };
   assert.deepEqual(Deep.decode(Deep.encode(deep)), deep);
-  rejects(() => Deep.encode({ ...deep, maybe: [2, 1] }), 'value', ORDER);
-  rejects(() => Deep.encode({ ...deep, by: new Map([['k', [1, 1]]]) }), 'value', STRICT);
-  rejects(() => Deep.encode({ ...deep, at: [0, [2, 1]] }), 'value', ORDER);
-  rejects(() => Deep.encode({ ...deep, alt: { type: 'Many', value: [2, 1] } }), 'value', ORDER);
+  rejects(() => Deep.encodeChecked({ ...deep, maybe: [2, 1] }), 'value', ORDER);
+  rejects(() => Deep.encodeChecked({ ...deep, by: new Map([['k', [1, 1]]]) }), 'value', STRICT);
+  rejects(() => Deep.encodeChecked({ ...deep, at: [0, [2, 1]] }), 'value', ORDER);
+  rejects(() => Deep.encodeChecked({ ...deep, alt: { type: 'Many', value: [2, 1] } }), 'value', ORDER);
   assert.ok(Deep.encode({ ...deep, alt: { type: 'One', value: 7 } }));
-  rejects(() => Deep.encode({ ...deep, sets: new Set([[2, 1]]) }), 'value', ORDER);
-  rejects(() => Deep.encode({ ...deep, grid: [[[1, 2], [2, 2]]] }), 'value', STRICT);
+  rejects(() => Deep.encodeChecked({ ...deep, sets: new Set([[2, 1]]) }), 'value', ORDER);
+  rejects(() => Deep.encodeChecked({ ...deep, grid: [[[1, 2], [2, 2]]] }), 'value', STRICT);
   // A method's parameters take them too; a custom type over the record keeps them.
   const Args = argumentTuple({ ids: field(list(u32), { unique: true }) });
-  rejects(() => Args.encode({ ids: [1, 1] }), 'value', STRICT);
+  rejects(() => Args.encodeChecked({ ids: [1, 1] }), 'value', STRICT);
   rejects(() => Args.jsonToValue('[[2,1]]'), 'json', STRICT);
   const Checked = custom('Checked', record('Checked', { v: field(list(u32), { sorted: true }) }), {});
-  rejects(() => Checked.encode({ v: [2, 1] }), 'value', ORDER);
-  rejects(() => generateSchema({ Checked }).type('Checked').encode({ v: [2, 1] }), 'value', ORDER);
+  rejects(() => Checked.encodeChecked({ v: [2, 1] }), 'value', ORDER);
+  rejects(() => generateSchema({ Checked }).type('Checked').encodeChecked({ v: [2, 1] }), 'value', ORDER);
 
   // Where they do not apply.
   const schemaError = (run: () => unknown, message: RegExp) => rejects(run, 'schema', message);
@@ -337,7 +337,7 @@ test('strict reads accept a raw string that is not UTF-8; a UTF-8 string that is
   const Text = record('Raw', { s: utf8, inner: nested(record('Inner', { s: utf8 })) });
   rejects(() => Text.decode(frame, { rejectUnknown: true }), 'bytes', 'pssz IR: string is not valid UTF-8');
   // (its text is the bytes' UTF-8: a raw string that is not UTF-8 has none)
-  rejects(() => Raw.valueToJson(value), 'value', 'json: string is not valid UTF-8');
+  rejects(() => Raw.valueToJsonChecked(value), 'value', 'json: string is not valid UTF-8');
 });
 
 test('the key writer checks member bounds: time-key-vectors.json KBound', () => {
@@ -375,11 +375,11 @@ test('the key writer checks member bounds: time-key-vectors.json KBound', () => 
     }
     const value = { shard: loose.shard, name, tags: loose.tags };
     for (const writer of [KBound.type() as PsszType, fetched]) {
-      const refusal = rejects(() => writer.encodeKey(value), 'value');
+      const refusal = rejects(() => writer.encodeKeyChecked(value), 'value');
       assert.match(refusal.message, /^key: (string exceeds its bound|bytes exceed their bound|list exceeds its bound|member length bound violated)$/, row.name);
-      rejects(() => writer.encode(value), 'value');
+      rejects(() => writer.encodeChecked(value), 'value');
       rejects(() => writer.encodeKeyPrefix([value.shard, value.name, value.tags]), 'value');
-      rejects(() => writer.valueToJson(value), 'value');
+      rejects(() => writer.valueToJsonChecked(value), 'value');
     }
     ++refusedByWriters;
   }
@@ -489,21 +489,21 @@ test('transparent: a bounded member makes the wrapper that bounded type (C++ "[c
   // Every writer refuses a Memo over 80 bytes; every reader rejects its bytes: bare, a member, an optional payload, a list element, a mapped value.
   const long = 'x'.repeat(81);
   for (const M of [Memo, WrapMemo]) {
-    rejects(() => M.encode(long), 'value', 'pssz IR: byte count bound exceeded');
-    rejects(() => M.encodeKey(long), 'value', 'key: string exceeds its bound');
-    rejects(() => M.valueToJson(long), 'value', 'json: string exceeds its bound');
+    rejects(() => M.encodeChecked(long), 'value', 'pssz IR: byte count bound exceeded');
+    rejects(() => M.encodeKeyChecked(long), 'value', 'key: string exceeds its bound');
+    rejects(() => M.valueToJsonChecked(long), 'value', 'json: string exceeds its bound');
     rejects(() => M.jsonToValue(JSON.stringify(long)), 'json', 'json: string exceeds its bound');
     assert.equal(M.validate(Buffer.from(long)).ok, false);
     assert.equal(M.validate(Uint8Array.of(0xff)).ok, false);
     assert.equal(M.validateKey(utf8.encodeKey(long)).ok, false);
     const H = holder(M, Tags);
     for (const bad of [{ ...value, memo: long }, { ...value, maybe: long }, { ...value, many: ['a', long] }, { ...value, by_id: new Map([[1, long]]) }]) {
-      rejects(() => H.encode(bad), 'value', 'pssz IR: byte count bound exceeded');
-      rejects(() => H.encodeKey(bad), 'value');
-      rejects(() => H.valueToJson(bad), 'value');
+      rejects(() => H.encodeChecked(bad), 'value', 'pssz IR: byte count bound exceeded');
+      rejects(() => H.encodeKeyChecked(bad), 'value');
+      rejects(() => H.valueToJsonChecked(bad), 'value');
     }
-    rejects(() => H.encode({ ...value, tags: ['t'.repeat(9)] }), 'value');
-    rejects(() => H.encode({ ...value, tags: ['a', 'b', 'c', 'd', 'e'] }), 'value');
+    rejects(() => H.encodeChecked({ ...value, tags: ['t'.repeat(9)] }), 'value');
+    rejects(() => H.encodeChecked({ ...value, tags: ['a', 'b', 'c', 'd', 'e'] }), 'value');
   }
   // What a type cannot say is refused where it is declared.
   const schemaError = (run: () => unknown, message: RegExp) => rejects(run, 'schema', message);

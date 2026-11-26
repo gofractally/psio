@@ -218,9 +218,9 @@ test('typed layer: the decoded value is statically typed', () => {
   const amount: bigint = decoded.amount;
   assert.equal(amount, 5n);
   // @ts-expect-error a string is not a u64
-  assert.throws(() => Transfer.encode({ ...value, amount: 'five' }), PsszError);
+  assert.throws(() => Transfer.encodeChecked({ ...value, amount: 'five' }), PsszError);
   // @ts-expect-error a field is missing
-  assert.throws(() => Transfer.encode({ from: 1n }), PsszError);
+  assert.throws(() => Transfer.encodeChecked({ from: 1n }), PsszError);
 
   assert.deepEqual(Pair.decode(Pair.encode([7, 'x', null])), [7, 'x', null]);
   assert.deepEqual(Nested.decode(Nested.encode({ some: null })), { some: null });
@@ -264,22 +264,22 @@ test('typed layer: bounds and caps are enforced and narrow the offset width', ()
   assert.equal(record('Tiny', { memo: utf8 }, { maxDynamicData: 200 }).width, 1);
   const ok = { tag: 'abcdefgh', ids: [1, 2, 3, 4], key: new Uint8Array(4), blob: new Uint8Array(2) };
   assert.deepEqual(Small.decode(Small.encode(ok)), ok);
-  throwsKind(() => Small.encode({ ...ok, tag: 'abcdefghi' }), 'value');
-  throwsKind(() => Small.encode({ ...ok, ids: [1, 2, 3, 4, 5] }), 'value');
-  throwsKind(() => Small.encode({ ...ok, key: new Uint8Array(3) }), 'value');
-  throwsKind(() => Small.encode({ ...ok, blob: new Uint8Array(3) }), 'value');
+  throwsKind(() => Small.encodeChecked({ ...ok, tag: 'abcdefghi' }), 'value');
+  throwsKind(() => Small.encodeChecked({ ...ok, ids: [1, 2, 3, 4, 5] }), 'value');
+  throwsKind(() => Small.encodeChecked({ ...ok, key: new Uint8Array(3) }), 'value');
+  throwsKind(() => Small.encodeChecked({ ...ok, blob: new Uint8Array(3) }), 'value');
   // A member length bound, through an optional; min / exact as an attribute.
   const b = { name: 'n', tags: [1, 2, 3], memo: new Uint8Array(4), blob: new Uint8Array(2), note: new Uint8Array(3) };
   assert.deepEqual(Bounds.decode(Bounds.encode(b)), b);
-  throwsKind(() => Bounds.encode({ ...b, note: new Uint8Array(4) }), 'value');
-  throwsKind(() => Bounds.encode({ ...b, tags: [1, 2, 3, 4] }), 'value');
+  throwsKind(() => Bounds.encodeChecked({ ...b, note: new Uint8Array(4) }), 'value');
+  throwsKind(() => Bounds.encodeChecked({ ...b, tags: [1, 2, 3, 4] }), 'value');
   const Exact = record('Exact', { code: field(utf8, { lengthBound: { exact: 3 } }), list: field(list(u8), { lengthBound: { min: 1, max: 2 } }) });
   assert.deepEqual(Exact.decode(Exact.encode({ code: 'abc', list: [1] })), { code: 'abc', list: [1] });
-  throwsKind(() => Exact.encode({ code: 'ab', list: [1] }), 'value');
-  throwsKind(() => Exact.encode({ code: 'abc', list: [] }), 'value');
+  throwsKind(() => Exact.encodeChecked({ code: 'ab', list: [1] }), 'value');
+  throwsKind(() => Exact.encodeChecked({ code: 'abc', list: [] }), 'value');
   // Bytes over the cap are refused on both sides.
   const Tiny = record('Tiny', { memo: utf8 }, { maxDynamicData: 8 });
-  throwsKind(() => Tiny.encode({ memo: 'x'.repeat(20) }), 'value', /maxDynamicData/);
+  throwsKind(() => Tiny.encodeChecked({ memo: 'x'.repeat(20) }), 'value', /maxDynamicData/);
   const wide = record('Tiny', { memo: utf8 }).type({ width: 1 }).encode({ memo: 'x'.repeat(20) });
   assert.equal(Tiny.validate(wide).ok, false);
   // An explicit width profile.
@@ -321,7 +321,7 @@ test('typed layer: malformed declarations are schema errors', () => {
   throwsKind(() => loop.schema, 'schema');
   const endless: TypeDef<unknown[]> = list(lazy(() => endless)) as never;
   throwsKind(() => endless.schema, 'schema');
-  throwsKind(() => lazy<number>(() => { throw new TypeError('boom'); }).encode(1), 'schema', /boom/);
+  throwsKind(() => lazy<number>(() => { throw new TypeError('boom'); }).encodeChecked(1), 'schema', /boom/);
   throwsKind(() => generateSchema({ a: lazy<number>(() => null as never) }), 'schema');
   // A definition that cannot be compiled reports through validate, too.
   const bad = record('R', { a: field(u32, { lengthBound: { max: 3 } }) });
@@ -352,7 +352,7 @@ test('generateSchema: names, interning and the schema as it travels', () => {
   assert.equal(fetched.type('Transfer').psszToJson(bytes), '{"from":1,"to":2,"amount":3,"payer":null,"notify":[],"since":{"major":1,"minor":2}}');
   assert.equal(Transfer.psszToJson(bytes), schema.type('Transfer').psszToJson(bytes));
   throwsKind(() => generateSchema({ Transfer: custom('Version', record('Transfer', { major: u16, minor: u16 })) }, { requireHandlers: true })
-    .type('Transfer').valueToJson({ major: 1, minor: 2 }), 'value', /no handler/);
+    .type('Transfer').valueToJsonChecked({ major: 1, minor: 2 }), 'value', /no handler/);
   // A definition's own schema and name.
   assert.equal(Transfer.name, 'Transfer');
   assert.equal(list(u64).name, '@0');
@@ -375,7 +375,7 @@ test('typed layer: recursion through lazy; depth is capped at 64', () => {
   Tree.decode(Tree.encode(deep));
   let tooDeep = deep;
   for (let i = 0; i < 2; ++i) tooDeep = leaf('x', [tooDeep]);
-  throwsKind(() => Tree.encode(tooDeep), 'value', /depth/);
+  throwsKind(() => Tree.encodeChecked(tooDeep), 'value', /depth/);
   // Bytes nested deeper than any writer produces (a boxed self-reference).
   interface Chain { next: Chain | null }
   const Chain: TypeDef<Chain, RecordView<Chain, { next: RecordView<Chain> | null }>> =
@@ -428,12 +428,12 @@ test('typed layer: a custom type is its wire type with its own text', () => {
   // No handler: the wire type's text; required: an error, binary and text.
   const Plain = custom('AccountNumber', u64);
   assert.equal(Plain.valueToJson(5n), '5');
-  throwsKind(() => Plain.type({ requireHandlers: true }).valueToJson(5n), 'value', /no handler/);
-  throwsKind(() => Plain.type({ requireHandlers: true }).decode(Plain.encode(5n)), 'bytes', /no handler/);
-  throwsKind(() => Plain.type({ requireHandlers: true }).encode(5n), 'value', /no handler/);
+  throwsKind(() => Plain.type({ requireHandlers: true }).valueToJsonChecked(5n), 'value', /no handler/);
+  throwsKind(() => Plain.type({ requireHandlers: true }).decode(Plain.encodeChecked(5n)), 'bytes', /no handler/);
+  throwsKind(() => Plain.type({ requireHandlers: true }).encodeChecked(5n), 'value', /no handler/);
   // A handler that throws, or returns the wrong value, is a typed error.
   const Bad = custom('Bad', u8, { toText: () => { throw new Error('no'); }, fromText: () => 999 });
-  throwsKind(() => Bad.valueToJson(1), 'value');
+  throwsKind(() => Bad.valueToJsonChecked(1), 'value');
   throwsKind(() => Bad.jsonToValue('"x"'), 'json');
 });
 
@@ -590,13 +590,13 @@ test('scalars and text: every combinator round-trips', () => {
   };
   assert.deepEqual(All.decode(All.encode(value)), value);
   // (The raw string 0xff is not UTF-8: it has no text.)
-  throwsKind(() => All.valueToJson(value), 'value', /UTF-8/);
+  throwsKind(() => All.valueToJsonChecked(value), 'value', /UTF-8/);
   assert.deepEqual(All.jsonToValue(All.valueToJson({ ...value, r: Uint8Array.of(0x41) })), { ...value, r: Uint8Array.of(0x41) });
   assert.deepEqual(All.jsonToValue(All.valueToJson({ ...value, r: Uint8Array.of(0x41) }, 'json'), 'json'), { ...value, r: Uint8Array.of(0x41) });
   assert.deepEqual(All.decodeKey(All.encodeKey(value)), value);
   for (const name of All.view(All.encode(value)).fields)
     assert.deepEqual(All.view(All.encode(value)).get(name as 'a'), value[name as 'a'], name);
-  throwsKind(() => u8.encode(256), 'value');
-  throwsKind(() => i8.encode(-129), 'value');
+  throwsKind(() => u8.encodeChecked(256), 'value');
+  throwsKind(() => i8.encodeChecked(-129), 'value');
   throwsKind(() => utf8.encode('\ud800'), 'value');
 });

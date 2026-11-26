@@ -266,7 +266,7 @@ test('README: invariants', () => {
     }
     return assert.fail('accepted');
   };
-  const written = failure(() => Range.encode({ lo: 5, hi: 1 }));
+  const written = failure(() => Range.encodeChecked({ lo: 5, hi: 1 }));
   assert.deepEqual([written.kind, written.message, written.invariant], ['value', 'Range: lo is greater than hi', true]);
   const validated = Range.validate(reversedBytes);
   assert.ok(!validated.ok && validated.error.kind === 'bytes' && validated.error.message === 'Range: lo is greater than hi');
@@ -275,9 +275,9 @@ test('README: invariants', () => {
   // A view reads in place and runs no check; decoding through it does.
   assert.equal(Range.view(reversedBytes).get('lo'), 5);
   assert.equal(failure(() => Range.view(reversedBytes).toValue()).message, 'Range: lo is greater than hi');
-  assert.equal(failure(() => DerKey.encode(new Uint8Array(0))).message, 'DerKey: not a DER sequence');
+  assert.equal(failure(() => DerKey.encodeChecked(new Uint8Array(0))).message, 'DerKey: not a DER sequence');
   assert.equal(toHex(DerKey.encode(fromHex('3000'))), '3000');
-  assert.equal(failure(() => DerKey.encodeKey(fromHex('31'))).message, 'DerKey: not a DER sequence');
+  assert.equal(failure(() => DerKey.encodeKeyChecked(fromHex('31'))).message, 'DerKey: not a DER sequence');
 });
 
 test('README: bounds at any depth, method arguments', () => {
@@ -327,9 +327,9 @@ test('README: bounds at any depth, method arguments', () => {
   const refused = (run: () => unknown, kind: string, message: string) =>
     assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === kind && e.message === message);
   const long = { ...post, tags: ['a'.repeat(17)] };
-  refused(() => Post.encode(long), 'value', 'pssz IR: byte count bound exceeded');
-  refused(() => Post.encodeKey(long), 'value', 'key: string exceeds its bound');
-  refused(() => Post.valueToJson(long), 'value', 'json: string exceeds its bound');
+  refused(() => Post.encodeChecked(long), 'value', 'pssz IR: byte count bound exceeded');
+  refused(() => Post.encodeKeyChecked(long), 'value', 'key: string exceeds its bound');
+  refused(() => Post.valueToJsonChecked(long), 'value', 'json: string exceeds its bound');
   const Loose = record('Post', {
     title: utf8, tags: list(utf8), votes: map(utf8, list(u32)), origin: tuple(utf8, u32, bytes),
     body: variant({ Text: utf8, Parts: list(utf8) }), reply: optional(list(rawString)),
@@ -337,7 +337,7 @@ test('README: bounds at any depth, method arguments', () => {
   const text = Loose.valueToJson(long);
   refused(() => Post.jsonToValue(text), 'json', 'json: string exceeds its bound');
   refused(() => Post.jsonToPssz(text), 'json', 'json: string exceeds its bound');
-  refused(() => Post.decodeKey(Loose.encodeKey(long)), 'bytes', 'key: string exceeds its bound');
+  refused(() => Post.decodeKey(Loose.encodeKeyChecked(long)), 'bytes', 'key: string exceeds its bound');
   for (const width of [1, 2, 4] as const) {
     const frame = Loose.type({ width }).encode(long);
     const reader = Post.type({ width });
@@ -372,9 +372,9 @@ test('README: bounds at any depth, method arguments', () => {
   assert.equal(toHex(asTuple.type({ width: 2 }).encode(['al', 5n, 'hi'])), toHex(args));
   assert.equal(toHex(asTuple.encode(['al', 5n, 'hi'])), toHex(argumentTuple(parameters).encode({ to: 'al', amount: 5n, memo: 'hi' })));
   assert.equal(toHex(Transfer.encodeKey({ to: 'al', amount: 5n, memo: 'hi' })), toHex(asTuple.encodeKey(['al', 5n, 'hi'])));
-  refused(() => Transfer.encode({ to: 'a'.repeat(17), amount: 5n, memo: '' }), 'value', 'pssz IR: byte count bound exceeded');
+  refused(() => Transfer.encodeChecked({ to: 'a'.repeat(17), amount: 5n, memo: '' }), 'value', 'pssz IR: byte count bound exceeded');
   const Note = argumentTuple({ text: rawString }, { maxDynamicData: 64 });
-  refused(() => Note.encode({ text: new Uint8Array(63) }), 'value', 'pssz IR: encoded size exceeds maxDynamicData cap');
+  refused(() => Note.encodeChecked({ text: new Uint8Array(63) }), 'value', 'pssz IR: encoded size exceeds maxDynamicData cap');
   assert.equal(Transfer.valueToJson({ to: 'al', amount: 5n, memo: 'hi' }), '{"to":"al","amount":5,"memo":"hi"}');
   const ir = generateSchema({ transfer: Transfer }).ir.types;
   assert.deepEqual(ir.map((m) => m.name), ['@0', '@1', '@2', 'transfer']);
@@ -397,7 +397,7 @@ test('README: a transparent type with a bounded member', () => {
   const Memo = transparent('Memo', field(rawString, { utf8: true, max: 80 }));
   assert.equal(Memo.inferredBound, 80n);
   assert.equal(toHex(Memo.encode('hi')), '6869');
-  assert.throws(() => Memo.encode('x'.repeat(81)), (e: unknown) => e instanceof PsszError && e.message === 'pssz IR: byte count bound exceeded');
+  assert.throws(() => Memo.encodeChecked('x'.repeat(81)), (e: unknown) => e instanceof PsszError && e.message === 'pssz IR: byte count bound exceeded');
   const Wrapped = transparent('Memo', boundedUtf8(80));
   assert.equal(toHex(Wrapped.encode('hi')), '6869');
   assert.equal(Wrapped.inferredBound, 80n);
@@ -413,9 +413,9 @@ test('README: order constraints', () => {
   });
   const refused = (run: () => unknown, message: string) =>
     assert.throws(run, (e: unknown) => e instanceof PsszError && e.kind === 'value' && e.message === message);
-  refused(() => Ranked.encode({ scores: [2, 1], names: [], entries: [], rows: [] }), 'sorted: elements are not in order');
-  refused(() => Ranked.encode({ scores: [], names: ['a', 'a'], entries: [], rows: [] }), 'sorted: elements are not in strictly ascending order');
-  refused(() => Ranked.encode({ scores: [], names: [], entries: [['a', 1], ['b', 2], ['a', 3]], rows: [] }), 'unique_keys: two elements have the same key');
+  refused(() => Ranked.encodeChecked({ scores: [2, 1], names: [], entries: [], rows: [] }), 'sorted: elements are not in order');
+  refused(() => Ranked.encodeChecked({ scores: [], names: ['a', 'a'], entries: [], rows: [] }), 'sorted: elements are not in strictly ascending order');
+  refused(() => Ranked.encodeChecked({ scores: [], names: [], entries: [['a', 1], ['b', 2], ['a', 3]], rows: [] }), 'unique_keys: two elements have the same key');
   const ok = { scores: [1, 1, 2, 300], names: ['a', 'ab', 'b'], entries: [['x', 1], ['a', 1]] as [string, number][], rows: [[1, 2, 2], [], [9]] };
   assert.deepEqual(Ranked.decode(Ranked.encode(ok)), ok);
   // Not in the Schema IR: a fetched schema does not know them.
@@ -495,8 +495,8 @@ test('README: interfaces', () => {
   assert.deepEqual(strings, ['alice', 'bob']);
   // A result outside returns(...).
   const refused = (run: () => unknown) => assert.throws(run, (e: unknown) => e instanceof PsszError);
-  refused(() => Token.methods.names.result.encode(['a', 'b', 'c', 'd', 'e']));
-  refused(() => Token.methods.names.result.encode(['a'.repeat(17)]));
+  refused(() => Token.methods.names.result.encodeChecked(['a', 'b', 'c', 'd', 'e']));
+  refused(() => Token.methods.names.result.encodeChecked(['a'.repeat(17)]));
   assert.equal(Token.methods.names.result.validate(Uint8Array.of(1, 0xff)).ok, false);
   // The schema.
   const funcs = Token.schema.ir.interfaces[0].funcs;

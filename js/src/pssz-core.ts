@@ -951,8 +951,29 @@ export function unwrapOption(node: Node, value: unknown, fail: (m: string) => ne
   return [true, value.some];
 }
 
+/**
+ * The two write modes (docs/annotations.md 7.2; gofractally/psio#14). Inside
+ * `fastWrite` the writers hold nothing against what a type declares: no
+ * member bound, no bound of a bounded container, no order constraint, no
+ * handler `check`. What a format needs stays checked (an offset that does
+ * not fit its width, a `maxDynamicData` cap, the length of a fixed array,
+ * UTF-8). `T.encode` / `T.encodeKey` / `T.valueToJson` are fast writes;
+ * `T.encodeChecked` / `T.encodeKeyChecked` / `T.valueToJsonChecked` are the
+ * validated ones. (JavaScript runs one write at a time: a counter is enough.)
+ */
+export const writeMode = { fast: 0 };
+export function fastWrite<T>(body: () => T): T {
+  ++writeMode.fast;
+  try {
+    return body();
+  } finally {
+    --writeMode.fast;
+  }
+}
+
 /** The length a member `lengthBound` constrains, looking through Option. */
 export function memberBoundAdmits(bound: LengthBound, node: Node, value: unknown): boolean {
+  if (writeMode.fast > 0) return true;
   while (node.kind === 'option') {
     if (value === null || value === undefined) return true;
     if (node.child.kind === 'option') {
@@ -1972,7 +1993,7 @@ export class Codec {
    * of the wire type. `fail` gets the invariant's own message.
    */
   checkCustom(node: Node, value: unknown, fail: (message: string, invariant: boolean) => never): void {
-    if (node.boxed || this.state.quiet > 0) return;
+    if (node.boxed || this.state.quiet > 0 || writeMode.fast > 0) return;
     const handler = node.handler;
     if (!handler) {
       if (this.requireHandlers) fail('pssz IR: no handler registered for a custom type', false);
@@ -2004,7 +2025,7 @@ export class Codec {
    * by a walk that does not: a key). An error of kind `kind`.
    */
   checkValue(ref: Node, value: unknown, kind: PsszErrorKind): void {
-    if (!this.checksValues) return;
+    if (!this.checksValues || writeMode.fast > 0) return;
     try {
       this.encodeAt(ref, value, 0);
     } catch (e) {
@@ -2052,7 +2073,8 @@ export class Codec {
    * elements' key bytes. Runs no handler. `fail` gets the C++ message.
    */
   checkOrder(member: MemberInfo, value: unknown, fail: (m: string) => never): void {
-    if (member.order) this.quietly(() => this.orderAt(member.text, member.order!, value, fail));
+    if (member.order && writeMode.fast === 0)
+      this.quietly(() => this.orderAt(member.text, member.order!, value, fail));
   }
 
   private orderAt(ref: Node, tree: OrderTree, value: unknown, fail: (m: string) => never): void {
@@ -2206,6 +2228,7 @@ export class Codec {
    * absent optional has no length.
    */
   nestedBoundAdmits(bound: LengthBound, node: Node, bytes: Uint8Array, start: number, end: number): boolean {
+    if (writeMode.fast > 0) return true;
     while (node.kind === 'option') {
       node = node.child;
       const selector = this.canBeEmpty(node);
@@ -2213,6 +2236,23 @@ export class Codec {
       if (selector) ++start;
     }
     return boundAdmits(bound, end - start);
+  }
+
+  /**
+   * The same for a member's VALUE, where no encoding is at hand (the key
+   * and JSON codecs): the member is encoded to count its bytes. Only a
+   * nested member has such a bound; a value that has no encoding for
+   * another reason is not this check's to report.
+   */
+  nestedValueAdmits(member: MemberInfo, value: unknown): boolean {
+    if (writeMode.fast > 0 || !member.bound || !nestedMember(member.node)) return true;
+    let part: Uint8Array;
+    try {
+      part = this.quietly(() => this.encodeAt(member.text, value, 1, null, boundCount(member.bound)));
+    } catch {
+      return true;
+    }
+    return this.nestedBoundAdmits(member.bound, member.node, part, 0, part.length);
   }
 
   // `w`: the width of the node at its position (a tuple's can differ from
@@ -2475,7 +2515,12 @@ export class Codec {
   private encodeSequence(
     node: Node, value: unknown[], n: number, cap: bigint | null, count: bigint | null,
   ): Uint8Array {
-    if (node.bounded && (node.exact ? value.length !== node.countNum : value.length > node.countNum))
+    // (A fixed array's length is its layout; a bound is a declaration, which
+    // the fast write does not hold a value against.)
+    if (
+      node.bounded &&
+      (node.exact ? value.length !== node.countNum : writeMode.fast === 0 && value.length > node.countNum)
+    )
       valueError('pssz IR: sequence bound exceeded');
     const w = this.widthOf(node, cap, count);
     const info = this.layout(node.child);
@@ -2494,7 +2539,8 @@ export class Codec {
   boundBytes(container: Node, count: number, fail: (m: string) => never): void {
     if (container.kind === 'array') {
       if (count !== container.countNum) fail('pssz IR: byte array count mismatch');
-    } else if (container.bounded && count > container.countNum) fail('pssz IR: byte count bound exceeded');
+    } else if (container.bounded && count > container.countNum && writeMode.fast === 0)
+      fail('pssz IR: byte count bound exceeded');
   }
 
   // ── Decode ────────────────────────────────────────────────────────────────

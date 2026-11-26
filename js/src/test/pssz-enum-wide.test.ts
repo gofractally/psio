@@ -95,8 +95,8 @@ test('enum: the wire form is the underlying integer; the value is its number', (
     assert.equal(hex(color.encode(v)), hex(bytes));
   }
   assert.equal(color.validate(fromHex('0700')).ok, false);
-  rejects(() => color.encode(256), 'value', /overflow/);
-  rejects(() => color.encode('red'), 'value', /integer value required/);
+  rejects(() => color.encodeChecked(256), 'value', /overflow/);
+  rejects(() => color.encodeChecked('red'), 'value', /integer value required/);
   // In a record and a list an enum lays out exactly like its integer.
   const asEnum = schema.type({ Struct: { a: 'Color', b: { Array: { type: 'Status', len: 2 } } } });
   const asInt = schema.type({ Struct: { a: U8, b: { Array: { type: I32, len: 2 } } } });
@@ -135,7 +135,7 @@ test('enum text: a listed value is its name, any other its number', () => {
   assert.equal(big.jsonToValue('"9007199254740992"', 'ijson'), 9007199254740992n);
   assert.equal(big.jsonToValue('9007199254740992', 'json'), 9007199254740992n);
   rejects(() => big.jsonToValue('9007199254740992', 'ijson'), 'json', /safe range/);
-  rejects(() => big.valueToJson('top'), 'value', /integer value/);
+  rejects(() => big.valueToJsonChecked('top'), 'value', /integer value/);
 });
 
 test('enum text: every input form, in both formats', () => {
@@ -217,9 +217,9 @@ test('enum text: every error, in both formats', () => {
     rejects(() => status.jsonToValue('"pending:1"', format), 'json', /disagree/);
     rejects(() => status.jsonToValue('"active:-2"', format), 'json', /disagree/);
     // Writing: the value must be an in-range integer.
-    rejects(() => color.valueToJson(256, format), 'value', /does not match the schema/);
-    rejects(() => color.valueToJson('red', format), 'value', /does not match the schema/);
-    rejects(() => color.valueToJson(1.5, format), 'value', /does not match the schema/);
+    rejects(() => color.valueToJsonChecked(256, format), 'value', /does not match the schema/);
+    rejects(() => color.valueToJsonChecked('red', format), 'value', /does not match the schema/);
+    rejects(() => color.valueToJsonChecked(1.5, format), 'value', /does not match the schema/);
   }
 });
 
@@ -297,7 +297,7 @@ test('enum schema: IR form, PSSZ and JSON round trips, malformed declarations', 
   // An enum over a wide integer is that integer on the wire and has no text.
   const wide = build({ Enum: { type: U128, members: { a: 1 } } });
   assert.equal(wide.decode(wide.encode(1n)), 1n);
-  rejects(() => wide.valueToJson(1n), 'value', /8 to 64 bits/);
+  rejects(() => wide.valueToJsonChecked(1n), 'value', /8 to 64 bits/);
   rejects(() => wide.jsonToValue('"a"'), 'json', /8 to 64 bits/);
   // An enumerator the underlying integer cannot hold is never written and
   // cannot be read by name.
@@ -378,8 +378,8 @@ test('128 / 256-bit integers: bigint values, binary form unchanged', () => {
   assert.equal(u256.decode(fromHex('ff'.repeat(32))), U256_MAX);
   assert.equal(i128.decode(fromHex('00'.repeat(15) + '80')), I128_MIN);
   assert.equal(hex(u128.encode(7)), hex(u128.encode(7n)));
-  rejects(() => u256.encode(U256_MAX + 1n), 'value', /overflow/);
-  rejects(() => u128.encode(-1n), 'value', /overflow/);
+  rejects(() => u256.encodeChecked(U256_MAX + 1n), 'value', /overflow/);
+  rejects(() => u128.encodeChecked(-1n), 'value', /overflow/);
   rejects(() => new PsszSchema({ T: { Int: { bits: 256, isSigned: true } } }).type('T'), 'schema', /integer width/);
 });
 
@@ -487,11 +487,11 @@ test('128 / 256-bit integers: canonical decimal only, in range, numbers or strin
         rejects(() => schema.type(name).jsonToPssz(text, format), 'json', /./, `${name} ${format} ${text.slice(0, 50)}`);
       }
   for (const format of FORMATS) {
-    rejects(() => schema.type('U128').valueToJson(-1n, format), 'value', /does not match the schema/);
-    rejects(() => schema.type('U128').valueToJson(U128_MAX + 1n, format), 'value', /does not match the schema/);
-    rejects(() => schema.type('I128').valueToJson(I128_MAX + 1n, format), 'value', /does not match the schema/);
-    rejects(() => schema.type('U256').valueToJson(U256_MAX + 1n, format), 'value', /does not match the schema/);
-    rejects(() => schema.type('U256').valueToJson('7', format), 'value', /does not match the schema/);
+    rejects(() => schema.type('U128').valueToJsonChecked(-1n, format), 'value', /does not match the schema/);
+    rejects(() => schema.type('U128').valueToJsonChecked(U128_MAX + 1n, format), 'value', /does not match the schema/);
+    rejects(() => schema.type('I128').valueToJsonChecked(I128_MAX + 1n, format), 'value', /does not match the schema/);
+    rejects(() => schema.type('U256').valueToJsonChecked(U256_MAX + 1n, format), 'value', /does not match the schema/);
+    rejects(() => schema.type('U256').valueToJsonChecked('7', format), 'value', /does not match the schema/);
   }
 });
 
@@ -527,10 +527,10 @@ test('non-finite floats: no text in either format, never read', () => {
   for (const format of FORMATS) {
     for (const type of [f32, f64])
       for (const value of [NaN, Infinity, -Infinity])
-        rejects(() => type.valueToJson(value, format), 'value', /non-finite float has no JSON text/, `${format} ${value}`);
+        rejects(() => type.valueToJsonChecked(value, format), 'value', /non-finite float has no JSON text/, `${format} ${value}`);
     // A NaN with a payload, and non-finite bytes on the way to text.
-    rejects(() => f64.valueToJson(new PsszNaN(0x7ff0000000000001n, 8), format), 'value', /non-finite/);
-    rejects(() => f32.valueToJson(new PsszNaN(0x7f800001n, 4), format), 'value', /non-finite/);
+    rejects(() => f64.valueToJsonChecked(new PsszNaN(0x7ff0000000000001n, 8), format), 'value', /non-finite/);
+    rejects(() => f32.valueToJsonChecked(new PsszNaN(0x7f800001n, 4), format), 'value', /non-finite/);
     for (const bytes of ['000000000000f07f', '000000000000f0ff', '000000000000f87f', '010000000000f07f']) {
       assert.equal(f64.validate(fromHex(bytes)).ok, true);
       rejects(() => f64.psszToJson(fromHex(bytes), format), 'value', /non-finite/, bytes);
@@ -538,10 +538,10 @@ test('non-finite floats: no text in either format, never read', () => {
     for (const bytes of ['0000807f', '000080ff', '0000c07f', '0100807f'])
       rejects(() => f32.psszToJson(fromHex(bytes), format), 'value', /non-finite/, bytes);
     // A float that overflows binary32 is not finite there.
-    rejects(() => f32.valueToJson(1e39, format), 'value', /non-finite/);
+    rejects(() => f32.valueToJsonChecked(1e39, format), 'value', /non-finite/);
     // Nested: the whole write fails, nothing partial is returned.
-    rejects(() => floats.valueToJson({ a: 1, b: [1, NaN] }, format), 'value', /non-finite/);
-    rejects(() => floats.valueToJson({ a: -Infinity, b: [] }, format), 'value', /non-finite/);
+    rejects(() => floats.valueToJsonChecked({ a: 1, b: [1, NaN] }, format), 'value', /non-finite/);
+    rejects(() => floats.valueToJsonChecked({ a: -Infinity, b: [] }, format), 'value', /non-finite/);
 
     for (const text of [
       'NaN', 'nan', 'Infinity', '-Infinity', '+Infinity', 'inf', '-inf', '"NaN"', '"Infinity"', '"-Infinity"', 'null',

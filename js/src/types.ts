@@ -925,9 +925,13 @@ export class TypeDef<T, V = T> {
   get childWiderThanCap(): boolean {
     return this.type().childWiderThanCap;
   }
-  /** The canonical PSSZ bytes of `value`. */
+  /** The PSSZ bytes of `value`: the fast write (see `PsszType.encode`). */
   encode(value: T): Uint8Array {
     return this.type().encode(value);
+  }
+  /** The validated write: the canonical PSSZ bytes of `value`, or a PsszError. */
+  encodeChecked(value: T): Uint8Array {
+    return this.type().encodeChecked(value);
   }
   /** Decodes fully validated PSSZ bytes. */
   decode(bytes: Uint8Array, options?: PsszDecodeOptions): T {
@@ -945,9 +949,13 @@ export class TypeDef<T, V = T> {
   view(bytes: Uint8Array): V {
     return this.type().view(bytes);
   }
-  /** The `key` bytes of `value`: bytewise order is value order. */
+  /** The `key` bytes of `value`: bytewise order is value order. The fast write. */
   encodeKey(value: T): Uint8Array {
     return this.type().encodeKey(value);
+  }
+  /** The validated key write (see `PsszType.encodeKeyChecked`). */
+  encodeKeyChecked(value: T): Uint8Array {
+    return this.type().encodeKeyChecked(value);
   }
   /** Decodes key bytes (checked). */
   decodeKey(bytes: Uint8Array): T {
@@ -969,9 +977,13 @@ export class TypeDef<T, V = T> {
   jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): T {
     return this.type().jsonToValue(text, format);
   }
-  /** Value -> JSON / I-JSON text. */
+  /** Value -> JSON / I-JSON text: the fast write. */
   valueToJson(value: T, format: JsonFormat = 'ijson'): string {
     return this.type().valueToJson(value, format);
+  }
+  /** The validated JSON write (see `PsszType.valueToJsonChecked`). */
+  valueToJsonChecked(value: T, format: JsonFormat = 'ijson'): string {
+    return this.type().valueToJsonChecked(value, format);
   }
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
@@ -1760,6 +1772,10 @@ export class Method<A, AV, R, RV> {
   /** The PSSZ bytes of a result (C++ `psio::method_result_to_pssz`); no bytes for a method that returns nothing. */
   resultToPssz(value: R): Uint8Array {
     return this.owner.lookup.method<A, R>(this.name).resultToPssz(value);
+  }
+  /** The validated write of a result (see `PsszMethod.resultToPsszChecked`). */
+  resultToPsszChecked(value: R): Uint8Array {
+    return this.owner.lookup.method<A, R>(this.name).resultToPsszChecked(value);
   }
 
   /** Validates and decodes a result (C++ `psio::method_result_from_pssz`). */
