@@ -457,7 +457,7 @@ fn a_key_writer_refuses_what_a_key_reader_rejects() {
         change(&mut bad);
         assert!(try_to_key(&bad).is_err(), "{what}: written");
         let mut out = vec![7u8];
-        assert!(psio::key::to_key_into(&bad, &mut out).is_err(), "{what}");
+        assert!(psio::key::try_to_key_into(&bad, &mut out).is_err(), "{what}");
         assert_eq!(out, [7], "{what}: the output is left as it was");
         // The key an unchecked writer produces is rejected by the readers.
         let unchecked = key_bytes(&bad);

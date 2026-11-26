@@ -223,12 +223,16 @@ pub use protobuf::{
 pub use wit::{from_wit, from_wit_trusted, to_wit, to_wit_into, try_to_wit, validate_wit, wit_size};
 pub use json::{
     from_ijson, from_ijson_trusted, from_json, from_json_trusted, ijson_size, json_size, to_ijson,
-    to_ijson_into, to_json, to_json_into, try_to_ijson, try_to_json, validate_ijson, validate_json,
+    to_ijson_into, to_json, to_json_into, try_to_ijson, try_to_ijson_into, try_to_json, try_to_json_into,
+    validate_ijson, validate_json,
     IJson, Json, JsonNumber, JsonValue,
 };
-pub use key::{from_key, from_key_trusted, key_size, to_key, to_key_into, try_to_key, validate_key};
+pub use key::{
+    from_key, from_key_trusted, key_size, to_key, to_key_into, try_to_key, try_to_key_into, validate_key,
+};
 pub use pssz::{
-    from_pssz, from_pssz_trusted, pssz_size, to_pssz, to_pssz_into, try_to_pssz, validate_pssz,
+    from_pssz, from_pssz_trusted, pssz_size, to_pssz, to_pssz_into, try_to_pssz, try_to_pssz_into,
+    validate_pssz,
     Pssz, PsszBuffer, SharedPssz,
 };
 pub use pssz_view::{PsszMapEntry, PsszMutMapEntry, PsszMutView, PsszView};

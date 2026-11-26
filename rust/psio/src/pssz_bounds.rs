@@ -312,19 +312,27 @@ impl<F: PsszFormat, L: PsszPack<F> + Elements, R: Rule<L::Item>> PsszPack<F> for
         checked::pack_checked::<F, Self>(self, out)
     }
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
-        R::check(self.0.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(self.0.elements())?;
+        }
         self.0.pssz_pack_at_depth(out, depth)
     }
     fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
-        R::check(self.0.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(self.0.elements())?;
+        }
         self.0.pssz_pack_fixed(slot, depth)
     }
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
-        R::check(self.0.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(self.0.elements())?;
+        }
         self.0.pssz_size_at_depth(depth)
     }
     fn pssz_size_fixed(&self, depth: usize) -> PsszResult<()> {
-        R::check(self.0.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(self.0.elements())?;
+        }
         self.0.pssz_size_fixed(depth)
     }
     fn pssz_size_hint(&self) -> usize {
@@ -336,12 +344,16 @@ impl<F: PsszFormat, L: crate::pssz::PsszUnpack<F> + Elements, R: Rule<L::Item>> 
 {
     fn pssz_unpack(bytes: &[u8]) -> PsszResult<Self> {
         let list = L::pssz_unpack(bytes)?;
-        R::check(list.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(list.elements())?;
+        }
         Ok(Self::new(list))
     }
     fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
         let list = L::pssz_unpack_at_depth(bytes, depth)?;
-        R::check(list.elements())?;
+        if crate::pssz_checked::declared() {
+            R::check(list.elements())?;
+        }
         Ok(Self::new(list))
     }
     fn pssz_missing_optional() -> PsszResult<Self> {
@@ -1351,14 +1363,14 @@ where
     }
     #[inline]
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
-        if CHECK {
+        if CHECK && crate::pssz_checked::declared() {
             self.0.check()?;
         }
         self.0.size_as(depth)
     }
     #[inline]
     fn pssz_size_fixed(&self, depth: usize) -> PsszResult<()> {
-        if CHECK {
+        if CHECK && crate::pssz_checked::declared() {
             self.0.check()?;
         }
         self.0.size_fixed_as(<T::As as PsszPack<F>>::FIXED_SIZE, depth)
@@ -1371,14 +1383,14 @@ where
     }
     #[inline]
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
-        if CHECK {
+        if CHECK && crate::pssz_checked::declared() {
             self.0.check()?;
         }
         self.0.pack_as(out, depth)
     }
     #[inline]
     fn pssz_pack_fixed(&self, slot: &mut [u8], depth: usize) -> PsszResult<()> {
-        if CHECK {
+        if CHECK && crate::pssz_checked::declared() {
             self.0.check()?;
         }
         self.0.pack_fixed_as(slot, depth)

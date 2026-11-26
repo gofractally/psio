@@ -407,8 +407,10 @@ where
             return Err(format!("{what}: {outcome:?}, want {reason:?}"));
         }
     }
-    if !std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| to_key(&value))).is_err() {
-        return Err("to_key wrote a value that violates an invariant".into());
+    // The fast write holds nothing against the invariant: every value has
+    // a key, and it is the key the readers refuse.
+    if to_key(&value) != key {
+        return Err("to_key does not give the key of the value".into());
     }
     Ok(())
 }

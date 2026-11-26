@@ -144,7 +144,7 @@ pub trait KeyUnpack: Sized {
                 1 => {}
                 _ => return Err(KeyError::new("key: invalid list element marker")),
             }
-            if out.len() >= limit {
+            if out.len() >= limit && crate::pssz_checked::declared() {
                 return Err(KeyError::new("key: list exceeds its bound"));
             }
             out.push(Self::key_unpack(r)?);
@@ -224,13 +224,17 @@ fn pack_escaped(bytes: &[u8], out: &mut Vec<u8>) {
 
 // ── Entry points ────────────────────────────────────────────────────────────
 
-/// The key of `value`. Panics when the value violates a type invariant
-/// (it has no key): use [`try_to_key`] for values that were not checked.
+/// The key of `value` (C++ `psio::to_key(v)`): the FAST write. Every value
+/// has a key — no declaration changes a key's bytes — and the value is not
+/// held against what its type declares (bounds, order, invariants).
+/// [`try_to_key`] is the validated write.
 pub fn to_key<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
-    try_to_key(value).expect("key: the value violates a type invariant; use try_to_key")
+    key_bytes(value)
 }
 
-/// The key of `value`, or the invariant it (or a value it holds) violates.
+/// The VALIDATED write (C++ `psio::to_key_checked(v)`): the key of `value`,
+/// or the bound, order or invariant it (or a value it holds) violates —
+/// what [`validate_key`] would refuse the key for.
 pub fn try_to_key<T: KeyPack + ?Sized>(value: &T) -> KeyResult<Vec<u8>> {
     value.key_check()?;
     Ok(key_bytes(value))
@@ -244,9 +248,18 @@ pub fn key_bytes<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
     out
 }
 
-/// Appends the key of `value` to `out` (C++ `psio::to_key(v, sink)`), or
-/// reports the invariant it violates, leaving `out` as it was.
+/// Appends the key of `value` to `out` (C++ `psio::to_key(v, sink)`): the
+/// fast write, as [`to_key`]; it does not fail.
 pub fn to_key_into<T: KeyPack + ?Sized>(value: &T, out: &mut Vec<u8>) -> KeyResult<()> {
+    out.reserve(value.key_size());
+    value.key_pack(out);
+    Ok(())
+}
+
+/// The validated write, appended (C++ `psio::to_key_checked(v, sink)`): the
+/// key of `value`, or the bound, order or invariant it violates, leaving
+/// `out` as it was.
+pub fn try_to_key_into<T: KeyPack + ?Sized>(value: &T, out: &mut Vec<u8>) -> KeyResult<()> {
     value.key_check()?;
     out.reserve(value.key_size());
     value.key_pack(out);
@@ -274,6 +287,9 @@ pub fn from_key<T: KeyUnpack>(bytes: &[u8]) -> KeyResult<T> {
 /// canonical key of `T` cause a panic.
 #[track_caller]
 pub fn from_key_trusted<T: KeyUnpack>(bytes: &[u8]) -> T {
+    // The TRUSTED read: the key is parsed as strictly as ever, and the value
+    // is not held against what T declares (bounds, order, invariants).
+    let _trusted = crate::pssz_checked::Undeclared::enter();
     match from_key::<T>(bytes) {
         Ok(value) => value,
         Err(e) => panic!("from_key_trusted: the bytes are not valid: {e}"),
@@ -494,7 +510,7 @@ macro_rules! key_octet {
             }
             fn key_unpack_list(r: &mut KeyReader<'_>, limit: usize) -> KeyResult<Vec<Self>> {
                 let bytes = r.escaped()?;
-                if bytes.len() > limit {
+                if bytes.len() > limit && crate::pssz_checked::declared() {
                     return Err(KeyError::new("key: list exceeds its bound"));
                 }
                 Ok(bytes.into_iter().map(|b| (b ^ $flip) as $ty).collect())
@@ -588,7 +604,7 @@ impl<const N: usize> KeyPack for BoundedString<N> {
     // What a reader rejects, a writer does not write (docs/key-spec.md
     // 5.1): a value past its bound has no key.
     fn key_check(&self) -> KeyResult<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(())
@@ -597,7 +613,7 @@ impl<const N: usize> KeyPack for BoundedString<N> {
 impl<const N: usize> KeyUnpack for BoundedString<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
         let text = String::key_unpack(r)?;
-        if text.len() > N {
+        if text.len() > N && crate::pssz_checked::declared() {
             return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(BoundedString(text))
@@ -624,7 +640,7 @@ impl<const N: usize> KeyPack for BoundedRawString<N> {
         pack_escaped(&self.0, out)
     }
     fn key_check(&self) -> KeyResult<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(())
@@ -633,7 +649,7 @@ impl<const N: usize> KeyPack for BoundedRawString<N> {
 impl<const N: usize> KeyUnpack for BoundedRawString<N> {
     fn key_unpack(r: &mut KeyReader<'_>) -> KeyResult<Self> {
         let bytes = r.escaped()?;
-        if bytes.len() > N {
+        if bytes.len() > N && crate::pssz_checked::declared() {
             return Err(KeyError::new("key: string exceeds its bound"));
         }
         Ok(BoundedRawString(bytes))
@@ -708,7 +724,7 @@ impl<T: KeyPack, const N: usize> KeyPack for BoundedList<T, N> {
         T::key_pack_list(&self.0, out)
     }
     fn key_check(&self) -> KeyResult<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(KeyError::new("key: list exceeds its bound"));
         }
         self.0.iter().try_for_each(T::key_check)
@@ -1017,7 +1033,7 @@ macro_rules! key_set {
             fn key_check(&self) -> KeyResult<()> {
                 let $s = self;
                 let limit: usize = $limit;
-                if $inner.len() > limit {
+                if $inner.len() > limit && crate::pssz_checked::declared() {
                     return Err(KeyError::new("key: list exceeds its bound"));
                 }
                 $inner.iter().try_for_each(K::key_check)
@@ -1052,7 +1068,7 @@ macro_rules! key_map {
             fn key_check(&self) -> KeyResult<()> {
                 let $s = self;
                 let limit: usize = $limit;
-                if $inner.len() > limit {
+                if $inner.len() > limit && crate::pssz_checked::declared() {
                     return Err(KeyError::new("key: list exceeds its bound"));
                 }
                 $inner.iter().try_for_each(|(k, v)| {

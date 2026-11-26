@@ -86,7 +86,7 @@ where
 {
     checked::encode_node(depth)?;
     let sorted = canonical_order(entries, |entry| entry.0, MAP_DUPLICATE)?;
-    if sorted.len() > bound {
+    if sorted.len() > bound && crate::pssz_checked::declared() {
         return Err(MAP_BOUND);
     }
     checked::encode_sequence_at_depth::<F, (&K, &V)>(w, &sorted, out, false, depth)
@@ -103,7 +103,7 @@ where
 {
     checked::encode_node(depth)?;
     let sorted = canonical_order(elements, |element| *element, SET_DUPLICATE)?;
-    if sorted.len() > bound {
+    if sorted.len() > bound && crate::pssz_checked::declared() {
         return Err(SET_BOUND);
     }
     checked::encode_sequence_at_depth::<F, &K>(w, &sorted, out, false, depth)
@@ -118,7 +118,7 @@ where
 {
     checked::decode_node(depth)?;
     let n = checked::sequence_len::<F, (K, V)>(w, bytes, None)?;
-    if n > bound {
+    if n > bound && crate::pssz_checked::declared() {
         return Err(MAP_BOUND);
     }
     let entries = checked::decode_elements_at_depth::<F, (K, V)>(w, bytes, n, depth + 1)?;
@@ -131,7 +131,7 @@ where
 {
     checked::decode_node(depth)?;
     let n = checked::sequence_len::<F, K>(w, bytes, None)?;
-    if n > bound {
+    if n > bound && crate::pssz_checked::declared() {
         return Err(SET_BOUND);
     }
     let elements = checked::decode_elements_at_depth::<F, K>(w, bytes, n, depth + 1)?;
@@ -148,7 +148,7 @@ where
 {
     checked::decode_node(depth)?;
     let n = checked::sequence_len::<F, (K, V)>(w, bytes, None)?;
-    if n > bound {
+    if n > bound && crate::pssz_checked::declared() {
         return Err(MAP_BOUND);
     }
     checked::for_each_element::<F, (K, V)>(w, bytes, n, |_, entry| {

@@ -923,13 +923,13 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedString<N> {
     #[inline]
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
         checked::encode_node(depth)?;
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedString overflow")); }
         checked::append(out, self.0.as_bytes())
     }
     #[inline]
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
         checked::encode_node(depth)?;
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedString overflow")); }
         Ok(self.0.len())
     }
     fn pssz_size_hint(&self) -> usize { self.0.len() }
@@ -942,7 +942,7 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedString<N> {
     #[inline]
     fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
         checked::decode_node(depth)?;
-        if bytes.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
+        if bytes.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedString overflow")); }
         Ok(BoundedString(utf8(bytes)?.to_owned()))
     }
     #[inline]
@@ -958,7 +958,7 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedString<N> {
     #[inline]
     fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
         checked::decode_node(depth)?;
-        if bytes.len() > N { return Err(PsszError::new("pssz: BoundedString overflow")); }
+        if bytes.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedString overflow")); }
         utf8(bytes).map(|_| ())
     }
 }
@@ -1110,7 +1110,7 @@ pub struct BoundedRawString<const N: usize>(pub Vec<u8>);
 impl<const N: usize> BoundedRawString<N> {
     pub fn new() -> Self { Self(Vec::new()) }
     pub fn try_from_bytes(v: Vec<u8>) -> PsszResult<Self> {
-        if v.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if v.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         Ok(Self(v))
     }
     pub fn as_bytes(&self) -> &[u8] { &self.0 }
@@ -1127,7 +1127,7 @@ impl<const N: usize> TryFrom<&[u8]> for BoundedRawString<N> {
     type Error = PsszError;
     fn try_from(v: &[u8]) -> PsszResult<Self> {
         // Checked before the copy: an oversized input allocates nothing.
-        if v.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if v.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         Ok(Self(v.to_vec()))
     }
 }
@@ -1161,13 +1161,13 @@ impl<F: PsszFormat, const N: usize> PsszPack<F> for BoundedRawString<N> {
     #[inline]
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
         checked::encode_node(depth)?;
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         checked::append(out, &self.0)
     }
     #[inline]
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
         checked::encode_node(depth)?;
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         Ok(self.0.len())
     }
     fn pssz_size_hint(&self) -> usize { self.0.len() }
@@ -1180,7 +1180,7 @@ impl<F: PsszFormat, const N: usize> PsszUnpack<F> for BoundedRawString<N> {
     #[inline]
     fn pssz_unpack_at_depth(bytes: &[u8], depth: usize) -> PsszResult<Self> {
         checked::decode_node(depth)?;
-        if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if bytes.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)?;
         Ok(BoundedRawString(bytes.to_vec()))
     }
@@ -1197,7 +1197,7 @@ impl<F: PsszFormat, const N: usize> PsszValidate<F> for BoundedRawString<N> {
     #[inline]
     fn pssz_validate_at_depth(bytes: &[u8], depth: usize) -> PsszResult<()> {
         checked::decode_node(depth)?;
-        if bytes.len() > N { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
+        if bytes.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedRawString overflow")); }
         raw_string(bytes)
     }
 }
@@ -1701,13 +1701,13 @@ impl<F: PsszFormat, T: PsszPack<F>, const N: usize> PsszPack<F> for BoundedList<
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
     #[inline]
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedList overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedList overflow")); }
         checked::encode_node(depth)?;
         checked::encode_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0, out, false, depth)
     }
     #[inline]
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
-        if self.0.len() > N { return Err(PsszError::new("pssz: BoundedList overflow")); }
+        if self.0.len() > N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: BoundedList overflow")); }
         checked::encode_node(depth)?;
         checked::size_sequence_at_depth::<F, T>(<Self as PsszPack<F>>::OFFSET_WIDTH, &self.0, false, depth)
     }
@@ -1724,7 +1724,7 @@ impl<F: PsszFormat, T: PsszUnpack<F> + PsszPack<F>, const N: usize> PsszUnpack<F
         let w = <Self as PsszPack<F>>::OFFSET_WIDTH;
         // The count is checked before any element is allocated.
         let n = checked::sequence_len::<F, T>(w, bytes, None)?;
-        if n > N {
+        if n > N && crate::pssz_checked::declared() {
             return Err(PsszError::new("pssz: BoundedList overflow"));
         }
         Ok(BoundedList(checked::decode_elements_at_depth::<F, T>(w, bytes, n, depth + 1)?))
@@ -1743,7 +1743,7 @@ impl<F: PsszFormat, T: PsszPack<F> + PsszValidate<F>, const N: usize> PsszValida
         checked::decode_node(depth)?;
         let w = <Self as PsszPack<F>>::OFFSET_WIDTH;
         let n = checked::sequence_len::<F, T>(w, bytes, None)?;
-        if n > N {
+        if n > N && crate::pssz_checked::declared() {
             return Err(PsszError::new("pssz: BoundedList overflow"));
         }
         validate_elements::<F, T>(w, bytes, n, depth + 1)
@@ -1825,14 +1825,14 @@ impl<F: PsszFormat, const MAX_N: usize> PsszPack<F> for Bitlist<MAX_N> {
     fn pssz_pack_checked(&self, out: &mut Vec<u8>) -> PsszResult<()> { checked::pack_checked::<F, Self>(self, out) }
     fn pssz_pack_at_depth(&self, out: &mut Vec<u8>, depth: usize) -> PsszResult<()> {
         checked::encode_node(depth)?;
-        if self.bits.len() > MAX_N { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
+        if self.bits.len() > MAX_N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
         checked::reserve(out, self.bits.len() / 8 + 1)?;
         self.pack_bits(out); // wire-identical with SSZ
         Ok(())
     }
     fn pssz_size_at_depth(&self, depth: usize) -> PsszResult<usize> {
         checked::encode_node(depth)?;
-        if self.bits.len() > MAX_N { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
+        if self.bits.len() > MAX_N && crate::pssz_checked::declared() { return Err(PsszError::new("pssz: bitlist count exceeds bound")); }
         Ok(self.bits.len() / 8 + 1)
     }
     fn pssz_size_hint(&self) -> usize { self.bits.len() / 8 + 1 }
@@ -2199,7 +2199,12 @@ pub use crate::key::ByKey;
 /// value is not representable (an offset, bound or cap overflow); use
 /// [`try_encode`] where that can depend on data.
 pub fn encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> Vec<u8> {
-    try_encode::<F, T>(value).expect("pssz: encode failed; use try_encode / try_to_pssz")
+    // The FAST write: nothing the type declares is held against the value
+    // (pssz_checked::Undeclared). What is left to fail is a value the format
+    // cannot represent: an offset that does not fit its width, the depth
+    // limit.
+    let _fast = checked::Undeclared::enter();
+    try_encode::<F, T>(value).expect("pssz: the value has no encoding (an offset does not fit its width, or the depth limit); try_encode / try_to_pssz report it")
 }
 
 /// Checked encode. Offset-width, bound, cap and depth failures are errors.
@@ -2321,7 +2326,7 @@ pub fn validate_strict<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>
 /// Encodes `value` into a fresh buffer (C++ `psio::to_pssz(v)`). Panics when
 /// the value is not representable; [`try_to_pssz`] returns the error.
 pub fn to_pssz<T: PsszPack<Pssz> + ?Sized>(value: &T) -> Vec<u8> {
-    try_encode::<Pssz, T>(value).expect("pssz: encode failed; use try_to_pssz")
+    encode::<Pssz, T>(value)
 }
 
 /// [`to_pssz`] for values that may not be representable.
@@ -2329,9 +2334,19 @@ pub fn try_to_pssz<T: PsszPack<Pssz> + ?Sized>(value: &T) -> PsszResult<Vec<u8>>
     try_encode::<Pssz, T>(value)
 }
 
-/// Appends the encoding of `value` to `out` (C++ `psio::to_pssz(v, sink)`).
-/// On error `out` is left as it was.
+/// The validated write, appended (C++ `psio::to_pssz_checked(v, sink)`):
+/// [`try_to_pssz`] into `out`. On error `out` is left as it was.
+pub fn try_to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    encode_into::<Pssz, T>(value, out)
+}
+
+/// Appends the encoding of `value` to `out`: the fast write, as [`to_pssz`]
+/// (C++ `psio::to_pssz(v, sink)`). [`try_to_pssz_into`] is the validated
+/// one. On error `out` is left as it was.
 pub fn to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    // The fast write, as `to_pssz`: an error is a value the format cannot
+    // represent, not a declaration it violates.
+    let _fast = checked::Undeclared::enter();
     encode_into::<Pssz, T>(value, out)
 }
 

@@ -263,14 +263,16 @@ fn bound_checks(
         return Ok((quote!(), quote!()));
     };
     let check = quote!(#k::pssz::bounds::check::<#own, #spec>(__member));
+    // (Not in a fast write or a trusted read: pssz_checked::Undeclared.)
+    let check = quote!((#k::pssz_checked::declared() && #check.is_err()));
     Ok((
         quote! {
-            if #check.is_err() {
+            if #check {
                 return ::core::result::Result::Err(w.err("json: member length_bound violated"));
             }
         },
         quote! {
-            if #check.is_err() {
+            if #check {
                 return ::core::result::Result::Err(r.err_at(__at, "json: member length_bound violated"));
             }
         },
@@ -664,8 +666,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             quote! {
                 let __written: ::core::result::Result<(), #j::JsonTextError> = (|| { #write })();
                 __written?;
-                if let ::core::result::Result::Err(__why) = #path(self) {
-                    return ::core::result::Result::Err(w.err(__why));
+                if #krate::pssz_checked::declared() {
+                    if let ::core::result::Result::Err(__why) = #path(self) {
+                        return ::core::result::Result::Err(w.err(__why));
+                    }
                 }
                 ::core::result::Result::Ok(())
             },
@@ -673,8 +677,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 r.ws();
                 let __start = r.position();
                 let __value: Self = (|| -> ::core::result::Result<Self, #j::JsonTextError> { #read })()?;
-                if let ::core::result::Result::Err(__why) = #path(&__value) {
-                    return ::core::result::Result::Err(r.err_at(__start, __why));
+                if #krate::pssz_checked::declared() {
+                    if let ::core::result::Result::Err(__why) = #path(&__value) {
+                        return ::core::result::Result::Err(r.err_at(__start, __why));
+                    }
                 }
                 ::core::result::Result::Ok(__value)
             },

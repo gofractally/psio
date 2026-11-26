@@ -346,28 +346,35 @@ pub fn size_of<F: JsonFormat, T: JsonText>(value: &T) -> usize {
 }
 
 macro_rules! helper_names {
-    ($tag:ty, $name:literal, $cpp:literal, $to:ident, $try_to:ident, $to_into:ident, $from:ident,
+    ($tag:ty, $name:literal, $cpp:literal, $to:ident, $try_to:ident, $to_into:ident, $try_to_into:ident, $from:ident,
      $from_trusted:ident, $validate:ident, $size:ident) => {
-        #[doc = concat!("The ", $name, " text of `value` (C++ `psio::", $cpp, "`). Panics when the value has none (NaN, an infinity, non-UTF-8 raw bytes, a violated invariant); [`", stringify!($try_to), "`] returns the error.")]
+        #[doc = concat!("The ", $name, " text of `value` (C++ `psio::", $cpp, "`): the FAST write. The value is not held against what its type declares (bounds, order, invariants). Panics when the value has no text at all (NaN, an infinity, non-UTF-8 raw bytes); [`", stringify!($try_to), "`] is the validated write.")]
         #[track_caller]
         pub fn $to<T: JsonText>(value: &T) -> String {
+            let _fast = crate::pssz_checked::Undeclared::enter();
             encode::<$tag, T>(value)
         }
-        #[doc = concat!("[`", stringify!($to), "`] for values that may have no text.")]
+        #[doc = concat!("The VALIDATED write (C++ `psio::", stringify!($to), "_checked(v)`): the text, or why a validating reader would refuse it — a member outside its bound or order, a violated invariant — or why the value has no text.")]
         pub fn $try_to<T: JsonText>(value: &T) -> Result<String> {
             try_encode::<$tag, T>(value)
         }
-        #[doc = concat!("Appends the ", $name, " text of `value` to `out`. On error `out` is left as it was.")]
+        #[doc = concat!("The validated write, appended: [`", stringify!($try_to), "`] into `out`. On error `out` is left as it was.")]
+        pub fn $try_to_into<T: JsonText>(value: &T, out: &mut String) -> Result<()> {
+            encode_into::<$tag, T>(value, out)
+        }
+        #[doc = concat!("Appends the ", $name, " text of `value` to `out`: the fast write, as [`", stringify!($to), "`]. An error is a value that has no text; `out` is left as it was.")]
         pub fn $to_into<T: JsonText>(value: &T, out: &mut String) -> Result<()> {
+            let _fast = crate::pssz_checked::Undeclared::enter();
             encode_into::<$tag, T>(value, out)
         }
         #[doc = concat!("The checked decode: reads ", $name, " `text` as exactly one `T`. A missing member is an error unless it is an `Option`, which is `None`.")]
         pub fn $from<T: JsonText>(text: impl AsRef<[u8]>) -> Result<T> {
             decode::<$tag, T>(text)
         }
-        #[doc = concat!("Reads ", $name, " text the caller vouches for. A safe function: the reader checks as it reads, nothing is skipped, and text that is not a valid `T` causes a panic.")]
+        #[doc = concat!("The TRUSTED read: ", $name, " text the caller vouches for. The text is parsed as strictly as ever (text that is not the ", $name, " of a `T` causes a panic), and the value is not held against what `T` declares (bounds, order, invariants).")]
         #[track_caller]
         pub fn $from_trusted<T: JsonText>(text: impl AsRef<[u8]>) -> T {
+            let _trusted = crate::pssz_checked::Undeclared::enter();
             match decode::<$tag, T>(text) {
                 Ok(value) => value,
                 Err(e) => panic!(concat!(stringify!($from_trusted), ": the text is not valid: {}"), e),
@@ -384,8 +391,8 @@ macro_rules! helper_names {
         }
     };
 }
-helper_names!(Json, "JSON", "to_json(v)", to_json, try_to_json, to_json_into, from_json, from_json_trusted, validate_json, json_size);
-helper_names!(IJson, "I-JSON", "to_ijson(v)", to_ijson, try_to_ijson, to_ijson_into, from_ijson, from_ijson_trusted, validate_ijson, ijson_size);
+helper_names!(Json, "JSON", "to_json(v)", to_json, try_to_json, to_json_into, try_to_json_into, from_json, from_json_trusted, validate_json, json_size);
+helper_names!(IJson, "I-JSON", "to_ijson(v)", to_ijson, try_to_ijson, to_ijson_into, try_to_ijson_into, from_ijson, from_ijson_trusted, validate_ijson, ijson_size);
 
 /// One `T` as JSON text, owned (C++ `psio::json_buffer<T>`).
 pub type JsonBuffer<T> = crate::Buffer<T, Json>;
@@ -1617,7 +1624,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
     const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(w.err("json: string exceeds its bound"));
         }
         w.string(self.0.as_bytes())
@@ -1626,7 +1633,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedString<N> {
         r.ws();
         let at = r.pos;
         let text = r.string()?;
-        if text.len() > N {
+        if text.len() > N && crate::pssz_checked::declared() {
             return Err(r.err_at(at, "json: string exceeds its bound"));
         }
         Ok(Self(text.into_owned()))
@@ -1637,7 +1644,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
     const JSON_KINDS: u8 = kinds::STRING;
     const JSON_STRING: bool = true;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(w.err("json: string exceeds its bound"));
         }
         w.string(&self.0)
@@ -1646,7 +1653,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
         r.ws();
         let at = r.pos;
         let text = r.string()?;
-        if text.len() > N {
+        if text.len() > N && crate::pssz_checked::declared() {
             return Err(r.err_at(at, "json: string exceeds its bound"));
         }
         Ok(Self(text.into_owned().into_bytes()))
@@ -1656,7 +1663,7 @@ impl<const N: usize> JsonText for crate::pssz::BoundedRawString<N> {
 impl<T: JsonText, const N: usize> JsonText for crate::pssz::BoundedList<T, N> {
     const JSON_KINDS: u8 = T::JSON_SEQUENCE_KINDS;
     fn write_json(&self, w: &mut Writer) -> Result<()> {
-        if self.0.len() > N {
+        if self.0.len() > N && crate::pssz_checked::declared() {
             return Err(w.err("json: array exceeds its bound"));
         }
         T::write_json_slice(&self.0, w)
@@ -1665,7 +1672,7 @@ impl<T: JsonText, const N: usize> JsonText for crate::pssz::BoundedList<T, N> {
         r.ws();
         let at = r.pos;
         let items = T::read_json_vec(r)?;
-        if items.len() > N {
+        if items.len() > N && crate::pssz_checked::declared() {
             return Err(r.err_at(at, "json: array exceeds its bound"));
         }
         Ok(Self(items))
@@ -1805,7 +1812,7 @@ where
     let Some(entries) = sorted(entries, |entry| entry.0) else {
         return Err(w.err("json: map has duplicate keys"));
     };
-    if entries.len() > bound {
+    if entries.len() > bound && crate::pssz_checked::declared() {
         return Err(w.err("json: array exceeds its bound"));
     }
     // An entry is a tuple: its key and value take the natural form.
@@ -1856,7 +1863,7 @@ fn read_map<K: JsonText + KeyPack, V: JsonText>(r: &mut Reader<'_>, bound: usize
         entries = <(K, V)>::read_json_vec(r)?;
     }
     r.restore_form(saved);
-    if entries.len() > bound {
+    if entries.len() > bound && crate::pssz_checked::declared() {
         return Err(r.err_at(at, "json: array exceeds its bound"));
     }
     if duplicates(entries.iter().map(|entry| &entry.0)) {
@@ -1874,7 +1881,7 @@ fn write_set<'a, K: JsonText + KeyPack + 'a>(
     let Some(elements) = sorted(elements, |element| *element) else {
         return Err(w.err("json: set has duplicate elements"));
     };
-    if elements.len() > bound {
+    if elements.len() > bound && crate::pssz_checked::declared() {
         return Err(w.err("json: array exceeds its bound"));
     }
     w.raw("[");
@@ -1904,7 +1911,7 @@ fn read_set<K: JsonText + KeyPack>(r: &mut Reader<'_>, bound: usize) -> Result<V
         }
     }
     r.end();
-    if elements.len() > bound {
+    if elements.len() > bound && crate::pssz_checked::declared() {
         return Err(r.err_at(at, "json: array exceeds its bound"));
     }
     if duplicates(elements.iter()) {

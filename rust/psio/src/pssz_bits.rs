@@ -31,14 +31,14 @@ pub fn list_count(wire: &[u8], bound: usize) -> PsszResult<usize> {
         .checked_mul(8)
         .and_then(|n| n.checked_add(highest))
         .ok_or(PsszError::new("pssz: bitlist count overflow"))?;
-    if count > bound {
+    if count > bound && crate::pssz_checked::declared() {
         return Err(PsszError::new("pssz: bitlist count exceeds bound"));
     }
     Ok(count)
 }
 
 pub fn encode_list(data: &[u8], count: usize, bound: usize) -> PsszResult<Vec<u8>> {
-    if count > bound {
+    if count > bound && crate::pssz_checked::declared() {
         return Err(PsszError::new("pssz: bitlist count exceeds bound"));
     }
     validate_data(data, count)?;

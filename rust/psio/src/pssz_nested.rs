@@ -88,7 +88,7 @@ impl<T: PsszPack<Pssz>, V, const N: usize> Nested<T, V, N> {
     /// The encoding of `value` (which runs its invariants).
     pub fn new(value: &T) -> PsszResult<Self> {
         let bytes = try_encode::<Pssz, T>(value)?;
-        if bytes.len() > N {
+        if bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         Ok(Self::unchecked(bytes))
@@ -105,14 +105,14 @@ impl<T: PsszPack<Pssz> + PsszValidate<Pssz>, V: NestedValidation, const N: usize
     /// Validates the bytes as a `T`; the result tells whether unknown
     /// appended optional fields are present.
     pub fn validate(&self) -> PsszResult<bool> {
-        if self.bytes.len() > N {
+        if self.bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         validate_compatible::<Pssz, T>(&self.bytes)
     }
     /// Validates the bytes as the one canonical encoding of a `T`.
     pub fn validate_exact(&self) -> PsszResult<()> {
-        if self.bytes.len() > N {
+        if self.bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         validate_strict::<Pssz, T>(&self.bytes)
@@ -122,7 +122,7 @@ impl<T: PsszPack<Pssz> + PsszValidate<Pssz>, V: NestedValidation, const N: usize
     /// deferred value. The inner root is one node level below this one.
     /// `depth`: the depth of the inner root.
     fn descend(bytes: &[u8], depth: usize) -> PsszResult<()> {
-        if bytes.len() > N {
+        if bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         if V::DEFERRED {
@@ -226,7 +226,7 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
         if !(V::DEFERRED && self.bytes.is_empty()) {
             checked::encode_node(depth + 1)?;
         }
-        if self.bytes.len() > N {
+        if self.bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         checked::append(out, &self.bytes)
@@ -236,7 +236,7 @@ impl<F: PsszFormat, T: PsszPack<Pssz>, V: NestedValidation, const N: usize> Pssz
         if !(V::DEFERRED && self.bytes.is_empty()) {
             checked::encode_node(depth + 1)?;
         }
-        if self.bytes.len() > N {
+        if self.bytes.len() > N && crate::pssz_checked::declared() {
             return Err(OVERFLOW);
         }
         Ok(self.bytes.len())
@@ -307,7 +307,7 @@ where
 {
     const JSON_KINDS: u8 = T::JSON_KINDS;
     fn write_json(&self, w: &mut crate::json::Writer) -> Result<(), crate::json::JsonTextError> {
-        if self.bytes.len() > N {
+        if self.bytes.len() > N && crate::pssz_checked::declared() {
             return Err(w.err("json: member length_bound violated"));
         }
         match from_pssz::<T>(&self.bytes) {
@@ -320,7 +320,7 @@ where
         let at = r.position();
         let value = T::read_json(r)?;
         match try_encode::<Pssz, T>(&value) {
-            Ok(bytes) if bytes.len() <= N => Ok(Self::unchecked(bytes)),
+            Ok(bytes) if bytes.len() <= N || !crate::pssz_checked::declared() => Ok(Self::unchecked(bytes)),
             Ok(_) => Err(r.err_at(at, "json: member length_bound violated")),
             Err(_) => Err(r.err_at(at, "json: nested value has no encoding")),
         }
@@ -402,7 +402,7 @@ fn pack_inner<T: PsszPack<Pssz> + ?Sized>(
     let result = value.pssz_pack_at_depth(out, depth).and_then(|()| {
         let len = out.len() - start;
         checked::check_cap(T::MAX_DYNAMIC_DATA, len)?;
-        if len > max { Err(OVERFLOW) } else { Ok(()) }
+        if len > max && crate::pssz_checked::declared() { Err(OVERFLOW) } else { Ok(()) }
     });
     if result.is_err() {
         out.truncate(start);
@@ -412,7 +412,7 @@ fn pack_inner<T: PsszPack<Pssz> + ?Sized>(
 fn size_inner<T: PsszPack<Pssz> + ?Sized>(value: &T, depth: usize, max: usize) -> PsszResult<usize> {
     let len = value.pssz_size_at_depth(depth)?;
     checked::check_cap(T::MAX_DYNAMIC_DATA, len)?;
-    if len > max { Err(OVERFLOW) } else { Ok(len) }
+    if len > max && crate::pssz_checked::declared() { Err(OVERFLOW) } else { Ok(len) }
 }
 
 impl<F: PsszFormat, T: PsszPack<Pssz>, const N: usize> PsszPack<F> for NestedRef<'_, T, N> {

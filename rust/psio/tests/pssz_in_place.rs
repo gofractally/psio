@@ -226,7 +226,7 @@ fn the_inner_value_is_checked_where_it_is_encoded() {
     assert!(try_to_pssz(&PackedRef::new(&long)).is_err());
     // Nothing is left in the output of a failed append.
     let mut out = vec![b'x'];
-    assert!(psio::pssz::to_pssz_into(&Envelope { id: 1, body: NestedRef::new(&long) }, &mut out).is_err());
+    assert!(psio::pssz::try_to_pssz_into(&Envelope { id: 1, body: NestedRef::new(&long) }, &mut out).is_err());
     assert_eq!(out, vec![b'x']);
     // The member's own bound counts the bytes written in place.
     let small = Inner { data: vec![] };

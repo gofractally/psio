@@ -49,8 +49,10 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // The type's own invariant, after those of what it holds.
     let own_check = |value: TokenStream2| match &shared.invariant {
         Some(path) => quote! {
-            if let ::core::result::Result::Err(__why) = #path(#value) {
-                return ::core::result::Result::Err(#k::KeyError(::core::convert::Into::into(__why)));
+            if #krate::pssz_checked::declared() {
+                if let ::core::result::Result::Err(__why) = #path(#value) {
+                    return ::core::result::Result::Err(#k::KeyError(::core::convert::Into::into(__why)));
+                }
             }
         },
         None => quote!(),
@@ -75,7 +77,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
             // and the reader, as for a record member.
             let bound_check = match crate::attrs::annotated(members[0].field, &members[0].attrs, &krate)? {
                 Some(crate::attrs::Annotated { own, spec }) => quote! {
-                    if #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
+                    if #krate::pssz_checked::declared() && #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
                         return ::core::result::Result::Err(#k::KeyError::new("key: member length_bound violated"));
                     }
                 },
@@ -137,7 +139,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 {
                     let member = &m.member;
                     bound_checks.push(quote! {
-                        if #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
+                        if #krate::pssz_checked::declared() && #krate::pssz::bounds::check::<#own, #spec>(&__bounded.#member).is_err() {
                             return ::core::result::Result::Err(#k::KeyError::new("key: member length_bound violated"));
                         }
                     });
@@ -257,7 +259,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
                         let field = &fields.unnamed[0];
                         bounds.push(match crate::attrs::annotated(field, &crate::attrs::field(field)?, &krate)? {
                             Some(crate::attrs::Annotated { own, spec }) => quote! {
-                                if #krate::pssz::bounds::check::<#own, #spec>(value).is_err() {
+                                if #krate::pssz_checked::declared() && #krate::pssz::bounds::check::<#own, #spec>(value).is_err() {
                                     return ::core::result::Result::Err(
                                         #k::KeyError::new("key: member length_bound violated"));
                                 }

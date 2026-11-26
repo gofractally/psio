@@ -127,6 +127,8 @@ impl Drop for TrustedScope {
 pub fn unpack_trusted_by_checking<F: PsszFormat, T: PsszUnpack<F>>(bytes: &[u8]) -> T {
     let result = {
         let _scope = TrustedScope::enter();
+        // A trusted read holds nothing against what the type declares.
+        let _undeclared = Undeclared::enter();
         T::pssz_unpack(bytes)
     };
     match result {
@@ -414,7 +416,37 @@ impl Drop for WriteUnchecked {
 }
 /// Whether a writer runs the invariant of the value it is writing.
 pub fn writer_checks_invariants() -> bool {
-    !WRITE_UNCHECKED.with(|flag| flag.get())
+    !WRITE_UNCHECKED.with(|flag| flag.get()) && declared()
+}
+
+// ── The fast write and the trusted read ─────────────────────────────────────
+
+thread_local! { static UNDECLARED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// Scope of a FAST write (`to_pssz`, `encode`) or of a TRUSTED read of a type
+/// that has no reader of its own for it (`from_pssz_trusted`): nothing a type
+/// *declares* is held against the value — no bound of a `BoundedString` /
+/// `BoundedList` / `BoundedMap` / `Nested` or of a `#[psio(max = N)]`
+/// member, no `sorted` / `unique` / `unique_keys`, no bitlist capacity, no
+/// invariant. What the format itself needs stays checked: an offset that
+/// does not fit its width, the depth limit, a `String` that is not UTF-8.
+/// (C++ `encode_preflight::fast()`; docs/annotations.md 7.2.)
+pub struct Undeclared(bool);
+impl Undeclared {
+    pub fn enter() -> Self {
+        Self(UNDECLARED.with(|flag| flag.replace(true)))
+    }
+}
+impl Drop for Undeclared {
+    fn drop(&mut self) {
+        UNDECLARED.with(|flag| flag.set(self.0));
+    }
+}
+/// Whether the codec holds a value against what its type declares: true
+/// except inside an [`Undeclared`] scope.
+#[inline]
+pub fn declared() -> bool {
+    !UNDECLARED.with(|flag| flag.get())
 }
 
 // ── Formats and offsets ─────────────────────────────────────────────────────

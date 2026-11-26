@@ -1160,7 +1160,14 @@ fn expand(input: DeriveInput, unpack: bool) -> syn::Result<Tokens> {
             }
         }
     }
-    let unpack_check = check(quote!(&__value));
+    // (Not in a trusted read: pssz_checked::Undeclared.)
+    let unpack_check = match &opts.invariant {
+        Some(_) => {
+            let checked = check(quote!(&__value));
+            quote!(if #k::pssz_checked::declared() { #checked })
+        }
+        None => quote!(),
+    };
     let pack_check = match &opts.invariant {
         Some(path) => quote! {
             if #k::pssz_checked::writer_checks_invariants() {

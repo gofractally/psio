@@ -39,7 +39,7 @@ fn over_pssz() -> Vec<u8> {
 fn pssz_writers_and_readers_report_the_computed_message() {
     assert_eq!(psio::try_to_pssz(&over()), Err(PsszError::from(OVER.to_string())));
     let mut out = vec![1, 2, 3];
-    assert_eq!(psio::to_pssz_into(&over(), &mut out).unwrap_err().message(), OVER);
+    assert_eq!(psio::try_to_pssz_into(&over(), &mut out).unwrap_err().message(), OVER);
     assert_eq!(out, [1, 2, 3]);
 
     let bytes = over_pssz();
@@ -86,7 +86,7 @@ fn the_message_is_owned_and_a_constant_one_is_borrowed() {
 fn key_writers_and_readers_report_the_computed_message() {
     assert_eq!(psio::try_to_key(&over()).unwrap_err().message(), OVER);
     let mut out = vec![9];
-    assert_eq!(psio::to_key_into(&over(), &mut out).unwrap_err().message(), OVER);
+    assert_eq!(psio::try_to_key_into(&over(), &mut out).unwrap_err().message(), OVER);
     assert_eq!(out, [9]);
     let key = psio::to_key(&(7u32, 5u32));
     assert_eq!(psio::from_key::<Balance>(&key).unwrap_err().message(), OVER);
@@ -106,7 +106,7 @@ fn json_writers_and_readers_report_the_computed_message() {
     let error = psio::try_to_ijson(&over()).unwrap_err();
     assert_eq!((&*error.what, error.format), (OVER, "ijson"));
     let mut out = String::from("x");
-    assert_eq!(psio::to_json_into(&over(), &mut out).unwrap_err().what, OVER);
+    assert_eq!(psio::try_to_json_into(&over(), &mut out).unwrap_err().what, OVER);
     assert_eq!(out, "x");
 
     let text = r#"{"amount":7,"limit":5}"#;
