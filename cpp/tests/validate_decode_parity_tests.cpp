@@ -348,8 +348,13 @@ namespace vdp
       for (const auto& value : bad)
       {
          std::vector<char> none;
-         CHECK_FALSE(psio::encode_method_result<Svc, I>(value, none).ok());
+         CHECK_FALSE(psio::encode_method_result_checked<Svc, I>(value, none).ok());
          CHECK(none.empty());
+         // The fast write holds nothing against returns(...): the frame a
+         // validating reader refuses.
+         REQUIRE(psio::encode_method_result<Svc, I>(value, none).ok());
+         CHECK(none == pz::encode_method_result_unchecked<Svc, I>(value));
+         CHECK_FALSE(psio::validate_method_result<Svc, I>(none).ok());
          // (check_method_result is the check of returns(...) alone.)
          if (std::tuple_size_v<std::remove_cvref_t<
                 decltype(psio::method_result_annotations<Svc, I>)>> != 0)
@@ -558,9 +563,13 @@ TEST_CASE("parity: a method's arguments — validate, decode and invoke agree", 
    for (const auto& value : bad)
    {
       CHECK_FALSE(no_throw([&] {
-         (void)psio::method_args_to_pssz<Svc, 8>(std::get<0>(value), std::get<1>(value),
-                                                 std::get<2>(value), std::get<3>(value));
+         (void)psio::method_args_to_pssz_checked<Svc, 8>(std::get<0>(value), std::get<1>(value),
+                                                         std::get<2>(value), std::get<3>(value));
       }));
+      // The fast write of the arguments: the frame the callee refuses.
+      CHECK(psio::method_args_to_pssz<Svc, 8>(std::get<0>(value), std::get<1>(value),
+                                              std::get<2>(value), std::get<3>(value)) ==
+            unchecked(value));
       CHECK_FALSE(args_all_agree<8>(unchecked(value)));
    }
    sweep(valid, [](std::span<const char> bytes) { (void)args_all_agree<8>(bytes); });

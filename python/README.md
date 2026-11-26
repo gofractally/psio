@@ -729,6 +729,7 @@ class Ledger:
 
 ledger = Ledger()
 assert bank.dispatch(ledger, "transfer", args) == b""               # validate, call, encode the result
+# (dispatch writes the result fast; dispatch_checked holds it against the return annotation)
 assert bank.dispatch(ledger, 2, bank["symbol"].to_pssz(1)) == b"USD"
 
 remote = bank.proxy(lambda method, data: bank.dispatch(ledger, method.index, data))
@@ -1052,7 +1053,7 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 | | |
 |---|---|
 | `psio.to_F(value[, T])` | encode: the **fast write**. `T` defaults to `type(value)`. The value is not held against what its type declares (bounds, order, invariants); an `EncodeError` is a value the format cannot represent (an offset that does not fit its width, a `max_dynamic_data` cap, a wrong Python type) |
-| `psio.to_F_checked(value[, T])` | the **validated write** (`to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked`; on a codec and a method likewise, and `result_to_pssz_checked`): refuses what `validate_F` would refuse. Use it where the bytes leave the program; `dispatch` writes results with it |
+| `psio.to_F_checked(value[, T])` | the **validated write** (`to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked`; on a codec and a method likewise, and `result_to_pssz_checked`): refuses what `validate_F` would refuse. Use it where the bytes leave the program; `dispatch_checked` writes results with it (`dispatch` writes them fast) |
 | `psio.from_F(T, data)` | validate, then decode |
 | `psio.from_F(T, psio.trusted(data))` | decode without what trust makes unnecessary (`from_pssz_trusted`) |
 | `psio.validate_F(T, data)` | a `Status` (`ok`, `reason`, `has_unknown`); never raises |

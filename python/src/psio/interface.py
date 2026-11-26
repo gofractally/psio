@@ -314,17 +314,28 @@ class Interface:
     def dispatch(self, implementation: Any, method: Union[int, str], data: Any) -> bytes:
         """Decodes (and validates) the arguments, calls the implementation, encodes the result.
 
-        A method that returns nothing gives ``b""``.
+        A method that returns nothing gives ``b""``.  The result is the service's own value: the
+        FAST write, as ``result_to_pssz`` (C++ ``call_method_pssz``).  ``dispatch_checked`` holds it
+        against the return annotation.
         """
+        return self._dispatch(implementation, method, data, False)
+
+    def dispatch_checked(self, implementation: Any, method: Union[int, str], data: Any) -> bytes:
+        """``dispatch`` with the VALIDATED write of the result: an implementation that breaks the
+        promise of its return annotation is refused here, not at the caller (C++
+        ``call_method_pssz_checked``)."""
+        return self._dispatch(implementation, method, data, True)
+
+    def _dispatch(self, implementation: Any, method: Union[int, str], data: Any, checked: bool) -> bytes:
         try:
             m = self[method]
         except (KeyError, IndexError):
             raise EncodeError(f"psio: interface {self.name} has no method {method!r}") from None
         args = m.args.from_pssz(data)
         out = getattr(implementation, m.attr)(*args)
-        # A result leaves the service: the validated write (an implementation that breaks the
-        # promise of its return annotation is refused here, not at the caller).
-        return b"" if m.result is None else m.result_to_pssz_checked(out)
+        if m.result is None:
+            return b""
+        return m.result_to_pssz_checked(out) if checked else m.result_to_pssz(out)
 
     def function_types(self) -> "tuple[Schema, Dict[str, Dict[str, Any]]]":
         """Every method as a ``FunctionType``, and the schema of the types they use: what a schema that

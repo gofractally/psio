@@ -215,6 +215,98 @@ class WriteModes(unittest.TestCase):
                 return super().__iter__()
         self.assertTrue(refuses(lambda: psio.to_pssz_checked(Outer(Inner([1, 2, 3])))))
 
+    def test_every_write_entry_point_follows_the_one_pattern(self) -> None:
+        # Unsuffixed = the fast write, ``_checked`` = the validated one.  The only unsuffixed writer
+        # that validates is the converter whose input is text from outside (``json_to_pssz``).  Every
+        # public name that looks like a writer must be in this table: a new one cannot slip in.
+        import abc
+        import re
+        from psio.interface import Interface, Method
+        from psio.schema import SchemaType
+
+        Ids = Annotated[List[u32], psio.max(2)]
+
+        @dataclass
+        class Row:
+            ids: Ids
+
+        @psio.interface(name="api")
+        class Api(abc.ABC):
+            @abc.abstractmethod
+            def ids(self, seed: List[u32]) -> Ids: ...
+
+            @abc.abstractmethod
+            def put(self, ids: Ids) -> None: ...
+
+        class Impl(Api):
+            def ids(self, seed: List[int]) -> List[int]:
+                return seed
+
+            def put(self, ids: List[int]) -> None:
+                pass
+
+        api = psio.interface_of(Api)
+        row = psio.codec(Row)
+        seed = lambda v: psio.to_pssz((v,), tuple[List[u32]])  # noqa: E731
+        FAST, VALIDATED, KEPT = "fast", "validated", "kept"
+        table = {
+            "psio.to_pssz": (FAST, lambda v: psio.to_pssz(Row(v))),
+            "psio.to_key": (FAST, lambda v: psio.to_key(Row(v))),
+            "psio.to_json": (FAST, lambda v: psio.to_json(Row(v))),
+            "psio.to_ijson": (FAST, lambda v: psio.to_ijson(Row(v))),
+            "psio.key_prefix": (FAST, lambda v: psio.key_prefix(Row, [v])),
+            "psio.to_pssz_checked": (VALIDATED, lambda v: psio.to_pssz_checked(Row(v))),
+            "psio.to_key_checked": (VALIDATED, lambda v: psio.to_key_checked(Row(v))),
+            "psio.to_json_checked": (VALIDATED, lambda v: psio.to_json_checked(Row(v))),
+            "psio.to_ijson_checked": (VALIDATED, lambda v: psio.to_ijson_checked(Row(v))),
+            # Text from outside: the converter validates (docs/annotations.md 7.2).
+            "psio.json_to_pssz": (KEPT, lambda v: psio.json_to_pssz(Row, psio.to_ijson(Row(v)))),
+            "SchemaType.to_pssz": (FAST, lambda v: row.to_pssz(Row(v))),
+            "SchemaType.to_key": (FAST, lambda v: row.to_key(Row(v))),
+            "SchemaType.to_json": (FAST, lambda v: row.to_json(Row(v))),
+            "SchemaType.to_ijson": (FAST, lambda v: row.to_ijson(Row(v))),
+            "SchemaType.key_prefix": (FAST, lambda v: row.key_prefix([v])),
+            "SchemaType.to_pssz_checked": (VALIDATED, lambda v: row.to_pssz_checked(Row(v))),
+            "SchemaType.to_key_checked": (VALIDATED, lambda v: row.to_key_checked(Row(v))),
+            "SchemaType.to_json_checked": (VALIDATED, lambda v: row.to_json_checked(Row(v))),
+            "SchemaType.to_ijson_checked": (VALIDATED, lambda v: row.to_ijson_checked(Row(v))),
+            "SchemaType.json_to_pssz": (KEPT, lambda v: row.json_to_pssz(row.to_ijson(Row(v)))),
+            "Method.to_pssz": (FAST, lambda v: api["put"].to_pssz(v)),
+            "Method.to_pssz_checked": (VALIDATED, lambda v: api["put"].to_pssz_checked(v)),
+            "Method.result_to_pssz": (FAST, lambda v: api["ids"].result_to_pssz(v)),
+            "Method.result_to_pssz_checked": (VALIDATED, lambda v: api["ids"].result_to_pssz_checked(v)),
+            "Interface.dispatch": (FAST, lambda v: api.dispatch(Impl(), "ids", seed(v))),
+            "Interface.dispatch_checked": (VALIDATED, lambda v: api.dispatch_checked(Impl(), "ids", seed(v))),
+            "Interface.proxy": (FAST, lambda v: api.proxy(lambda m, data: None).put(v)),
+        }
+        # Names that match the pattern and write no value of a declared type.
+        not_writers = {
+            "psio.pssz_to_json", "SchemaType.pssz_to_json",  # a validating read, then the text of what it read
+            "psio.key_prefix_upper_bound", "psio.method_to_number", "psio.name_to_number", "psio.number_to_method",
+            "psio.number_to_name", "psio.time_point_to_iso", "psio.to_text", "SchemaType.max_encoded_size",
+        }
+        writer = re.compile(r"(^|_)to_|^key_prefix|^dispatch|^proxy$|encode|write|pack")
+        found = set()
+        for owner, names in (("psio", psio.__all__), ("SchemaType", dir(SchemaType)), ("Method", dir(Method)),
+                             ("Interface", dir(Interface))):
+            for name in names:
+                if not name.startswith("_") and writer.search(name):
+                    found.add(f"{owner}.{name}")
+        self.assertEqual(sorted(found - not_writers - set(table)), [], "a writer that is not in the table")
+        self.assertEqual(sorted(set(table) - found), [], "a table row that names nothing")
+
+        def refuses(write, value) -> bool:
+            try:
+                write(value)
+            except psio.PsioError:
+                return True
+            return False
+
+        for name, (mode, write) in table.items():
+            self.assertEqual(name.endswith("_checked"), mode == VALIDATED, name)
+            self.assertFalse(refuses(write, [1, 2]), name)
+            self.assertEqual(refuses(write, [1, 2, 3]), mode != FAST, name)
+
 
 if __name__ == "__main__":
     unittest.main()

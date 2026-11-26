@@ -517,7 +517,8 @@ declarations are unchanged.
   is the inferred bound's; an added argument that crosses 255 or 65 535 bytes
   changes it, and `pssz_evolves_from` is false at compile time.
 - A result is written, read and viewed as the type `returns(...)` makes of
-  it: `psio::method_result_to_pssz<T, I>(value)`,
+  it: `psio::method_result_to_pssz<T, I>(value)` (the fast write;
+  `method_result_to_pssz_checked` holds the value against `returns(...)`),
   `method_result_from_pssz<T, I>(bytes)` (or `psio::trusted{bytes}`),
   `validate_method_result<T, I>(bytes)`,
   `validated_method_result_view<T, I>(bytes)`; `encode_method_result` /

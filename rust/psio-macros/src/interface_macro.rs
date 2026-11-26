@@ -485,6 +485,7 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
     let mut funcs = Vec::new();
     let mut argument_lists = Vec::new();
     let mut arms = Vec::new();
+    let mut checked_arms = Vec::new();
     let mut proxies = Vec::new();
     for (index, m) in methods.iter().enumerate() {
         let ident = &m.ident;
@@ -519,9 +520,19 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
         };
         let has_result = m.result.is_some();
         let result_type = m.result.clone().unwrap_or_else(|| syn::parse_quote!(()));
-        let (result_to, result_from) = match (&m.result, &result_bound) {
-            // A bounded result is checked when it is written and read.
+        // The two writes of a result: `result_to_pssz` is the fast one (an
+        // error is a value that has no frame), `try_result_to_pssz` the
+        // validated one (also a value outside `returns(...)`).
+        let fast = |value: Tokens| {
+            quote! {{
+                let mut __out = ::std::vec::Vec::new();
+                #k::pssz::to_pssz_into(#value, &mut __out).map(|()| __out)
+            }}
+        };
+        let (result_to, try_result_to, result_from) = match (&m.result, &result_bound) {
+            // A bounded result is written and read as the bounded type.
             (Some(_), Some(crate::attrs::Annotated { own, spec })) => (
+                fast(quote!(&#k::pssz::bounds::Described::<#own, #spec>::new(result))),
                 quote!(#k::pssz::try_to_pssz(&#k::pssz::bounds::Described::<#own, #spec>::new(result))),
                 quote! {
                     #k::pssz::from_pssz::<<#own as #k::pssz::bounds::Bounds<#spec>>::As>(bytes)
@@ -529,10 +540,12 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 },
             ),
             (Some(_), None) => (
+                fast(quote!(result)),
                 quote!(#k::pssz::try_to_pssz(result)),
                 quote!(#k::pssz::from_pssz::<Self::Result>(bytes)),
             ),
             (None, _) => (
+                quote!(::core::result::Result::Ok(::std::vec::Vec::new())),
                 quote!(::core::result::Result::Ok(::std::vec::Vec::new())),
                 quote! {
                     if bytes.is_empty() {
@@ -635,6 +648,10 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
                 #[allow(unused_variables)]
                 fn result_to_pssz(result: &Self::Result) -> #k::pssz::PsszResult<::std::vec::Vec<u8>> {
                     #result_to
+                }
+                #[allow(unused_variables)]
+                fn try_result_to_pssz(result: &Self::Result) -> #k::pssz::PsszResult<::std::vec::Vec<u8>> {
+                    #try_result_to
                 }
                 fn result_from_pssz(bytes: &[u8]) -> #k::pssz::PsszResult<Self::Result> {
                     #result_from
@@ -764,16 +781,18 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             Receiver::None => quote!(<__T as #trait_ident>::#ident(#(__args.#param_idents),*)),
             _ => quote!(<__T as #trait_ident>::#ident(target #(, __args.#param_idents)*)),
         };
-        arms.push(quote! {
-            #index => {
-                #[allow(unused_variables)]
-                let __args = #k::pssz::from_pssz::<args::#ident>(arguments)
-                    .map_err(#k::interface::DispatchError::Arguments)?;
-                let __result = #call;
-                <args::#ident as #k::interface::Method>::result_to_pssz(&__result)
-                    .map_err(#k::interface::DispatchError::Result)
-            }
-        });
+        for (arms, write) in [(&mut arms, quote!(result_to_pssz)), (&mut checked_arms, quote!(try_result_to_pssz))] {
+            arms.push(quote! {
+                #index => {
+                    #[allow(unused_variables)]
+                    let __args = #k::pssz::from_pssz::<args::#ident>(arguments)
+                        .map_err(#k::interface::DispatchError::Arguments)?;
+                    let __result = #call;
+                    <args::#ident as #k::interface::Method>::#write(&__result)
+                        .map_err(#k::interface::DispatchError::Result)
+                }
+            });
+        }
         let doc = format!(
             "Hands the arguments of `{}::{}` to the caller.",
             unraw(&trait_ident),
@@ -870,6 +889,22 @@ pub fn expand(options: Tokens, item: Tokens) -> syn::Result<Tokens> {
             ) -> ::core::result::Result<::std::vec::Vec<u8>, #k::interface::DispatchError> {
                 match method {
                     #(#arms)*
+                    _ => ::core::result::Result::Err(#k::interface::DispatchError::UnknownMethod),
+                }
+            }
+
+            /// [`dispatch`] with the VALIDATED write of the result
+            /// (`Method::try_result_to_pssz`): an implementation that
+            /// returns a value outside `returns(...)` is refused here, not
+            /// at the caller. `dispatch` writes the result fast.
+            #[allow(unused_variables)]
+            #vis1 fn dispatch_checked<__T: #trait_ident>(
+                target: &mut __T,
+                method: usize,
+                arguments: &[u8],
+            ) -> ::core::result::Result<::std::vec::Vec<u8>, #k::interface::DispatchError> {
+                match method {
+                    #(#checked_arms)*
                     _ => ::core::result::Result::Err(#k::interface::DispatchError::UnknownMethod),
                 }
             }

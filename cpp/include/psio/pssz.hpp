@@ -5140,6 +5140,9 @@ namespace psio {
       // standing alone (`returns(sorted)`, which changes no byte and leaves
       // A empty) is still checked. One implementation for the writer, the
       // validator and the checked decode, so that they accept the same set.
+      // `preflight` chooses the write: validated (the default) holds the
+      // value against R, A and `specs`; fast holds it against nothing that
+      // is declared and fails only for a value that has no frame.
 
       // Whether `specs` asks for a check that only the materialised value
       // can answer (sorted / unique / unique_keys, at the position or below
@@ -5150,14 +5153,16 @@ namespace psio {
 
       template <typename R, typename A, typename S, typename Specs>
       [[nodiscard]] codec_status encode_at(const S& value, std::vector<char>& out,
-                                           const Specs& specs, const char* length_message)
+                                           const Specs& specs, const char* length_message,
+                                           encode_preflight preflight = {})
       {
          constexpr std::size_t W = width_for<R, A>();
-         if (auto status = check_encode_as<R>(value, 0, {}); !status.ok())
+         if (auto status = check_encode_as<R>(value, 0, preflight); !status.ok())
             return status;
-         if (auto status = ann::check_value(checkable(value), specs, length_message, "pssz");
-             !status.ok())
-            return status;
+         if (preflight.bounds)
+            if (auto status = ann::check_value(checkable(value), specs, length_message, "pssz");
+                !status.ok())
+               return status;
          size_check        check;
          const std::size_t total = size_of_as<W, true, R, A, size_check*>(value, &check);
          enforce_max_dynamic<R>(total, &check);
@@ -5235,10 +5240,30 @@ namespace psio {
       }
    }  // namespace detail::pssz_impl
 
-   // Appends the encoding of the result of method I of T, or says why the
-   // value has none (outside returns(...), an invariant, depth, ...).
+   // Appends the encoding of the result of method I of T. The two write
+   // modes (docs/annotations.md 7.2):
+   //
+   //   encode_method_result          the FAST write: the status is that of a
+   //                                 value with no frame (an offset that does
+   //                                 not fit the width returns(...) selects,
+   //                                 a cap, depth); the value is not held
+   //                                 against what returns(...) declares
+   //   encode_method_result_checked  the VALIDATED write: also refuses what
+   //                                 validate_method_result refuses (outside
+   //                                 returns(...), an invariant, an order)
+   //
    // `value` is the result, or any source of it (wire_type.hpp): what a
    // method that returns a psio::pssz_view<X> hands back is written as an X.
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   [[nodiscard]] codec_status encode_method_result_checked(const S& value, std::vector<char>& out)
+   {
+      namespace pz = detail::pssz_impl;
+      using R      = pz::method_result_t<T, I>;
+      pz::method_result_specs_ok<T, I, R>();
+      return pz::encode_at<R, pz::method_result_ann<T, I>>(
+         value, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
+   }
    template <typename T, std::size_t I, typename S>
       requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
    [[nodiscard]] codec_status encode_method_result(const S& value, std::vector<char>& out)
@@ -5247,7 +5272,8 @@ namespace psio {
       using R      = pz::method_result_t<T, I>;
       pz::method_result_specs_ok<T, I, R>();
       return pz::encode_at<R, pz::method_result_ann<T, I>>(
-         value, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message);
+         value, out, ::psio::method_result_annotations<T, I>, pz::method_result_length_message,
+         pz::encode_preflight::fast());
    }
 
    // ── Encoding a source AS a type ───────────────────────────────────────
@@ -5260,6 +5286,10 @@ namespace psio {
    // parameter annotations), or any type with the same members.
    //
    //   to_pssz_as<T>(source)          a fresh buffer
+   //
+   // The two write modes (docs/annotations.md 7.2): `to_pssz_as` is the FAST
+   // write, as `to_pssz` — the source is not held against what T declares —
+   // and `to_pssz_as_checked` the VALIDATED one, as `to_pssz_checked`.
    //   to_pssz_as<T>(source, out)     appends
    //   pssz_size_as<T>(source)
    //   method_args_to_pssz<T, I>(args...)   the argument tuple of method I
@@ -5341,21 +5371,28 @@ namespace psio {
          T, ::psio::wire_type_t<S>>;
    }  // namespace detail::pssz_impl
 
+   namespace detail::pssz_impl
+   {
+      template <typename T, typename S>
+      void append_as(const S& source, std::vector<char>& out, encode_preflight preflight)
+      {
+         using E                 = encode_as_t<T, S>;
+         constexpr std::size_t W = auto_pssz_width_v<E>;
+         if (auto status = check_encode_as<E>(source, 0, preflight); !status.ok())
+            status_failure(status);
+         const std::size_t total = size_of_as<W, true, E, no_ann, std::nullptr_t>(source, nullptr);
+         const std::size_t orig  = out.size();
+         out.resize(checked_add(orig, total));
+         ::psio::fast_buf_stream sink(out.data() + orig, total);
+         encode_as<W, true, E, ::psio::fast_buf_stream, no_ann>(source, sink);
+      }
+   }  // namespace detail::pssz_impl
+
    template <typename T, typename S>
       requires pssz_source_of<S, T>
    void to_pssz_as(const S& source, std::vector<char>& out)
    {
-      namespace pz = detail::pssz_impl;
-      using E      = pz::encode_as_t<T, S>;
-      constexpr std::size_t W = auto_pssz_width_v<E>;
-      if (auto status = pz::check_encode_as<E>(source, 0); !status.ok())
-         pz::status_failure(status);
-      const std::size_t total =
-         pz::size_of_as<W, true, E, pz::no_ann, std::nullptr_t>(source, nullptr);
-      const std::size_t orig = out.size();
-      out.resize(pz::checked_add(orig, total));
-      ::psio::fast_buf_stream sink(out.data() + orig, total);
-      pz::encode_as<W, true, E, ::psio::fast_buf_stream, pz::no_ann>(source, sink);
+      detail::pssz_impl::append_as<T>(source, out, detail::pssz_impl::encode_preflight::fast());
    }
    template <typename T, typename S>
       requires pssz_source_of<S, T>
@@ -5363,6 +5400,21 @@ namespace psio {
    {
       std::vector<char> out;
       to_pssz_as<T>(source, out);
+      return out;
+   }
+   template <typename T, typename S>
+      requires pssz_source_of<S, T>
+   void to_pssz_as_checked(const S& source, std::vector<char>& out)
+   {
+      detail::pssz_impl::append_as<T>(source, out,
+                                      detail::pssz_impl::encode_preflight::validated());
+   }
+   template <typename T, typename S>
+      requires pssz_source_of<S, T>
+   [[nodiscard]] std::vector<char> to_pssz_as_checked(const S& source)
+   {
+      std::vector<char> out;
+      to_pssz_as_checked<T>(source, out);
       return out;
    }
    template <typename T, typename S>
@@ -5507,8 +5559,10 @@ namespace psio {
       detail::pssz_impl::method_arguments_for_v<
          typename reflect<T>::template method_arg_tuple<I>, Args...>;
 
+   namespace detail::pssz_impl
+   {
    template <typename T, std::size_t I, typename... Args>
-   void method_args_append_pssz(std::vector<char>& out, Args&&... args)
+   void method_args_append(std::vector<char>& out, encode_preflight preflight, Args&&... args)
    {
       using Tuple = typename reflect<T>::template method_arg_tuple<I>;
       static_assert(sizeof...(Args) >= std::tuple_size_v<Tuple>,
@@ -5529,14 +5583,42 @@ namespace psio {
             detail::pssz_impl::arg_source_t<std::tuple_element_t<Ns, Tuple>, Args>...>
             sources{detail::pssz_impl::arg_source<std::tuple_element_t<Ns, Tuple>, Args>(
                std::forward<Args>(args))...};
-         to_pssz_as<Tuple>(sources, out);
+         append_as<Tuple>(sources, out, preflight);
       }(std::index_sequence_for<Args...>{});
+   }
+   }  // namespace detail::pssz_impl
+
+   // The arguments of a call to method I of T, as the callee reads them.
+   // The two write modes (docs/annotations.md 7.2): `method_args_to_pssz` /
+   // `method_args_append_pssz` are the FAST write — the arguments are the
+   // caller's own values and are not held against what the parameters
+   // declare; the callee validates what it is sent — and the `_checked`
+   // forms the VALIDATED write, which refuses what validate_method_args
+   // would refuse.
+   template <typename T, std::size_t I, typename... Args>
+   void method_args_append_pssz(std::vector<char>& out, Args&&... args)
+   {
+      detail::pssz_impl::method_args_append<T, I>(out, detail::pssz_impl::encode_preflight::fast(),
+                                                  std::forward<Args>(args)...);
    }
    template <typename T, std::size_t I, typename... Args>
    [[nodiscard]] std::vector<char> method_args_to_pssz(Args&&... args)
    {
       std::vector<char> out;
       method_args_append_pssz<T, I>(out, std::forward<Args>(args)...);
+      return out;
+   }
+   template <typename T, std::size_t I, typename... Args>
+   void method_args_append_pssz_checked(std::vector<char>& out, Args&&... args)
+   {
+      detail::pssz_impl::method_args_append<T, I>(
+         out, detail::pssz_impl::encode_preflight::validated(), std::forward<Args>(args)...);
+   }
+   template <typename T, std::size_t I, typename... Args>
+   [[nodiscard]] std::vector<char> method_args_to_pssz_checked(Args&&... args)
+   {
+      std::vector<char> out;
+      method_args_append_pssz_checked<T, I>(out, std::forward<Args>(args)...);
       return out;
    }
 
@@ -5694,6 +5776,23 @@ namespace psio {
    {
       std::vector<char> out;
       method_result_append_pssz<T, I>(out, value);
+      return out;
+   }
+   // The validated write of a result (the fast one is above): refuses what
+   // validate_method_result refuses.
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   void method_result_append_pssz_checked(std::vector<char>& out, const S& value)
+   {
+      if (auto status = encode_method_result_checked<T, I>(value, out); !status.ok())
+         ::psio::codec_abort(status.error());
+   }
+   template <typename T, std::size_t I, typename S>
+      requires std::same_as<::psio::wire_type_t<S>, detail::pssz_impl::method_result_t<T, I>>
+   [[nodiscard]] std::vector<char> method_result_to_pssz_checked(const S& value)
+   {
+      std::vector<char> out;
+      method_result_append_pssz_checked<T, I>(out, value);
       return out;
    }
 

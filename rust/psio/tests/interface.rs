@@ -561,15 +561,19 @@ fn the_cap_and_the_parameter_bounds_select_the_width_and_are_enforced() {
     // returns(...): the result is checked when it is written and when read.
     let reply = bounded::dispatch_name(&mut target, "name_of", &psio::to_pssz(&(32u32,))).unwrap();
     assert_eq!(<args::name_of as Method>::result_from_pssz(&reply).unwrap(), "n".repeat(32));
+    let name_of = <bounded::Tag as psio::interface::Interface>::index_of_method("name_of").unwrap();
     assert!(matches!(
-        bounded::dispatch_name(&mut target, "name_of", &psio::to_pssz(&(33u32,))),
+        bounded::dispatch_checked(&mut target, name_of, &psio::to_pssz(&(33u32,))),
         Err(DispatchError::Result(_))
     ));
+    // `dispatch` writes the callee's own value fast: the caller's read refuses it.
+    let over = bounded::dispatch_name(&mut target, "name_of", &psio::to_pssz(&(33u32,))).unwrap();
+    assert!(<args::name_of as Method>::result_from_pssz(&over).is_err());
     assert!(<args::name_of as Method>::result_from_pssz(&psio::to_pssz(&"n".repeat(33))).is_err());
-    assert!(<args::name_of as Method>::result_to_pssz(&"n".repeat(33)).is_err());
+    assert!(<args::name_of as Method>::try_result_to_pssz(&"n".repeat(33)).is_err());
     assert!(<args::tags as Method>::result_to_pssz(&vec!["abc".to_string(); 2]).is_ok());
-    assert!(<args::tags as Method>::result_to_pssz(&vec!["abc".to_string(); 3]).is_err());
-    assert!(<args::tags as Method>::result_to_pssz(&vec!["abcd".to_string()]).is_err());
+    assert!(<args::tags as Method>::try_result_to_pssz(&vec!["abc".to_string(); 3]).is_err());
+    assert!(<args::tags as Method>::try_result_to_pssz(&vec!["abcd".to_string()]).is_err());
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -545,11 +545,16 @@ fn dispatch_speaks_the_fixture_bytes() {
     // result/names/two: a 1-byte offset table, from `returns(...)`.
     let reply = token::dispatch_name(&mut ledger, "names", &unhex("0402000000")).unwrap();
     assert_eq!(hex(&reply), "0207616c696365626f62");
-    // Five names are over the result's bound: the result has no encoding.
+    // Five names are over the result's bound: the validated write of the
+    // result refuses it; `dispatch` writes the callee's value fast, and the
+    // caller's validating read refuses the bytes.
+    let names = <token::Tag as psio::interface::Interface>::index_of_method("names").unwrap();
     assert!(matches!(
-        token::dispatch_name(&mut ledger, "names", &unhex("0405000000")),
+        token::dispatch_checked(&mut ledger, names, &unhex("0405000000")),
         Err(psio::interface::DispatchError::Result(_))
     ));
+    let over = token::dispatch_name(&mut ledger, "names", &unhex("0405000000")).unwrap();
+    assert!(token::args::names::result_from_pssz(&over).is_err());
     // args/add/sum, args/ping/nothing, args/batch/two.
     assert_eq!(hex(&token::dispatch_name(&mut ledger, "add", &unhex("080100000002000000")).unwrap()), "0300000000000000");
     assert_eq!(token::dispatch_name(&mut ledger, "ping", &unhex("00")).unwrap(), b"");

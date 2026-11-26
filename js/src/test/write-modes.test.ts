@@ -6,7 +6,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  PsszError, boundedList, boundedUtf8, custom, field, list, record, u32,
+  PsszError, boundedList, boundedUtf8, custom, defineInterface, field, list, method, record, u32,
 } from '../index.js';
 
 const Even = custom('Even', u32, { check: (v: number) => (v % 2 === 0 ? undefined : 'Even: odd value') });
@@ -151,4 +151,75 @@ test('write modes: a validating call inside a fast write still validates', () =>
   assert.ok(refuses(() => Outer.encodeChecked(inner)));
   assert.ok(refuses(() => Outer.encodeKeyChecked(inner)));
   assert.ok(refuses(() => Outer.valueToJsonChecked(inner)));
+});
+
+test('write modes: every write entry point follows the one pattern', () => {
+  // Unsuffixed = the fast write, `Checked` = the validated one. The only
+  // unsuffixed writer that validates is the converter whose input is text
+  // from outside (`jsonToPssz`). Every public method that looks like a
+  // writer must be in this table: a new one cannot slip in.
+  const Row = record('Row', { ids: field(list(u32), { max: 2 }) });
+  const Api = defineInterface('api', {
+    ids: method({ seed: list(u32) }, { returns: field(list(u32), { max: 2 }) }),
+    put: method({ ids: field(list(u32), { max: 2 }) }),
+  });
+  const row = Row.type();
+  const ids = Api.methods.ids;
+  const put = Api.methods.put;
+  const rawIds = Api.lookup.method<{ seed: number[] }, number[]>('ids');
+  const rawPut = Api.lookup.method<{ ids: number[] }, undefined>('put');
+  type Mode = 'fast' | 'validated' | 'kept';
+  const table: Record<string, [Mode, (v: number[]) => unknown]> = {
+    'TypeDef.encode': ['fast', (v) => Row.encode({ ids: v })],
+    'TypeDef.encodeKey': ['fast', (v) => Row.encodeKey({ ids: v })],
+    'TypeDef.encodeKeyPrefix': ['fast', (v) => Row.encodeKeyPrefix([v])],
+    'TypeDef.valueToJson': ['fast', (v) => Row.valueToJson({ ids: v })],
+    'TypeDef.encodeChecked': ['validated', (v) => Row.encodeChecked({ ids: v })],
+    'TypeDef.encodeKeyChecked': ['validated', (v) => Row.encodeKeyChecked({ ids: v })],
+    'TypeDef.valueToJsonChecked': ['validated', (v) => Row.valueToJsonChecked({ ids: v })],
+    // Text from outside: the converter validates (docs/annotations.md 7.2).
+    'TypeDef.jsonToPssz': ['kept', (v) => Row.jsonToPssz(Row.valueToJson({ ids: v }))],
+    'PsszType.encode': ['fast', (v) => row.encode({ ids: v })],
+    'PsszType.encodeKey': ['fast', (v) => row.encodeKey({ ids: v })],
+    'PsszType.encodeKeyPrefix': ['fast', (v) => row.encodeKeyPrefix([v])],
+    'PsszType.valueToJson': ['fast', (v) => row.valueToJson({ ids: v })],
+    'PsszType.encodeChecked': ['validated', (v) => row.encodeChecked({ ids: v })],
+    'PsszType.encodeKeyChecked': ['validated', (v) => row.encodeKeyChecked({ ids: v })],
+    'PsszType.valueToJsonChecked': ['validated', (v) => row.valueToJsonChecked({ ids: v })],
+    'PsszType.jsonToPssz': ['kept', (v) => row.jsonToPssz(row.valueToJson({ ids: v }))],
+    'Method.resultToPssz': ['fast', (v) => ids.resultToPssz(v)],
+    'Method.resultToPsszChecked': ['validated', (v) => ids.resultToPsszChecked(v)],
+    'PsszMethod.resultToPssz': ['fast', (v) => rawIds.resultToPssz(v)],
+    'PsszMethod.resultToPsszChecked': ['validated', (v) => rawIds.resultToPsszChecked(v)],
+    // The arguments of a call are a value of the method's argument type.
+    'Method.args.encode': ['fast', (v) => put.args.encode({ ids: v })],
+    'Method.args.encodeChecked': ['validated', (v) => put.args.encodeChecked({ ids: v })],
+    'PsszMethod.args.encode': ['fast', (v) => rawPut.args.encode({ ids: v })],
+    'PsszMethod.args.encodeChecked': ['validated', (v) => rawPut.args.encodeChecked({ ids: v })],
+  };
+  // Names that match the pattern and write no value of a declared type.
+  const notWriters = new Set([
+    'TypeDef.psszToJson', 'PsszType.psszToJson', // a validating read, then the text of what it read
+    'TypeDef.jsonToValue', 'PsszType.jsonToValue', // a read
+    'TypeDef.maxEncodedSize', 'PsszType.maxEncodedSize', // a property of the type
+  ]);
+  const writer = /encode|To[A-Z]|write|pack/i;
+  const found = new Set<string>();
+  const owners: [string, object][] = [
+    ['TypeDef', Object.getPrototypeOf(Row)], ['PsszType', Object.getPrototypeOf(row)],
+    ['Method', Object.getPrototypeOf(ids)], ['PsszMethod', Object.getPrototypeOf(rawIds)],
+  ];
+  for (const [owner, proto] of owners)
+    for (let p: object | null = proto; p && p !== Object.prototype; p = Object.getPrototypeOf(p))
+      for (const name of Object.getOwnPropertyNames(p))
+        if (name !== 'constructor' && writer.test(name)) found.add(`${owner}.${name}`);
+  const listed = new Set(Object.keys(table).filter((n) => !n.includes('.args.')));
+  assert.deepEqual([...found].filter((n) => !listed.has(n) && !notWriters.has(n)).sort(), [], 'a writer that is not in the table');
+  assert.deepEqual([...listed].filter((n) => !found.has(n)).sort(), [], 'a table row that names nothing');
+  const refuses = (run: () => unknown): boolean => attempt(() => (run(), true)) === undefined;
+  for (const [name, [mode, write]] of Object.entries(table)) {
+    assert.equal(name.endsWith('Checked'), mode === 'validated', name);
+    assert.equal(refuses(() => write([1, 2])), false, name);
+    assert.equal(refuses(() => write([1, 2, 3])), mode !== 'fast', name);
+  }
 });

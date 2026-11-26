@@ -23,6 +23,7 @@
 #include <psio/nested.hpp>
 #include <psio/protobuf.hpp>
 #include <psio/pssz.hpp>
+#include <psio/pssz_view.hpp>
 #include <psio/ssz.hpp>
 #include <psio/wit.hpp>
 #include <psio/value_contract.hpp>
@@ -819,4 +820,172 @@ TEST_CASE("the trusted read of a row the fast write wrote", "[value_contract][wr
    }
    // An invariant is not run by a trusted read either.
    CHECK(psio::from_pssz<VcEven>(psio::trusted{psio::to_pssz(VcEven{3})}).v == 3);
+}
+
+// ── Every write entry point, by family ──────────────────────────────────────
+//
+// The one pattern (docs/annotations.md 7.2): an unsuffixed writer is the FAST
+// write, its `_checked` twin the VALIDATED one. The only unsuffixed writers
+// that validate are the ones whose result is a type that promises "these
+// bytes validate" (psio::nested, a buffer) — listed as `kept`, with the
+// reason in the docs table. A new writer goes into this table; one that
+// validates under an unsuffixed name fails the test unless it is `kept`.
+namespace vc_families
+{
+   struct Api
+   {
+      VcInts ids(VcInts seed) const { return seed; }
+      void   put(VcInts ids) {}
+      PSIO_REFLECT(Api,
+                   method(ids, seed, returns(max<2>)),
+                   method(put, attr(ids, max<2>)))
+   };
+   using PutArgs = psio::reflect<Api>::method_arg_tuple<1>;
+   using Ids     = psio::pssz_at<psio::detail::pssz_impl::method_result_ann<Api, 0>>;
+
+   enum class mode
+   {
+      fast,       // unsuffixed: writes the value whatever it declares
+      validated,  // _checked: refuses it
+      kept        // unsuffixed and validating on purpose
+   };
+   struct entry
+   {
+      const char* name;
+      mode        is;
+      bool (*refuses)(const VcInts& ids);
+   };
+   template <typename F>
+   bool threw(F&& write)
+   {
+      try
+      {
+         write();
+         return false;
+      }
+      catch (const psio::codec_exception&)
+      {
+         return true;
+      }
+   }
+   std::vector<char> ignored;
+
+   const entry entries[] = {
+      // A source written as a type.
+      {"to_pssz_as<T>(source)", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_pssz_as<PutArgs>(std::tie(v)); }); }},
+      {"to_pssz_as<T>(source, out)", mode::fast,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::to_pssz_as<PutArgs>(std::tie(v), out); }); }},
+      {"to_pssz_as_checked<T>(source)", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_pssz_as_checked<PutArgs>(std::tie(v)); }); }},
+      {"to_pssz_as_checked<T>(source, out)", mode::validated,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::to_pssz_as_checked<PutArgs>(std::tie(v), out); }); }},
+      // The arguments of a call.
+      {"method_args_to_pssz", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::method_args_to_pssz<Api, 1>(v); }); }},
+      {"method_args_append_pssz", mode::fast,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::method_args_append_pssz<Api, 1>(out, v); }); }},
+      {"method_args_to_pssz_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::method_args_to_pssz_checked<Api, 1>(v); }); }},
+      {"method_args_append_pssz_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::method_args_append_pssz_checked<Api, 1>(out, v); }); }},
+      {"to_pssz(tuple{method_args_packed})", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_pssz(std::make_tuple(psio::method_args_packed<Api, 1>(v))); }); }},
+      // The result of a call.
+      {"method_result_to_pssz", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::method_result_to_pssz<Api, 0>(v); }); }},
+      {"method_result_append_pssz", mode::fast,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::method_result_append_pssz<Api, 0>(out, v); }); }},
+      {"encode_method_result", mode::fast,
+       [](const VcInts& v) { std::vector<char> out; return !psio::encode_method_result<Api, 0>(v, out).ok(); }},
+      {"method_result_to_pssz_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::method_result_to_pssz_checked<Api, 0>(v); }); }},
+      {"method_result_append_pssz_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::method_result_append_pssz_checked<Api, 0>(out, v); }); }},
+      {"encode_method_result_checked", mode::validated,
+       [](const VcInts& v) { std::vector<char> out; return !psio::encode_method_result_checked<Api, 0>(v, out).ok(); }},
+      // Dispatch: the arguments are read validated before; this is the write of the result.
+      {"call_method_pssz", mode::fast,
+       [](const VcInts& v) {
+          Api api; std::vector<char> out;
+          const auto args = psio::to_pssz(std::tuple<VcInts>{v});
+          return !psio::call_method_pssz<Api, 0>(api, psio::trusted{args}, out).ok();
+       }},
+      {"call_method_pssz_checked", mode::validated,
+       [](const VcInts& v) {
+          Api api; std::vector<char> out;
+          const auto args = psio::to_pssz(std::tuple<VcInts>{v});
+          return !psio::call_method_pssz_checked<Api, 0>(api, psio::trusted{args}, out).ok();
+       }},
+      // The format tags of a position and of a result.
+      {"pssz_at<A>::encode", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)Ids::encode(v); }); }},
+      {"pssz_at<A>::encode_checked", mode::validated,
+       [](const VcInts& v) { std::vector<char> out; return !Ids::encode_checked(v, out).ok(); }},
+      {"pssz_method_result<T, I>::encode", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::pssz_method_result<Api, 0>::encode(v); }); }},
+      {"pssz_method_result<T, I>::encode_checked", mode::validated,
+       [](const VcInts& v) { std::vector<char> out; return !psio::pssz_method_result<Api, 0>::encode_checked(v, out).ok(); }},
+      // The format helpers of a record that declares the bound itself.
+      {"to_pssz", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_pssz(VcMaxList{v}); }); }},
+      {"to_pssz(v, sink)", mode::fast,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::to_pssz(VcMaxList{v}, out); }); }},
+      {"encode(pssz{}, v)", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::encode(psio::pssz{}, VcMaxList{v}); }); }},
+      {"to_key", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_key(VcMaxList{v}); }); }},
+      {"to_json", mode::fast,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_json(VcMaxList{v}); }); }},
+      {"to_pssz_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_pssz_checked(VcMaxList{v}); }); }},
+      {"to_pssz_checked(v, sink)", mode::validated,
+       [](const VcInts& v) { return threw([&] { std::vector<char> out; psio::to_pssz_checked(VcMaxList{v}, out); }); }},
+      {"encode_checked(pssz{}, v, out)", mode::validated,
+       [](const VcInts& v) { std::vector<char> out; return !psio::encode_checked(psio::pssz{}, VcMaxList{v}, out).ok(); }},
+      {"encode_pssz_checked", mode::validated,
+       [](const VcInts& v) { std::vector<char> out; return !psio::encode_pssz_checked(VcMaxList{v}, out).ok(); }},
+      {"to_key_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_key_checked(VcMaxList{v}); }); }},
+      {"to_json_checked", mode::validated,
+       [](const VcInts& v) { return threw([&] { (void)psio::to_json_checked(VcMaxList{v}); }); }},
+      {"validate_value", mode::validated,
+       [](const VcInts& v) { return !psio::validate_value(VcMaxList{v}).ok(); }},
+      // Kept validating: the result is a type that promises valid bytes.
+      {"nested{value}", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::nested<VcMaxList>{VcMaxList{v}}; }); }},
+      {"nested<T>::from(value)", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::nested<VcMaxList>::from(VcMaxList{v}); }); }},
+      {"pssz_buffer<T>::from(value)", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::pssz_buffer<VcMaxList>::from(VcMaxList{v}); }); }},
+      {"key_buffer<T>::from(value)", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::key_buffer<VcMaxList>::from(VcMaxList{v}); }); }},
+      {"json_buffer<T>::from(value)", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::json_buffer<VcMaxList>::from(VcMaxList{v}); }); }},
+      {"method_result_buffer<T, I>::from(value)", mode::kept,
+       [](const VcInts& v) { return threw([&] { (void)psio::method_result_buffer<Api, 0>::from(v); }); }},
+   };
+}  // namespace vc_families
+
+TEST_CASE("write modes: every write entry point follows the one pattern",
+          "[value_contract][write_modes]")
+{
+   using namespace vc_families;
+   const VcInts fits{1, 2}, over{1, 2, 3};
+   for (const entry& e : entries)
+   {
+      INFO(e.name);
+      const std::string_view name{e.name};
+      // The spelling says the mode: `_checked` (and validate_value) is the
+      // validated write, anything else is fast unless it is listed as kept.
+      const bool spelled_checked =
+         name.find("_checked") != std::string_view::npos || name == "validate_value";
+      CHECK(spelled_checked == (e.is == mode::validated));
+      // Every one writes a value inside what is declared ...
+      const bool refuses_fits = e.refuses(fits);
+      CHECK_FALSE(refuses_fits);
+      // ... and only the validated ones refuse a value outside it.
+      const bool refuses_over = e.refuses(over);
+      CHECK(refuses_over == (e.is != mode::fast));
+   }
 }

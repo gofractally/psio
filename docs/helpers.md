@@ -128,6 +128,17 @@ format. Writing has two modes, the same in every format:
 * `psio::validate_value(v)` (`psio/value_contract.hpp`) checks `v` once,
   for every format; write fast afterwards.
 
+The helpers around a method follow the same pattern: `to_pssz_as<T>`,
+`method_args_to_pssz<T, I>`, `method_args_append_pssz`,
+`method_result_to_pssz<T, I>`, `method_result_append_pssz`,
+`encode_method_result` and the result `call_method_pssz` writes are fast
+writes; each has a `_checked` twin that is the validated one
+(`to_pssz_as_checked`, `method_args_to_pssz_checked`,
+`method_result_to_pssz_checked`, `encode_method_result_checked`,
+`call_method_pssz_checked`, ...). The full list, and the writers that
+validate under an unsuffixed name with the reason for each, are in
+[annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes).
+
 `F_buffer<T>::from(v)` and `psio::nested<T>{v}` hold "a valid `T`" and use
 the validated write. A program whose bytes leave its hands (table rows
 later read with `psio::trusted`, arguments for another service, results,
@@ -754,7 +765,11 @@ psio::method_args_append_pssz<Token, 0>(out, toView, 5, "memo");
 ```
 
 The source must be a source of exactly that type; anything else is a
-compile error. `psio::method_result_to_pssz<T, I>(value)` takes a source
+compile error. `to_pssz_as` and `method_args_to_pssz` are fast writes;
+`psio::to_pssz_as_checked<T>(source)` and
+`psio::method_args_to_pssz_checked<T, I>(args...)` hold the source against
+what the type and the parameters declare.
+`psio::method_result_to_pssz<T, I>(value)` takes a source
 of the result as well, so a method that returns a `psio::pssz_view<X>` has
 its result written as an `X`
 ([below](#the-result-of-a-method)).
@@ -1011,8 +1026,9 @@ struct Token {
 | `psio::method_params_from_pssz<T, I>(psio::trusted{bytes})` | a `method_params<I>`: each argument as the method declares it |
 | `psio::invoke_method_pssz<T, I>(obj, bytes)` | validates, then calls the method; returns what it returns |
 | `psio::invoke_method_pssz<T, I>(obj, psio::trusted{bytes})` | calls without validating |
-| `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result ([the result as `returns(...)` types it](#the-result-of-a-method)); a `codec_status` |
-| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)) |
+| `psio::call_method_pssz<T, I>(obj, psio::trusted{bytes}, result)` | calls and appends the encoded result ([the result as `returns(...)` types it](#the-result-of-a-method)) by the fast write; a `codec_status` (a result with no encoding) |
+| `psio::call_method_pssz_checked<T, I>(obj, psio::trusted{bytes}, result)` | the same with the validated write of the result: the status is also that of a value outside `returns(...)` |
+| `psio::method_args_to_pssz<T, I>(args...)` | the caller's side: the argument tuple encoded from the arguments themselves, converted implicitly as a call converts them, none copied ([above](#encoding-a-source-as-a-named-type)). The fast write; `psio::method_args_to_pssz_checked<T, I>(args...)` is the validated one (`method_args_append_pssz` / `method_args_append_pssz_checked` append) |
 | `psio::method_args_packed<T, I>(args...)`, `psio::method_args_nested<T, I>(args...)` | the same arguments as a *source* of those bytes, for a member of an enclosing message: written in place, no buffer of their own ([above](#packing-in-place-a-value-as-its-packed-bytes)) |
 | `psio::method_arguments<T, I, Args...>` | concept: `args...` can be passed to the method |
 | `reflect<T>::invoke_method<I>(obj, tuple)` | unchanged: calls with a tuple of arguments as declared (`method_params<I>`) |
@@ -1070,14 +1086,15 @@ auto view  = psio::validated_method_result_view<Directory, 0>(bytes); // validat
 | Name | Is |
 |------|----|
 | `psio::method_result_t<T, I>` | the type a result is encoded as: `psio::wire_type_t` of what the method returns (`X` for a `psio::pssz_view<X>`); `void` when it returns nothing |
-| `psio::method_result_to_pssz<T, I>(value)` | the callee's side: a fresh buffer. `value` is the result or any source of it. Fails through `psio::codec_abort` for a value outside `returns(...)` |
-| `psio::method_result_append_pssz<T, I>(out, value)` | the same, appended |
+| `psio::method_result_to_pssz<T, I>(value)` | the callee's side: a fresh buffer. `value` is the result or any source of it. The fast write: the value is not held against `returns(...)`; fails through `psio::codec_abort` only for a value with no encoding |
+| `psio::method_result_to_pssz_checked<T, I>(value)` | the validated write: fails through `psio::codec_abort` for a value outside `returns(...)` |
+| `psio::method_result_append_pssz<T, I>(out, value)`, `method_result_append_pssz_checked<T, I>(out, value)` | the same two, appended |
 | `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates the bytes as the `returns(...)` type and decodes; fails through `psio::codec_abort` |
 | `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes without validating |
 | `psio::validate_method_result<T, I>(bytes)` | `codec_status`: are the bytes a result of the method. It accepts exactly what `decode_method_result` / `method_result_from_pssz` accept, the `sorted` / `unique` / `unique_keys` of `returns(...)` included |
 | `psio::validated_method_result_view<T, I>(bytes)` | validates, then hands back the trusted view in a `psio::checked_view` (`ok()`, `error()`, `*r`, `r->…`) |
 | `psio::method_result_view<T, I>`, `psio::method_result_trusted_view<T, I>` | the safe / trusted read view of a result. Where `returns(...)` narrows an offset width these read the result's own offsets; `psio::pssz_view<ReturnType>` would not |
-| `psio::encode_method_result<T, I>(value, out)`, `psio::decode_method_result<T, I>(bytes, out)` | the write and the validating read returning a `codec_status` instead of failing |
+| `psio::encode_method_result<T, I>(value, out)`, `psio::encode_method_result_checked<T, I>(value, out)`, `psio::decode_method_result<T, I>(bytes, out)` | the fast write, the validated write and the validating read returning a `codec_status` instead of failing |
 | `psio::check_method_result<T, I>(value)` | only checks a value against `returns(...)` |
 | `psio::method_result_buffer<T, I>`, `psio::shared_method_result<T, I>` | a result held packed, owned / shared ([below](#a-result-held-packed)) |
 
@@ -1112,7 +1129,7 @@ auto mine = psio::method_result_buffer<Directory, 0>::from(names);   // method_r
 
 | | Is |
 |---|---|
-| `B{value}`, `B::from(value)`, `B::from_checked(value, out)` | `method_result_to_pssz` / `encode_method_result`: the value is checked against `returns(...)` |
+| `B{value}`, `B::from(value)`, `B::from_checked(value, out)` | `method_result_to_pssz_checked` / `encode_method_result_checked`: the value is checked against `returns(...)` |
 | `B{bytes}`, `B::checked(bytes, out)`, `b.validate()` | `validate_method_result` |
 | `b.view()`, `*b`, `b->` | `psio::method_result_trusted_view<T, I>`; `psio::as_view(b)` is `psio::method_result_view<T, I>` |
 | `b.unpack()` | `method_result_from_pssz<T, I>(psio::trusted{…})`; `b.decode_checked(out)` is `decode_method_result` |

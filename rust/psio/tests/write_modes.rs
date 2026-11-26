@@ -375,3 +375,96 @@ fn a_handler_that_validates_is_not_switched_off_by_the_fast_write_around_it() {
     let mut text = String::new();
     assert!(psio::to_json_into(&envelope, &mut text).is_err(), "the fast write runs the handler's validating read");
 }
+
+// ── Every write entry point, by family ──────────────────────────────────────
+//
+// The one pattern (docs/annotations.md 7.2): an unsuffixed writer is the FAST
+// write, its `try_` twin (or `_checked`, for dispatch) the VALIDATED one.
+// The only unsuffixed writers that validate are the ones whose result is a
+// type that promises "these bytes validate" (`Nested`, `Buffer`) — `Kept`,
+// each with its reason in the docs table. A new writer goes into this table; one that validates under an
+// unsuffixed name fails the test unless it is `Kept`.
+mod families {
+    #[derive(Debug, Clone, PartialEq, Default, psio::PsszPack, psio::PsszUnpack, psio::JsonText, psio::Key)]
+    pub struct Row {
+        #[psio(max = 2)]
+        pub ids: Vec<u32>,
+    }
+
+    #[psio::interface(name = "families_api")]
+    pub trait Api {
+        #[psio(returns(max = 2))]
+        fn ids(&self, seed: Vec<u32>) -> Vec<u32>;
+    }
+    pub struct Impl;
+    impl Api for Impl {
+        fn ids(&self, seed: Vec<u32>) -> Vec<u32> {
+            seed
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mode {
+    Fast,
+    Validated,
+    Kept,
+}
+
+#[test]
+fn every_write_entry_point_follows_the_one_pattern() {
+    use families::{api, Impl, Row};
+    use psio::interface::Method;
+    use psio::json::{IJson, Json};
+    use psio::pssz::Pssz;
+    use Mode::*;
+    type Write = fn(&Row) -> bool; // whether the writer refuses the value
+    let table: &[(&str, Mode, Write)] = &[
+        // pssz
+        ("to_pssz", Fast, |v| std::panic::catch_unwind(|| psio::to_pssz(v)).is_err()),
+        ("to_pssz_into", Fast, |v| psio::pssz::to_pssz_into(v, &mut Vec::new()).is_err()),
+        ("pssz::encode", Fast, |v| std::panic::catch_unwind(|| psio::pssz::encode::<Pssz, _>(v)).is_err()),
+        ("pssz::encode_into", Fast, |v| psio::pssz::encode_into::<Pssz, _>(v, &mut Vec::new()).is_err()),
+        ("try_to_pssz", Validated, |v| psio::try_to_pssz(v).is_err()),
+        ("try_to_pssz_into", Validated, |v| psio::pssz::try_to_pssz_into(v, &mut Vec::new()).is_err()),
+        ("pssz::try_encode", Validated, |v| psio::pssz::try_encode::<Pssz, _>(v).is_err()),
+        ("pssz::try_encode_into", Validated, |v| psio::pssz::try_encode_into::<Pssz, _>(v, &mut Vec::new()).is_err()),
+        ("pssz::try_size_of", Validated, |v| psio::pssz::try_size_of::<Pssz, _>(v).is_err()),
+        // key
+        ("to_key", Fast, |v| std::panic::catch_unwind(|| psio::to_key(v)).is_err()),
+        ("to_key_into", Fast, |v| psio::key::to_key_into(v, &mut Vec::new()).is_err()),
+        ("try_to_key", Validated, |v| psio::key::try_to_key(v).is_err()),
+        ("try_to_key_into", Validated, |v| psio::key::try_to_key_into(v, &mut Vec::new()).is_err()),
+        // JSON
+        ("to_json", Fast, |v| std::panic::catch_unwind(|| psio::to_json(v)).is_err()),
+        ("to_ijson", Fast, |v| std::panic::catch_unwind(|| psio::to_ijson(v)).is_err()),
+        ("to_json_into", Fast, |v| psio::json::to_json_into(v, &mut String::new()).is_err()),
+        ("to_ijson_into", Fast, |v| psio::json::to_ijson_into(v, &mut String::new()).is_err()),
+        ("json::encode", Fast, |v| std::panic::catch_unwind(|| psio::json::encode::<Json, _>(v)).is_err()),
+        ("json::encode_into", Fast, |v| psio::json::encode_into::<IJson, _>(v, &mut String::new()).is_err()),
+        ("try_to_json", Validated, |v| psio::try_to_json(v).is_err()),
+        ("try_to_ijson", Validated, |v| psio::try_to_ijson(v).is_err()),
+        ("try_to_json_into", Validated, |v| psio::json::try_to_json_into(v, &mut String::new()).is_err()),
+        ("try_to_ijson_into", Validated, |v| psio::json::try_to_ijson_into(v, &mut String::new()).is_err()),
+        ("json::try_encode", Validated, |v| psio::json::try_encode::<Json, _>(v).is_err()),
+        ("json::try_encode_into", Validated, |v| psio::json::try_encode_into::<Json, _>(v, &mut String::new()).is_err()),
+        // The result of a call, and dispatch (the arguments are read validated).
+        ("Method::result_to_pssz", Fast, |v| api::args::ids::result_to_pssz(&v.ids).is_err()),
+        ("Method::try_result_to_pssz", Validated, |v| api::args::ids::try_result_to_pssz(&v.ids).is_err()),
+        ("dispatch", Fast, |v| api::dispatch(&mut Impl, 0, &psio::to_pssz(&(v.ids.clone(),))).is_err()),
+        ("dispatch_name", Fast, |v| api::dispatch_name(&mut Impl, "ids", &psio::to_pssz(&(v.ids.clone(),))).is_err()),
+        ("dispatch_checked", Validated, |v| api::dispatch_checked(&mut Impl, 0, &psio::to_pssz(&(v.ids.clone(),))).is_err()),
+        // Kept validating: the result is a type that promises valid bytes.
+        ("Nested::new", Kept, |v| psio::pssz::Nested::<Row>::new(v).is_err()),
+        ("Buffer::encode", Kept, |v| psio::Buffer::<Row, Pssz>::encode(v).is_err()),
+        ("Buffer::<_, Json>::encode", Kept, |v| psio::Buffer::<Row, Json>::encode(v).is_err()),
+    ];
+    let (fits, over) = (Row { ids: vec![1, 2] }, Row { ids: vec![1, 2, 3] });
+    for (name, mode, refuses) in table {
+        // The spelling says the mode.
+        let spelled = name.contains("try_") || name.ends_with("_checked");
+        assert_eq!(spelled, *mode == Validated, "{name}");
+        assert!(!refuses(&fits), "{name} refuses a value inside what is declared");
+        assert_eq!(refuses(&over), *mode != Fast, "{name}");
+    }
+}

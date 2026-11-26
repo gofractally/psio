@@ -235,7 +235,8 @@
 //! the cap (or, without one, the inferred bound of the bounded parameters)
 //! selects, refuses a parameter outside its bound when it is written, and
 //! [`dispatch`](self) refuses a frame that holds one. A bounded result is
-//! checked by `Method::result_to_pssz` and `Method::result_from_pssz`. In
+//! checked by `Method::try_result_to_pssz` and `Method::result_from_pssz`
+//! (`Method::result_to_pssz` is the fast write: docs/annotations.md 7.2). In
 //! the Schema IR the function's parameters and result are the bounded
 //! types and the cap is its `maxDynamicData` attribute, as C++ writes them;
 //! the argument record's own schema is the Object of the parameters
@@ -249,7 +250,8 @@
 //!
 //! | | |
 //! |---|---|
-//! | `M::result_to_pssz(&value)` | the callee: the bytes, the bounds checked |
+//! | `M::result_to_pssz(&value)` | the callee: the bytes (the fast write) |
+//! | `M::try_result_to_pssz(&value)` | the callee: the bytes, the bounds checked (the validated write) |
 //! | `M::result_from_pssz(bytes)` | the caller: validates, then decodes |
 //! | `M::result_from_pssz_trusted(bytes)` | decodes bytes already validated |
 //! | `M::validate_result(bytes)` | whether the bytes are a result |
@@ -274,7 +276,7 @@
 //! assert_eq!(bytes, [2, 7, b'a', b'l', b'i', b'c', b'e', b'b', b'o', b'b']);
 //! assert_eq!(args::names::result_from_pssz(&bytes).unwrap(), two);
 //! assert_eq!(args::names::result_view(&bytes).unwrap().len(), 2);
-//! assert!(args::names::result_to_pssz(&vec![String::new(); 5]).is_err());
+//! assert!(args::names::try_result_to_pssz(&vec![String::new(); 5]).is_err());
 //! // An empty optional result whose payload cannot be empty is zero bytes
 //! // (docs/pssz-spec.md 5.5.1); one whose payload can be empty (a string, a
 //! // list) has a selector byte instead: `None` is `00`.
@@ -424,8 +426,15 @@ pub trait Method: PsszPack<Pssz> + PsszUnpack<Pssz> + Sized {
     type ResultAs;
 
     /// The pSSZ of a result; no bytes for a method that returns nothing.
-    /// Refuses a value outside `returns(...)`.
+    /// The FAST write, as `to_pssz`: the value is the callee's own and is
+    /// not held against `returns(...)`; an error is a value that has no
+    /// frame (an offset that does not fit the width `returns(...)` selects,
+    /// the depth limit). [`try_result_to_pssz`](Self::try_result_to_pssz)
+    /// is the validated write.
     fn result_to_pssz(result: &Self::Result) -> PsszResult<Vec<u8>>;
+    /// The VALIDATED write of a result: refuses a value outside
+    /// `returns(...)`, as `try_to_pssz`.
+    fn try_result_to_pssz(result: &Self::Result) -> PsszResult<Vec<u8>>;
     /// Reads a result (validated, `returns(...)` applied); a method that
     /// returns nothing accepts only no bytes.
     ///

@@ -354,9 +354,13 @@ TEST_CASE("method results: one call to write, read, validate and view", "[method
    REQUIRE(checked->size() == 2);
    REQUIRE(checked->unpack() == two);
 
-   // Outside returns(...): refused when written, when read, when viewed.
+   // Outside returns(...): refused by the validated write, when read, when
+   // viewed. (method_result_to_pssz is the fast write.)
    const Names five(5, "a");
-   REQUIRE_THROWS_AS((psio::method_result_to_pssz<directory, 0>(five)), psio::codec_exception);
+   REQUIRE_THROWS_AS((psio::method_result_to_pssz_checked<directory, 0>(five)),
+                     psio::codec_exception);
+   REQUIRE(psio::method_result_to_pssz<directory, 0>(five) ==
+           psio::detail::pssz_impl::encode_method_result_unchecked<directory, 0>(five));
    const auto frame = psio::detail::pssz_impl::encode_method_result_unchecked<directory, 0>(five);
    REQUIRE_FALSE(psio::validate_method_result<directory, 0>(frame).ok());
    REQUIRE_THROWS_AS((psio::method_result_from_pssz<directory, 0>(std::span<const char>{frame})),
@@ -383,7 +387,7 @@ TEST_CASE("method results: one call to write, read, validate and view", "[method
            std::vector<char>{1});
    REQUIRE_FALSE(psio::validate_method_result<directory, 2>({}).ok());
    REQUIRE_THROWS_AS(
-      (psio::method_result_to_pssz<directory, 2>(std::optional<std::string>{"123456789"})),
+      (psio::method_result_to_pssz_checked<directory, 2>(std::optional<std::string>{"123456789"})),
       psio::codec_exception);
 
    // touch returns nothing: no result bytes, and only those.

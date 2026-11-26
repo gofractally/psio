@@ -70,8 +70,12 @@ namespace psio {
       template <typename T>
       [[nodiscard]] static std::vector<char> encode(const T& value)
       {
+         // The fast write, as every format's `encode`.
          std::vector<char> out;
-         if (auto status = encode_checked(value, out); !status.ok())
+         if (auto status = detail::pssz_impl::encode_at<T, A>(
+                value, out, A::value, "pssz: member length_bound violated",
+                detail::pssz_impl::encode_preflight::fast());
+             !status.ok())
             ::psio::codec_abort(status.error());
          return out;
       }
@@ -1609,8 +1613,12 @@ namespace psio {
    }
 
    // Calls method I and appends its encoded result to `result` (nothing
-   // for a void method). The status is that of encoding the result: a
-   // value outside returns(...), over a cap, with no encoding.
+   // for a void method). The result is the callee's own value: the FAST
+   // write (psio::encode_method_result), whose status is that of a value
+   // with no encoding (an offset width, a cap, depth).
+   // `call_method_pssz_checked` is the VALIDATED write of the result
+   // (psio::encode_method_result_checked): also a value outside
+   // returns(...). The caller validates what it reads either way.
    template <typename T, std::size_t I, typename Obj>
    [[nodiscard]] codec_status call_method_pssz(Obj&& obj, trusted bytes, std::vector<char>& result)
    {
@@ -1621,6 +1629,19 @@ namespace psio {
       }
       else
          return ::psio::encode_method_result<T, I>(
+            invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes), result);
+   }
+   template <typename T, std::size_t I, typename Obj>
+   [[nodiscard]] codec_status call_method_pssz_checked(Obj&& obj, trusted bytes,
+                                                       std::vector<char>& result)
+   {
+      if constexpr (std::is_void_v<typename reflect<T>::template method_result<I>>)
+      {
+         invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes);
+         return codec_ok();
+      }
+      else
+         return ::psio::encode_method_result_checked<T, I>(
             invoke_method_pssz<T, I>(std::forward<Obj>(obj), bytes), result);
    }
 
@@ -1684,7 +1705,7 @@ namespace psio {
       template <std::same_as<result_type> R>
       [[nodiscard]] static codec_status encode_checked(const R& value, std::vector<char>& out)
       {
-         return ::psio::encode_method_result<T, I>(value, out);
+         return ::psio::encode_method_result_checked<T, I>(value, out);
       }
       template <std::same_as<result_type> R>
       [[nodiscard]] static std::vector<char> encode(const R& value)

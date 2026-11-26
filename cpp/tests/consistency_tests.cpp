@@ -1412,10 +1412,10 @@ TEST_CASE("a method result has the bytes of its returns(...) type", "[consistenc
    std::vector<std::string> back;
    REQUIRE(psio::decode_method_result<Api, 0>(bytes, back).ok());
    CHECK(back == two);
-   // Outside returns(...): no encoding, and its frame is rejected.
+   // Outside returns(...): refused by the validated write, and its frame is rejected.
    std::vector<char> none;
-   CHECK(!psio::encode_method_result<Api, 0>(std::vector<std::string>(5, "a"), none).ok());
-   CHECK(!psio::encode_method_result<Api, 0>(std::vector<std::string>{"\xff"}, none).ok());
+   CHECK(!psio::encode_method_result_checked<Api, 0>(std::vector<std::string>(5, "a"), none).ok());
+   CHECK(!psio::encode_method_result_checked<Api, 0>(std::vector<std::string>{"\xff"}, none).ok());
    CHECK(none.empty());
    const auto over = psio::detail::pssz_impl::encode_method_result_unchecked<Api, 0>(
       std::vector<std::string>(5, "a"));

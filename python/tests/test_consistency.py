@@ -210,8 +210,11 @@ class OrderConstraints(unittest.TestCase):
         self.assertEqual(put.result_to_pssz([1, 2]), psio.to_pssz([1, 2], List[u32]))
         self.assertEqual(refused(self, lambda: put.result_to_pssz_checked([2, 1]), psio.EncodeError).reason, ORDER)
         self.assertEqual(put.validate_result(psio.to_pssz([2, 1], List[u32])).reason, ORDER)
-        # dispatch encodes the result as its type: an implementation that breaks the promise is refused.
-        refused(self, lambda: psio.interface_of(Api).dispatch(Api(), "put", put.to_pssz_checked([1, 2])), psio.EncodeError)
+        # dispatch_checked encodes the result as its type: an implementation that breaks the promise
+        # is refused.  dispatch is the fast write of the service's own value.
+        api = psio.interface_of(Api)
+        refused(self, lambda: api.dispatch_checked(Api(), "put", put.to_pssz_checked([1, 2])), psio.EncodeError)
+        self.assertEqual(put.validate_result(api.dispatch(Api(), "put", put.to_pssz_checked([1, 2]))).reason, ORDER)
 
     def test_where_it_may_be_written(self) -> None:
         for hint in (Annotated[str, psio.sorted], Annotated[Dict[u8, u8], psio.unique],

@@ -653,7 +653,7 @@ the table above.
 | the inferred bound and the largest encoding ([5.4](#54-maxdynamicdatan)) | `psio::inferred_bound<T>()`, `psio::max_encoded_size<T>()` (compile time) | `pssz::inferred_bound::<T>()`, `pssz::max_encoded_size::<T>()` (`const fn`; `PsszPack::INFERRED_BOUND`, `MAX_ENCODED_SIZE`), `Option<usize>` | `T.inferredBound`, `T.maxEncodedSize`: `bigint` or `null`, of a definition or a fetched schema type | `psio.codec(T).inferred_bound`, `.max_encoded_size`: `int` or `None`, of a declaration or a schema type |
 | the two write modes (the validated write checks bounds, UTF-8, order, invariants) | fast: `psio::to_F(v)`, `psio::encode`. Validated: `psio::to_F_checked(v)` (throws), `psio::encode_F_checked(v, out)` (status), `psio::encode_checked(F{}, v, out)`, for every format; `psio::validate_value(v)` | fast: `psio::to_F`, `to_F_into`. Validated: `psio::try_to_F`, `try_to_F_into` — pssz, key, json, ijson, flatbuf, capnp, protobuf, wit | fast: `T.encode`, `T.encodeKey`, `T.valueToJson`, `method.resultToPssz`. Validated: `T.encodeChecked`, `T.encodeKeyChecked`, `T.valueToJsonChecked`, `method.resultToPsszChecked` | fast: `psio.to_pssz`, `to_key`, `to_json`, `to_ijson`. Validated: `psio.to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked`, `result_to_pssz_checked` |
 | JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | a named list writes the object and reads either; `method([...])` / `argumentTuple([...])` without names is the array only | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
-| result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | `defineInterface(...).methods.<m>.result` (a codec: `encode` / `decode` / `validate`); from a fetched schema `schema.interface(name).method(m).result` | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
+| result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>` (fast) / `encode_method_result_checked` (validated), `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` (fast) / `try_result_to_pssz` (validated) / `result_from_pssz` of `args::<method>` | `defineInterface(...).methods.<m>.result` (a codec: `encode` / `decode` / `validate`); from a fetched schema `schema.interface(name).method(m).result` | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
 | interface → Schema IR `Interface` / `Func` | `PSIO_INTERFACE` + `SchemaBuilder::insert_interface<T>()` | `#[psio::interface]` + `SchemaBuilder::insert_interface::<I>()` | `defineInterface(...).schema`; `generateSchema(types, { interfaces: [...] })` | `@psio.interface`, `psio.interface_of(T).schema()` |
 | account-name coder (`name_to_number`) | `psio::name_to_number`, `psio::number_to_name` (`psio/name.hpp`) | `psio::compress_name::name_to_number`, `number_to_name` | `nameToNumber`, `numberToName` | `psio.name_to_number`, `psio.number_to_name` |
 | method-name coder (`method_to_number`) | `psio::detail::method_to_number`, `number_to_method` (`psio/compress_name.hpp`); `psio::hash_name` | `psio::compress_name::method_to_number`, `number_to_method` | `methodToNumber`, `numberToMethod`, `isHashName`, `isCompressedName` | `psio.method_to_number`, `psio.number_to_method`, `psio.is_hash_name` |
@@ -1755,13 +1755,14 @@ type** — the mirror of the argument helpers
 
 | | |
 |---|---|
-| `psio::method_result_to_pssz<T, I>(value)`, `method_result_append_pssz<T, I>(out, value)` | the callee's side: the bytes of the result, its bounds checked |
+| `psio::method_result_to_pssz<T, I>(value)`, `method_result_append_pssz<T, I>(out, value)` | the callee's side: the bytes of the result — the fast write ([7.2](#72-reading-and-writing-the-two-modes)): the value is not held against `returns(...)` |
+| `psio::method_result_to_pssz_checked<T, I>(value)`, `method_result_append_pssz_checked<T, I>(out, value)` | the validated write: refuses a value outside `returns(...)`, as `validate_method_result` refuses its bytes |
 | `psio::method_result_from_pssz<T, I>(bytes)` | the caller's side: validates as the `returns(...)` type, then decodes |
 | `psio::method_result_from_pssz<T, I>(psio::trusted{bytes})` | decodes bytes already validated |
 | `psio::validate_method_result<T, I>(bytes)` | a `codec_status`. It refuses exactly what the checked decode refuses — the `sorted` / `unique` / `unique_keys` of `returns(...)` included ([5.13](#513-sorted-unique-unique_keys)) — so bytes it accepts may be viewed or decoded as trusted |
 | `psio::method_result_buffer<T, I>`, `psio::shared_method_result<T, I>` | a result held packed, owned or shared: the `psio::pssz_buffer` / `psio::shared_pssz` of a result (`B{value}`, `B{bytes}` validating as the result, `view()`, `unpack()`); `psio::method_args_buffer<T, I>` / `shared_method_args<T, I>` for the arguments |
 | `psio::validated_method_result_view<T, I>(bytes)` | validates, then views in place: a `psio::checked_view` of `psio::method_result_trusted_view<T, I>`; `psio::method_result_view<T, I>` is the safe view |
-| `psio::encode_method_result` / `decode_method_result<T, I>(…, out)` | the same operations returning a `codec_status` instead of failing through `psio::codec_abort`; `psio::check_method_result<T, I>(value)` only checks |
+| `psio::encode_method_result` / `encode_method_result_checked` / `decode_method_result<T, I>(…, out)` | the fast write, the validated write and the validating read returning a `codec_status` instead of failing through `psio::codec_abort`; `psio::check_method_result<T, I>(value)` only checks |
 | `psio::method_result_t<T, I>` | the type a result is encoded as: `X` for a method that returns a `psio::pssz_view<X>`, `void` for one that returns nothing |
 
 A bare string has no width of its own, so `returns(utf8 | max<8>)` does not
@@ -1802,10 +1803,10 @@ CHECK(psio::validate_method_result<Directory, 0>(bytes).ok());
 std::vector<std::string> back;
 REQUIRE(psio::decode_method_result<Directory, 0>(bytes, back).ok());
 CHECK(back == two);
-// A result outside returns(...) has no encoding.
+// The validated write refuses a result outside returns(...).
 std::vector<char> none;
-CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>(5, "a"), none).ok());
-CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>{"\xff"}, none).ok());
+CHECK_FALSE(psio::encode_method_result_checked<Directory, 0>(std::vector<std::string>(5, "a"), none).ok());
+CHECK_FALSE(psio::encode_method_result_checked<Directory, 0>(std::vector<std::string>{"\xff"}, none).ok());
 CHECK(none.empty());
 ```
 
@@ -2740,7 +2741,8 @@ another clock is its tick count. Schema IR: `Custom{Int, "time-point-millis"}`,
 [5.11](#511-methodname-). Treat every action's argument tuple as a
 published type: bound each variable-size parameter, declare
 `maxDynamicData`, validate arguments that arrive from outside. Write a
-result with `psio::method_result_to_pssz<T, I>` and read it with
+result with `psio::method_result_to_pssz<T, I>` (`_checked` to hold it
+against `returns(...)` where it is written) and read it with
 `psio::method_result_from_pssz<T, I>` (or view it with
 `psio::validated_method_result_view<T, I>`) so that it has the bytes of its
 `returns(...)` type; put it in a schema with
@@ -3044,6 +3046,41 @@ helpers) has no validating read: its bytes are FlatBuffers, and
 | Rust | `to_F`, `to_F_into` | `try_to_F`, `try_to_F_into` | `from_F`, `validate_F` | `from_F_trusted` |
 | TypeScript | `T.encode`, `T.encodeKey`, `T.valueToJson` | `T.encodeChecked`, `T.encodeKeyChecked`, `T.valueToJsonChecked` | `T.decode`, `T.validate`, `T.decodeKey`, `T.jsonToValue` | — (none; a view reads in place) |
 | Python | `psio.to_pssz`, `to_key`, `to_json`, `to_ijson` | `psio.to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked` | `psio.from_F`, `validate_F` | `psio.from_pssz(T, psio.trusted(data))` |
+
+**Every write entry point follows the one pattern.** An unsuffixed writer
+is the fast write; its `_checked` (Rust: `try_`) twin is the validated one.
+That holds for the helpers around a method as it does for a value:
+
+| | fast write | validated write |
+|---|---|---|
+| C++, a source as a type | `psio::to_pssz_as<T>(source)`, `(source, out)` | `psio::to_pssz_as_checked<T>(source)`, `(source, out)` |
+| C++, the arguments of a call | `psio::method_args_to_pssz<T, I>(args...)`, `method_args_append_pssz`, `method_args_packed` inside `to_pssz` | `psio::method_args_to_pssz_checked<T, I>(args...)`, `method_args_append_pssz_checked` |
+| C++, the result of a call | `psio::method_result_to_pssz<T, I>(v)`, `method_result_append_pssz`, `encode_method_result` (a `codec_status`) | `psio::method_result_to_pssz_checked<T, I>(v)`, `method_result_append_pssz_checked`, `encode_method_result_checked` |
+| C++, dispatch (the result it writes) | `psio::call_method_pssz<T, I>(obj, trusted{args}, out)` | `psio::call_method_pssz_checked<T, I>(obj, trusted{args}, out)` |
+| C++, the format tags of a position / a result | `psio::pssz_at<A>::encode`, `psio::pssz_method_result<T, I>::encode` | their `encode_checked` |
+| Rust | `M::result_to_pssz`, `dispatch`, `dispatch_name`; `pssz::encode`, `pssz::encode_into`, `json::encode`, `json::encode_into` | `M::try_result_to_pssz`, `dispatch_checked`; `pssz::try_encode`, `pssz::try_encode_into`, `json::try_encode`, `json::try_encode_into` |
+| TypeScript | `m.resultToPssz`, `m.args.encode` | `m.resultToPsszChecked`, `m.args.encodeChecked` |
+| Python | `m.to_pssz(*args)`, `m.result_to_pssz`, `interface.dispatch`, a `proxy` call | `m.to_pssz_checked(*args)`, `m.result_to_pssz_checked`, `interface.dispatch_checked` |
+
+Dispatch always reads the ARGUMENTS validating — they are another
+contract's data — and the caller reads the result validating; the fast
+write of a result is the callee writing its own value.
+
+The writers that validate under an unsuffixed name, and why each does:
+
+| Writer | Why it validates |
+|---|---|
+| `psio::nested<T>{value}`, `nested<T>::from(value)`; Rust `Nested::new(&value)` | a `nested<T>` is a type whose meaning is "these bytes are a valid `T`": every reader skips validating them. `nested<T>{psio::trusted{bytes}}` / `Nested::unchecked` take bytes the caller vouches for |
+| `psio::pssz_buffer<T>::from(value)`, `B{value}` for every `F_buffer` / `shared_F`, `psio::method_result_buffer<T, I>::from(value)`; Rust `Buffer::<T, F>::encode(&value)` | the same promise: a buffer is a validated encoding, and its `unpack()` / view is a trusted read. `B{psio::trusted{bytes}}` / `Buffer::trusted(bytes)` are the forms that skip it |
+| JSON text to binary: C++ `json_to_pssz(schema, root, format, text, out)`; Rust `pssz_dynamic` `json_to_pssz`; TypeScript `T.jsonToPssz(text)`; Python `psio.json_to_pssz(T, text)` | the value came from text someone else wrote: the converter is a validating read followed by the write of what it read |
+| the schema-driven writers of a dynamic value: C++ `pssz_ir.hpp` `encode` / `encode_auto` / `to_key` / `value_to_json`; Rust `pssz_dynamic::encode` | they return a status, never abort, and their input is a value built from external data by a tool that has no type to trust |
+
+A validating call validates **whatever the caller is in the middle of**: a
+`from_pssz` or a `to_pssz_checked` made from code that runs inside a fast
+write or a trusted read (a hand-written text handler, an invariant, a
+getter) is not switched off by it. In C++ the mode is an argument of the
+call; in Rust, TypeScript and Python it is per-thread state that every
+validating entry point sets for its own extent.
 
 Rust has pssz, key, json, flatbuf, capnp, protobuf and wit
 (`#[psio(max = N)]`, `element(...)`, `keys(...)`, `values(...)`, `sorted`,

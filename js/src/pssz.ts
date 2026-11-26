@@ -251,7 +251,7 @@ export class PsszType<T = unknown, V = unknown> {
    * `to_pssz_checked`).
    */
   encode(value: T): Uint8Array {
-    return fastWrite(() => guarded(() => this.write(value)));
+    return fastWrite(() => guarded(() => this.bytesOf(value)));
   }
 
   /**
@@ -259,11 +259,11 @@ export class PsszType<T = unknown, V = unknown> {
    * PsszError for a value `validate` would refuse the bytes of.
    */
   encodeChecked(value: T): Uint8Array {
-    return validating(() => this.write(value));
+    return validating(() => this.bytesOf(value));
   }
 
   // The write, in the mode of the caller.
-  private write(value: T): Uint8Array {
+  private bytesOf(value: T): Uint8Array {
     const out = this.codec.encodeTop(this.ref, this.admit(value, 'value'), this.count);
     this.admitBytes(out, 'value');
     return out;
@@ -323,7 +323,7 @@ export class PsszType<T = unknown, V = unknown> {
    * violates an invariant of a registered handler has no key.
    */
   encodeKey(value: T): Uint8Array {
-    return fastWrite(() => guarded(() => this.writeKey(value)));
+    return fastWrite(() => guarded(() => this.keyOf(value)));
   }
 
   /**
@@ -332,10 +332,10 @@ export class PsszType<T = unknown, V = unknown> {
    * handler check). `encodeKey` is the fast write: every value has a key.
    */
   encodeKeyChecked(value: T): Uint8Array {
-    return validating(() => this.writeKey(value));
+    return validating(() => this.keyOf(value));
   }
 
-  private writeKey(value: T): Uint8Array {
+  private keyOf(value: T): Uint8Array {
     const admitted = this.admit(value, 'value');
     this.codec.checkValue(this.ref, admitted, 'value');
     return encodeKey(this.codec, this.node, admitted);

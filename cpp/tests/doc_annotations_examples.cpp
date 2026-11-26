@@ -1982,10 +1982,10 @@ TEST_CASE("reference: a method result has the bytes of its returns(...) type", "
    std::vector<std::string> back;
    REQUIRE(psio::decode_method_result<Directory, 0>(bytes, back).ok());
    CHECK(back == two);
-   // A result outside returns(...) has no encoding.
+   // The validated write refuses a result outside returns(...).
    std::vector<char> none;
-   CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>(5, "a"), none).ok());
-   CHECK_FALSE(psio::encode_method_result<Directory, 0>(std::vector<std::string>{"\xff"}, none).ok());
+   CHECK_FALSE(psio::encode_method_result_checked<Directory, 0>(std::vector<std::string>(5, "a"), none).ok());
+   CHECK_FALSE(psio::encode_method_result_checked<Directory, 0>(std::vector<std::string>{"\xff"}, none).ok());
    CHECK(none.empty());
    // ── /ref-result-run ──
    // The same bytes as the wrapper-type spelling of the result.
@@ -1997,7 +1997,7 @@ TEST_CASE("reference: a method result has the bytes of its returns(...) type", "
    std::vector<char> symbol;
    REQUIRE(psio::encode_method_result<Bank, 2>(std::string("USD"), symbol).ok());
    CHECK(hex(symbol) == "55 53 44");
-   CHECK_FALSE(psio::encode_method_result<Bank, 2>(std::string(9, 'X'), symbol).ok());
+   CHECK_FALSE(psio::encode_method_result_checked<Bank, 2>(std::string(9, 'X'), symbol).ok());
 }
 
 TEST_CASE("reference: a method result in one call", "[doc][ref-result]")
@@ -2024,7 +2024,7 @@ TEST_CASE("reference: a method result in one call", "[doc][ref-result]")
    // A method that returns nothing has no result bytes.
    CHECK(psio::validate_method_result<Directory, 2>({}).ok());
    // ── /ref-result-call-run ──
-   CHECK_THROWS_AS((psio::method_result_to_pssz<Directory, 0>(std::vector<std::string>(5, "a"))),
+   CHECK_THROWS_AS((psio::method_result_to_pssz_checked<Directory, 0>(std::vector<std::string>(5, "a"))),
                    psio::codec_exception);
 
    // ── ref-result-schema-run ──

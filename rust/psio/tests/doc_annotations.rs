@@ -391,7 +391,7 @@ fn method_arguments_in_text_and_under_a_cap() {
     // The return value is checked against returns(...).
     use psio::interface::Method;
     assert_eq!(<bank::args::symbol as Method>::result_to_pssz(&"USD".to_string()).unwrap(), b"USD");
-    assert!(<bank::args::symbol as Method>::result_to_pssz(&"X".repeat(9)).is_err());
+    assert!(<bank::args::symbol as Method>::try_result_to_pssz(&"X".repeat(9)).is_err());
 
     // In text an argument list is written as an object keyed by parameter
     // name; binary stays the positional tuple.
@@ -522,8 +522,8 @@ fn a_method_result_has_the_bytes_of_its_returns_type() {
     assert_eq!(psio::to_pssz(&two).len(), 2 * 4 + 8);
     assert_eq!(<directory::args::names as Method>::result_from_pssz(&bytes).unwrap(), two);
     // A result outside returns(...) has no encoding.
-    assert!(<directory::args::names as Method>::result_to_pssz(&vec!["a".to_string(); 5]).is_err());
-    assert!(<directory::args::names as Method>::result_to_pssz(&vec!["x".repeat(17)]).is_err());
+    assert!(<directory::args::names as Method>::try_result_to_pssz(&vec!["a".to_string(); 5]).is_err());
+    assert!(<directory::args::names as Method>::try_result_to_pssz(&vec!["x".repeat(17)]).is_err());
     // The same bytes as the wrapper-type spelling of the result.
     let same: BoundedList<BoundedString<16>, 4> =
         BoundedList(vec![BoundedString("alice".into()), BoundedString("bob".into())]);

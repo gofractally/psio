@@ -404,7 +404,7 @@ class ResultType(SchemaType):
             raise DecodeError(message)
         value = super().from_key(data)
         if type(data) is not trusted:
-            self._verify(value, fail, "key: member length bound violated")
+            validating(lambda: self._verify(value, fail, "key: member length bound violated"))
         return value
 
     def to_json_checked(self, value: Any, format: str = "json") -> str:
@@ -417,7 +417,7 @@ class ResultType(SchemaType):
         def fail(message: str) -> Any:
             raise JsonError(message)
         value = super().from_json(text, format)
-        self._verify(value, fail, "json: member length_bound violated")
+        validating(lambda: self._verify(value, fail, "json: member length_bound violated"))
         return value
 
     def json_to_pssz(self, text: Any, format: str = "ijson") -> bytes:

@@ -275,6 +275,10 @@ TEST_CASE("call_method_pssz appends the result as returns(...) describes it",
    // Outside returns(...): reported, nothing appended.
    out.clear();
    auto b4big = psio::to_pssz(R::method_arg_tuple<4>{std::uint32_t{5}});
-   REQUIRE_FALSE(psio::call_method_pssz<Svc, 4>(svc, psio::trusted{b4big}, out).ok());
+   REQUIRE_FALSE(psio::call_method_pssz_checked<Svc, 4>(svc, psio::trusted{b4big}, out).ok());
    REQUIRE(out.empty());
+   // call_method_pssz writes the callee's own value fast: the caller's
+   // validating read is what refuses it.
+   REQUIRE(psio::call_method_pssz<Svc, 4>(svc, psio::trusted{b4big}, out).ok());
+   REQUIRE_FALSE(psio::validate_method_result<Svc, 4>(out).ok());
 }

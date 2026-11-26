@@ -244,7 +244,7 @@ namespace
    {
       Row&  r = add("result", std::string{R::method_names[I]}, name);
       Bytes bytes;
-      if (!psio::encode_method_result<token, I>(value, bytes).ok())
+      if (!psio::encode_method_result_checked<token, I>(value, bytes).ok())
          die(r.name + ": the result does not encode");
       V back{};
       if (!psio::validate_method_result<token, I>(bytes).ok() ||
@@ -252,6 +252,7 @@ namespace
          die(r.name + ": the result does not read back");
       // The one-call helpers agree, validated and trusted, and so does the view.
       if (psio::method_result_to_pssz<token, I>(value) != bytes ||
+          psio::method_result_to_pssz_checked<token, I>(value) != bytes ||
           !(psio::method_result_from_pssz<token, I>(std::span<const char>{bytes}) == value) ||
           !(psio::method_result_from_pssz<token, I>(psio::trusted{bytes}) == value))
          die(r.name + ": the result helpers disagree");
@@ -287,11 +288,14 @@ namespace
    {
       Row&  r = add("result-pssz-reject", std::string{R::method_names[I]}, name);
       Bytes refused;
-      if (psio::encode_method_result<token, I>(value, refused).ok() || !refused.empty())
+      if (psio::encode_method_result_checked<token, I>(value, refused).ok() || !refused.empty())
          die(r.name + ": the result is inside returns(...)");
       // The frame a callee that does not check would return.
       const Bytes bytes =
          psio::detail::pssz_impl::encode_method_result_unchecked<token, I>(value);
+      // ... which is what the fast write of the result gives.
+      if (psio::method_result_to_pssz<token, I>(value) != bytes)
+         die(r.name + ": the fast write of the result is not its frame");
       const auto status = psio::validate_method_result<token, I>(bytes);
       if (status.ok() || std::string{status.error().what} != reason)
          die(r.name + ": expected the typed validator to say '" + reason + "', it says '" +
