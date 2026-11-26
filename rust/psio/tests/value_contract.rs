@@ -489,6 +489,22 @@ fn try_to_f_is_the_validated_write_of_the_foreign_formats() {
     assert_eq!(psio::try_to_wit(&over).expect_err("wit").to_string(), WT);
     assert_eq!(psio::try_to_wit(&fits).unwrap(), psio::to_wit(&fits));
 
+    // The generic form is the same pair in every format: `psio::encode` the
+    // fast write, `psio::try_encode` the validated one.
+    use psio::{capnp::Capnp, flatbuf::Flatbuf, protobuf::ProtobufFormat, wit::Wit};
+    assert_eq!(psio::encode::<Flatbuf, _>(&over).unwrap(), psio::to_flatbuf(&over));
+    assert_eq!(psio::encode::<ProtobufFormat, _>(&over).unwrap(), psio::to_protobuf(&over));
+    assert_eq!(psio::encode::<Capnp, _>(&over).unwrap(), psio::to_capnp(&over));
+    assert_eq!(psio::encode::<Wit, _>(&over).unwrap(), psio::to_wit(&over));
+    assert_eq!(psio::try_encode::<Flatbuf, _>(&over).expect_err("flatbuf").message(), FB);
+    assert_eq!(psio::try_encode::<ProtobufFormat, _>(&over).expect_err("protobuf").message(), PB);
+    assert_eq!(psio::try_encode::<Capnp, _>(&over).expect_err("capnp"), CP);
+    assert_eq!(psio::try_encode::<Wit, _>(&over).expect_err("wit").to_string(), WT);
+    assert_eq!(psio::try_encode::<Flatbuf, _>(&fits).unwrap(), psio::to_flatbuf(&fits));
+    assert_eq!(psio::try_encode::<ProtobufFormat, _>(&fits).unwrap(), psio::to_protobuf(&fits));
+    assert_eq!(psio::try_encode::<Capnp, _>(&fits).unwrap(), psio::to_capnp(&fits));
+    assert_eq!(psio::try_encode::<Wit, _>(&fits).unwrap(), psio::to_wit(&fits));
+
     // An invariant, and a declaration below the root.
     assert_eq!(psio::try_to_flatbuf(&Even { v: 3 }).expect_err("flatbuf").message(), "Even: v is odd");
     assert_eq!(psio::try_to_protobuf(&Even { v: 3 }).expect_err("protobuf").message(), "Even: v is odd");

@@ -60,13 +60,17 @@ impl<T: ?Sized, F: Format> Buffer<T, F> {
     pub fn trusted(bytes: Vec<u8>) -> Self {
         Buffer { bytes, _phantom: PhantomData }
     }
-    /// The encoding of `value`.
+    /// The encoding of `value`, by the VALIDATED write where the format has
+    /// one of its own (pssz, key, JSON): a buffer holds a valid encoding, so
+    /// a value outside what `T` declares is refused here. For the other
+    /// formats this is the plain write: use `Buffer::new(psio::encode(..)?)`
+    /// (or `psio::try_encode`) to have the bytes validated.
     pub fn encode(value: &T) -> Result<Self, F::Error>
     where
         T: Encode<F>,
     {
         let mut bytes = Vec::new();
-        value.encode_into(&mut bytes)?;
+        value.encode_validated_into(&mut bytes)?;
         Ok(Self::trusted(bytes))
     }
     pub fn bytes(&self) -> &[u8] {

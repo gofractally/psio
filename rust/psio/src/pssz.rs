@@ -2461,6 +2461,12 @@ macro_rules! format_impls {
         impl<T: PsszPack<$tag> + ?Sized> crate::Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> PsszResult<usize> {
                 let start = out.len();
+                encode_into::<$tag, T>(self, out)?;
+                Ok(out.len() - start)
+            }
+            const HAS_VALIDATED_WRITE: bool = true;
+            fn encode_validated_into(&self, out: &mut Vec<u8>) -> PsszResult<usize> {
+                let start = out.len();
                 try_encode_into::<$tag, T>(self, out)?;
                 Ok(out.len() - start)
             }

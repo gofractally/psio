@@ -448,6 +448,18 @@ fn every_write_entry_point_follows_the_one_pattern() {
         ("try_to_ijson_into", Validated, |v| psio::json::try_to_ijson_into(v, &mut String::new()).is_err()),
         ("json::try_encode", Validated, |v| psio::json::try_encode::<Json, _>(v).is_err()),
         ("json::try_encode_into", Validated, |v| psio::json::try_encode_into::<Json, _>(v, &mut String::new()).is_err()),
+        // The generic form: one meaning in every format (C++ `psio::encode` /
+        // `psio::encode_checked`).
+        ("psio::encode::<Pssz>", Fast, |v| psio::encode::<Pssz, _>(v).is_err()),
+        ("psio::encode::<Pssz16>", Fast, |v| psio::encode::<psio::pssz::Pssz16, _>(v).is_err()),
+        ("psio::encode::<Json>", Fast, |v| psio::encode::<Json, _>(v).is_err()),
+        ("psio::encode::<IJson>", Fast, |v| psio::encode::<IJson, _>(v).is_err()),
+        ("psio::encode::<KeyFormat>", Fast, |v| psio::encode::<psio::key::KeyFormat, _>(v).is_err()),
+        ("psio::try_encode::<Pssz>", Validated, |v| psio::try_encode::<Pssz, _>(v).is_err()),
+        ("psio::try_encode::<Pssz16>", Validated, |v| psio::try_encode::<psio::pssz::Pssz16, _>(v).is_err()),
+        ("psio::try_encode::<Json>", Validated, |v| psio::try_encode::<Json, _>(v).is_err()),
+        ("psio::try_encode::<IJson>", Validated, |v| psio::try_encode::<IJson, _>(v).is_err()),
+        ("psio::try_encode::<KeyFormat>", Validated, |v| psio::try_encode::<psio::key::KeyFormat, _>(v).is_err()),
         // The result of a call, and dispatch (the arguments are read validated).
         ("Method::result_to_pssz", Fast, |v| api::args::ids::result_to_pssz(&v.ids).is_err()),
         ("Method::try_result_to_pssz", Validated, |v| api::args::ids::try_result_to_pssz(&v.ids).is_err()),
@@ -460,6 +472,10 @@ fn every_write_entry_point_follows_the_one_pattern() {
         ("Buffer::<_, Json>::encode", Kept, |v| psio::Buffer::<Row, Json>::encode(v).is_err()),
     ];
     let (fits, over) = (Row { ids: vec![1, 2] }, Row { ids: vec![1, 2, 3] });
+    // The generic validated write gives the bytes of the per-format one.
+    assert_eq!(psio::try_encode::<Pssz, _>(&fits).unwrap(), psio::try_to_pssz(&fits).unwrap());
+    assert_eq!(psio::try_encode::<Json, _>(&fits).unwrap(), psio::try_to_json(&fits).unwrap().into_bytes());
+    assert_eq!(psio::try_encode::<Pssz, _>(&over).unwrap_err(), psio::try_to_pssz(&over).unwrap_err());
     for (name, mode, refuses) in table {
         // The spelling says the mode.
         let spelled = name.contains("try_") || name.ends_with("_checked");

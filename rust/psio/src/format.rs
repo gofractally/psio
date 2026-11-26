@@ -50,7 +50,24 @@ pub trait Format: 'static + Sized {
 pub trait Encode<F: Format> {
     /// Append the format-`F` encoding of `self` to `out`. Returns the
     /// number of bytes written.
+    ///
+    /// The FAST write, in every format (C++ `psio::encode(F{}, v)`;
+    /// docs/annotations.md 7.2): the value is not held against what its
+    /// type declares, and an error is a value the format cannot represent.
+    /// [`try_encode`] is the validated write.
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, F::Error>;
+
+    /// Whether the format has a validated write of its own
+    /// ([`encode_validated_into`](Self::encode_validated_into)): pssz, key,
+    /// JSON. The others validate the bytes they wrote.
+    #[doc(hidden)]
+    const HAS_VALIDATED_WRITE: bool = false;
+    /// The format's own validated write, where it has one; else the fast
+    /// write.
+    #[doc(hidden)]
+    fn encode_validated_into(&self, out: &mut Vec<u8>) -> Result<usize, F::Error> {
+        self.encode_into(out)
+    }
 
     /// Size of the encoding. Formats that can compute it without encoding
     /// override this.
@@ -85,11 +102,35 @@ pub trait Validate<F: Format>: Sized {
 ///
 /// Equivalent to `T::encode_into(value, &mut out)` followed by
 /// returning `out`.
+///
+/// The FAST write in every format, as C++ `psio::encode(F{}, v)`: the value
+/// is not held against what its type declares (bounds, order, invariants);
+/// an error is a value the format cannot represent. [`try_encode`] is the
+/// validated write.
 pub fn encode<F: Format, T: Encode<F> + ?Sized>(value: &T)
     -> Result<Vec<u8>, F::Error>
 {
     let mut out = Vec::new();
     value.encode_into(&mut out)?;
+    Ok(out)
+}
+
+/// The VALIDATED write of `value` as format `F` (C++
+/// `psio::encode_checked(F{}, v, out)`): the bytes, or the error the
+/// validating reader of `F` would give for them — a member over its bound,
+/// an order constraint, an invariant.
+///
+/// pssz, key and JSON validate as they write; the other formats write and
+/// then run their validator on the bytes, so the verdict is the reader's by
+/// construction. The per-format `try_to_F` helpers are the same write.
+pub fn try_encode<F: Format, T: Encode<F> + Validate<F>>(value: &T) -> Result<Vec<u8>, F::Error> {
+    let mut out = Vec::new();
+    if <T as Encode<F>>::HAS_VALIDATED_WRITE {
+        value.encode_validated_into(&mut out)?;
+    } else {
+        value.encode_into(&mut out)?;
+        T::validate(&out, &crate::policy::DefaultSafe)?;
+    }
     Ok(out)
 }
 

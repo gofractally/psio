@@ -1862,7 +1862,7 @@ That holds for the helpers around a method as it does for a value:
 | C++, the result of a call | `psio::method_result_to_pssz<T, I>(v)`, `method_result_append_pssz`, `encode_method_result` (a `codec_status`) | `psio::method_result_to_pssz_checked<T, I>(v)`, `method_result_append_pssz_checked`, `encode_method_result_checked` |
 | C++, dispatch (the result it writes) | `psio::call_method_pssz<T, I>(obj, trusted{args}, out)` | `psio::call_method_pssz_checked<T, I>(obj, trusted{args}, out)` |
 | C++, the format tags of a position / a result | `psio::pssz_at<A>::encode`, `psio::pssz_method_result<T, I>::encode` | their `encode_checked` |
-| Rust | `M::result_to_pssz`, `dispatch`, `dispatch_name`; `pssz::encode`, `pssz::encode_into`, `json::encode`, `json::encode_into` | `M::try_result_to_pssz`, `dispatch_checked`; `pssz::try_encode`, `pssz::try_encode_into`, `json::try_encode`, `json::try_encode_into` |
+| Rust | `M::result_to_pssz`, `dispatch`, `dispatch_name`; `pssz::encode`, `pssz::encode_into`, `json::encode`, `json::encode_into`; the generic `psio::encode::<F, _>` in every format | `M::try_result_to_pssz`, `dispatch_checked`; `pssz::try_encode`, `pssz::try_encode_into`, `json::try_encode`, `json::try_encode_into`; the generic `psio::try_encode::<F, _>` in every format |
 | TypeScript | `m.resultToPssz`, `m.args.encode` | `m.resultToPsszChecked`, `m.args.encodeChecked` |
 | Python | `m.to_pssz(*args)`, `m.result_to_pssz`, `interface.dispatch`, a `proxy` call | `m.to_pssz_checked(*args)`, `m.result_to_pssz_checked`, `interface.dispatch_checked` |
 

@@ -434,6 +434,11 @@ macro_rules! format_impls {
         impl<T: JsonText> Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize> {
                 // In place: the capacity of `out` is used, no second buffer.
+                let _fast = crate::pssz_checked::Undeclared::enter();
+                append_text::<$tag, T>(self, out)
+            }
+            const HAS_VALIDATED_WRITE: bool = true;
+            fn encode_validated_into(&self, out: &mut Vec<u8>) -> Result<usize> {
                 let _validating = crate::pssz_checked::Declared::enter();
                 append_text::<$tag, T>(self, out)
             }

@@ -335,6 +335,12 @@ impl<T: KeyPack + ?Sized> crate::Encode<KeyFormat> for T {
         to_key_into(self, out)?;
         Ok(out.len() - start)
     }
+    const HAS_VALIDATED_WRITE: bool = true;
+    fn encode_validated_into(&self, out: &mut Vec<u8>) -> KeyResult<usize> {
+        let start = out.len();
+        try_to_key_into(self, out)?;
+        Ok(out.len() - start)
+    }
     fn encoded_size(&self) -> KeyResult<usize> {
         Ok(self.key_size())
     }
