@@ -132,10 +132,10 @@ format. Writing has two modes, the same in every format:
 the validated write. A program whose bytes leave its hands (table rows
 later read with `psio::trusted`, arguments for another service, results,
 replies) should use the validated write there; a fast write of a violating
-value is found by the next validating reader, or by nobody. Rust:
-`try_to_F` is the validated write of every format; `to_flatbuf` /
-`to_capnp` / `to_protobuf` / `to_wit` are fast, `to_pssz` / `to_key` /
-`to_json` still validate. Which format reads which annotation:
+value is found by the next validating reader, or by nobody. The same two
+modes in the other languages: Rust `to_F` / `try_to_F`, TypeScript
+`T.encode` / `T.encodeChecked`, Python `psio.to_pssz` /
+`psio.to_pssz_checked`. Which format reads which annotation:
 [annotations.md §1](annotations.md#1-one-declaration-every-format) and
 [§7.2](annotations.md#72-reading-and-writing-the-two-modes); see also
 [bounds by annotation](psio-overview.md#bounds-by-annotation).

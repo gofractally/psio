@@ -468,7 +468,7 @@ the table above.
 |---|---|---|---|---|
 | compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): the C++ rule — fields, widths, bounds that only widen, caps, `max_fields`, alternatives appended to an enum with data. At run time, over two Schema IRs (C++ `psio::pssz_ir::evolves_from` / `equivalent`): `pssz::dynamic::evolves_from(&old, &old_type, &new, &new_type, Compare::Contract \| Compare::Wire)` and `equivalent(...)` → `Compatibility { ok, code, reason, path }`, with `evolves_from_func` / `_interface` / `_schema` and `equivalent_func` / `_interface` / `_schema` | `psszEvolvesFrom(Old, New, { compare: 'contract' \| 'wire' })` and `psszEquivalent(A, B, { compare })` → `{ ok: true }` or `{ ok: false, code, reason, path }`, at run time over two definitions or two fetched schema types, methods, interfaces or schemas: the rule of C++ `psio::pssz_ir::evolves_from` / `equivalent` (`'contract'`, the default, also compares names, custom ids, enums and text forms; `'wire'` the bytes only) | `psio.evolves_from(Old, New, mode="contract" \| "wire")` and `psio.equivalent(A, B, mode=…)` → a `psio.Compatibility` (`ok`, `code`, `reason`, `path`), at run time over two declarations or two schema types, methods, interfaces or `psio.Schema` values: the rule of C++ `psio::pssz_ir::evolves_from` / `equivalent` |
 | the inferred bound and the largest encoding ([5.4](#54-maxdynamicdatan)) | `psio::inferred_bound<T>()`, `psio::max_encoded_size<T>()` (compile time) | `pssz::inferred_bound::<T>()`, `pssz::max_encoded_size::<T>()` (`const fn`; `PsszPack::INFERRED_BOUND`, `MAX_ENCODED_SIZE`), `Option<usize>` | `T.inferredBound`, `T.maxEncodedSize`: `bigint` or `null`, of a definition or a fetched schema type | `psio.codec(T).inferred_bound`, `.max_encoded_size`: `int` or `None`, of a declaration or a schema type |
-| the validated write (bounds, UTF-8, order, invariants) | `psio::to_F_checked(v)` (throws), `psio::encode_F_checked(v, out)` (status), `psio::encode_checked(F{}, v, out)`, for every format; `psio::validate_value(v)`. `to_F` / `psio::encode` are the fast write | `psio::try_to_pssz`, `try_to_key`, `try_to_json`, `try_to_flatbuf`, `try_to_capnp`, `try_to_protobuf`, `try_to_wit`. `to_flatbuf` / `to_capnp` / `to_protobuf` / `to_wit` are the fast write; `to_pssz` / `to_key` / `to_json` still validate and panic on a violating value (not yet the fast write) | `T.encode`, `T.encodeKey`, `T.valueToJson`: validated; no fast write yet | `psio.to_pssz`, `to_key`, `to_json`: validated; no fast write yet |
+| the two write modes (the validated write checks bounds, UTF-8, order, invariants) | fast: `psio::to_F(v)`, `psio::encode`. Validated: `psio::to_F_checked(v)` (throws), `psio::encode_F_checked(v, out)` (status), `psio::encode_checked(F{}, v, out)`, for every format; `psio::validate_value(v)` | fast: `psio::to_F`, `to_F_into`. Validated: `psio::try_to_F`, `try_to_F_into` — pssz, key, json, ijson, flatbuf, capnp, protobuf, wit | fast: `T.encode`, `T.encodeKey`, `T.valueToJson`, `method.resultToPssz`. Validated: `T.encodeChecked`, `T.encodeKeyChecked`, `T.valueToJsonChecked`, `method.resultToPsszChecked` | fast: `psio.to_pssz`, `to_key`, `to_json`, `to_ijson`. Validated: `psio.to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked`, `result_to_pssz_checked` |
 | JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | a named list writes the object and reads either; `method([...])` / `argumentTuple([...])` without names is the array only | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
 | result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | `defineInterface(...).methods.<m>.result` (a codec: `encode` / `decode` / `validate`); from a fetched schema `schema.interface(name).method(m).result` | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
 | interface → Schema IR `Interface` / `Func` | `PSIO_INTERFACE` + `SchemaBuilder::insert_interface<T>()` | `#[psio::interface]` + `SchemaBuilder::insert_interface::<I>()` | `defineInterface(...).schema`; `generateSchema(types, { interfaces: [...] })` | `@psio.interface`, `psio.interface_of(T).schema()` |
@@ -1841,20 +1841,25 @@ The optional `flatbuf_lib` adapter (the official library behind the same
 helpers) has no validating read: its bytes are FlatBuffers, and
 `psio::validate_flatbuf<T>` validates them.
 
-**The other languages.** The read side is the same in Rust for pssz, key,
-json, flatbuf, capnp, protobuf and wit (`#[psio(max = N)]`,
-`element(...)`, `keys(...)`, `values(...)`, `sorted`, `unique`,
-`unique_keys`, `#[psio(invariant = "path")]`; Rust has no `min` / `exact`
-and none of bin / borsh / bincode / msgpack / avro / bson), with one
-difference: the view a `CapnpView` derive makes (`FooView::from_message`)
-checks the structure of the message only — validate with
-`psio::validate_capnp::<Foo>` first. The validated write is `try_to_F` for
-every Rust format. The write modes are **not yet** the C++ ones in the
-other languages: Rust `to_flatbuf` / `to_capnp` / `to_protobuf` / `to_wit`
-are fast, while Rust `to_pssz` / `to_key` / `to_json` and every TypeScript
-and Python writer still validate (and panic / throw on a violating value).
-TypeScript and Python have pssz, key and json / ijson; there a bound on a
-`nested` member is enforced by pssz only.
+**The other languages.** The same four modes, in each language's names:
+
+| | fast write | validated write | validating read | trusted read |
+|---|---|---|---|---|
+| Rust | `to_F`, `to_F_into` | `try_to_F`, `try_to_F_into` | `from_F`, `validate_F` | `from_F_trusted` |
+| TypeScript | `T.encode`, `T.encodeKey`, `T.valueToJson` | `T.encodeChecked`, `T.encodeKeyChecked`, `T.valueToJsonChecked` | `T.decode`, `T.validate`, `T.decodeKey`, `T.jsonToValue` | — (none; a view reads in place) |
+| Python | `psio.to_pssz`, `to_key`, `to_json`, `to_ijson` | `psio.to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked` | `psio.from_F`, `validate_F` | `psio.from_pssz(T, psio.trusted(data))` |
+
+Rust has pssz, key, json, flatbuf, capnp, protobuf and wit
+(`#[psio(max = N)]`, `element(...)`, `keys(...)`, `values(...)`, `sorted`,
+`unique`, `unique_keys`, `#[psio(invariant = "path")]`; no `min` /
+`exact`); `to_pssz` is infallible, so the one thing the fast pssz write
+still refuses — a value whose offsets do not fit — is a panic there
+(`to_pssz_into` returns it as an error). The view a `CapnpView` derive
+makes (`FooView::from_message`) checks the structure of the message only —
+validate with `psio::validate_capnp::<Foo>` first. TypeScript and Python
+have pssz, key and json / ijson; a bound on a `nested` member is held by
+all three codecs. Their key and JSON readers have no trusted mode (Python:
+`psio.trusted` applies to pssz).
 
 How the formats other than pssz, key and json check
 (`psio/value_contract.hpp`, Rust `psio::contract`):
