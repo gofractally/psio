@@ -449,7 +449,8 @@ test('invariant: a handler check runs on every entry point, binary and text, inn
   rejects(() => checked.type('Even').decodeKey(fromHex('03')), 'bytes', 'Even: odd value');
   assert.equal(plain.type('Even').decodeKey(fromHex('03')), 3);
   assert.equal(checked.type('Even').validateKey(fromHex('03')).ok, false);
-  rejects(() => checked.type('Range').encodeKeyPrefix([3]), 'value', 'Even: odd value');
+  // (A prefix is a fast write of its elements: no handler check runs.)
+  checked.type('Range').encodeKeyPrefix([3]);
   assert.equal(toHex(checked.type('Range').encodeKeyPrefix([2])), '02');
 });
 

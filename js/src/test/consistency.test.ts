@@ -378,7 +378,8 @@ test('the key writer checks member bounds: time-key-vectors.json KBound', () => 
       const refusal = rejects(() => writer.encodeKeyChecked(value), 'value');
       assert.match(refusal.message, /^key: (string exceeds its bound|bytes exceed their bound|list exceeds its bound|member length bound violated)$/, row.name);
       rejects(() => writer.encodeChecked(value), 'value');
-      rejects(() => writer.encodeKeyPrefix([value.shard, value.name, value.tags]), 'value');
+      // (A prefix is a fast write of its elements, as C++ `key_prefix`: no bound is held.)
+      assert.deepEqual(writer.encodeKeyPrefix([value.shard, value.name, value.tags]), writer.encodeKey(value));
       rejects(() => writer.valueToJsonChecked(value), 'value');
     }
     ++refusedByWriters;

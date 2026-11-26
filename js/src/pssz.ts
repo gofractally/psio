@@ -354,7 +354,8 @@ export class PsszType<T = unknown, V = unknown> {
    * the prefix every full key with those leading elements starts with.
    */
   encodeKeyPrefix(elements: unknown[]): Uint8Array {
-    return guarded(() => encodeKeyPrefix(this.codec, this.ref, elements));
+    // A fast write of the elements, as `encodeKey` (C++ `key_prefix`).
+    return fastWrite(() => guarded(() => encodeKeyPrefix(this.codec, this.ref, elements)));
   }
 
   /** JSON / I-JSON text -> value. */
