@@ -40,19 +40,25 @@
 //
 // Safe and trusted views. A read view has two kinds, told apart by Store:
 //
-//   storage::const_borrow    the SAFE view (`F_view<T>`, the default).
-//                            Navigation compares every offset it reads
-//                            before it uses it, so bytes nobody validated
-//                            cannot make it read outside its span: what is
-//                            not there reads as zero / empty.
+//   storage::const_borrow    the SAFE view (`F_view<T>`, the default),
+//                            constructed from any span.
 //   storage::trusted_borrow  the TRUSTED view (`F_trusted_view<T>`), of
-//                            bytes the caller vouches for. It skips those
-//                            compares. See "Safe and trusted views" below
-//                            for what the caller guarantees.
+//                            bytes the caller vouches for. See "Safe and
+//                            trusted views" below.
 //
-// `unpack()` is a trusted decode in both kinds: on bytes that were never
-// validated it is undefined behaviour, exactly like
-// `from_F<T>(psio::trusted{bytes})`.
+// Both place a member the same way (PSSZ, SSZ, the canonical ABI): every
+// offset is compared with the bytes where it is read, so a view never reads
+// outside its span and never hands out a member it could not place. A
+// member that cannot be placed FAILS — psio::codec_abort, as a decode of
+// the same bytes fails — it does not read as zero / empty. Only a view of
+// nothing (default-constructed, `at(i)` past the end, a trailing optional
+// the writer did not write) reads as zero / empty / absent. Neither kind
+// looks at what a type DECLARES (bounds, utf8, order, invariants): that is
+// validation.
+//
+// `unpack()` is a trusted decode in both kinds, exactly like
+// `from_F<T>(psio::trusted{bytes})`: for PSSZ it fails on bytes that are not
+// a frame; for SSZ and the canonical ABI it is for validated bytes only.
 //
 // To add a format's view support, specialize `view_layout::traits<Fmt>`
 // in that format's companion header (e.g. `ssz_view.hpp`).
@@ -131,18 +137,32 @@ namespace psio {
    // view<T, Fmt, storage::trusted_borrow> — `F_trusted_view<T>` — is the
    // view of bytes the caller vouches for. It has the surface of the safe
    // view (the same templates, instantiated for the other kind) and reads
-   // the same values from valid bytes; it does not compare what it reads
-   // from the bytes with their size.
+   // the same values from the same bytes.
    //
-   // THE CALLER GUARANTEES that the bytes
+   // THE CALLER SAYS that the bytes
    //   - were accepted by `psio::validate_F<T>` for this T (the view a
    //     validating entry point returns — psio::validated_view — is this
    //     case), or were produced by `psio::to_F` of a T, or are a row this
    //     program itself wrote as a T; and
    //   - are not modified while the view, or any view obtained from it, is
    //     in use.
-   // If not, the behaviour is undefined: reads outside the bytes, exactly
-   // as for `psio::from_F<T>(psio::trusted{bytes})`.
+   //
+   // ON BYTES THAT ARE NOT A FRAME OF T (a truncated row, a row an
+   // incompatible version of T wrote) a view of either kind
+   //   - never reads outside the bytes and does bounded work: every offset
+   //     is compared with the bytes where it is read (PSIO_VIEW_TRUST);
+   //   - FAILS when a member cannot be placed: psio::detail::view_malformed,
+   //     which is psio::codec_abort — a psio::codec_exception where
+   //     exceptions are enabled, the abort handler and std::abort where they
+   //     are not. A record's header is compared when its view is
+   //     constructed; a variable member, a list's count and an element when
+   //     they are read;
+   //   - reads SOME value where every member can be placed: bytes that are
+   //     another frame whose offsets happen to fit. That value is
+   //     unspecified; only validation refuses such bytes.
+   // (This holds for the views of PSSZ, SSZ and the canonical ABI, which
+   // share this frame. The FlatBuffers trusted view and the Cap'n Proto view
+   // are cursors that rely on validation: flatbuf_view.hpp, capnp_view.hpp.)
    //
    // Trust is in the type:
    //   - it is only obtained explicitly: `F_trusted_view<T>{psio::trusted{
@@ -155,21 +175,22 @@ namespace psio {
    //   - a trusted view converts implicitly to the safe view of the same
    //     bytes; there is no conversion the other way.
    //
-   // What a trusted view still does: `at(i)` is bounds-checked and returns
-   // an empty view past the end; a default-constructed view reads as zero /
-   // empty (one null test); and what is wire meaning rather than a check
-   // stays (PSSZ: a trailing member the writer did not write reads as
-   // absent; an empty list is zero bytes).
+   // A view of nothing is not a member that could not be placed: `at(i)`
+   // is bounds-checked and returns an empty view past the end (operator[]
+   // past the end fails); a default-constructed view reads as zero / empty
+   // (one null test); and what is wire meaning stays (PSSZ: a trailing
+   // member the writer did not write reads as absent; an empty list is zero
+   // bytes).
    //
-   // Compile with PSIO_DEBUG_VIEWS defined to have the trusted view make
-   // every compare it skips and abort (psio::detail::view_trust_violation)
-   // when one fails. Define it for the whole program or not at all: it
-   // changes inline functions.
+   // (PSIO_DEBUG_VIEWS, which used to turn these compares on for the
+   // trusted view, no longer does anything: they are always made.)
    //
    // A format opts in with `static constexpr bool trusted_views = true;`
-   // in its traits and provides the unchecked form of each traits function
-   // that checks something as an overload with a trailing
-   // `view_layout::unchecked_t`. `F_trusted_view<T>`, psio::validated_view
+   // in its traits and provides the placing form of each traits function
+   // — the one both kinds of view call — as an overload with a trailing
+   // `view_layout::unchecked_t` (the name is from when only the trusted view
+   // called it and it compared nothing): it compares with PSIO_VIEW_TRUST
+   // and so fails where the form without the tag returns an empty span. `F_trusted_view<T>`, psio::validated_view
    // and the trusted view a buffer hands out exist for those formats only
    // (PSSZ, SSZ, the canonical ABI). The Cap'n Proto views (capnp_view.hpp)
    // are cursor views with one kind, which relies on validation.
@@ -189,12 +210,13 @@ namespace psio {
    }  // namespace view_layout
 
    namespace detail {
-      [[noreturn]] inline void view_trust_violation(const char* what) noexcept
+      // A view met bytes that are not a frame of its type: a member that
+      // cannot be placed. Fails as a decode of the same bytes fails —
+      // psio::codec_abort: a psio::codec_exception where exceptions are
+      // enabled, the abort handler and std::abort where they are not.
+      [[noreturn, gnu::cold, gnu::noinline]] inline void view_malformed(const char* what)
       {
-         std::fprintf(stderr,
-                      "psio: trusted view over bytes that are not a valid encoding: %s\n", what);
-         std::fflush(stderr);
-         std::abort();
+         ::psio::codec_abort(codec_error{what, 0, "view"});
       }
 
       template <storage Store>
@@ -207,18 +229,28 @@ namespace psio {
          std::conditional_t<trusted_store_v<Store>, trusted, std::span<const char>>;
 
       [[nodiscard]] constexpr std::span<const char> view_source_bytes(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          return s;
       }
-      [[nodiscard]] inline std::span<const char> view_source_bytes(trusted t) noexcept
+      [[nodiscard]] inline std::span<const char> view_source_bytes(trusted t)
       {
          return t.bytes;
+      }
+      // The bytes a caller constructs a record view over. An empty span may
+      // carry a null pointer (a default std::span, an empty std::vector),
+      // which inside the frame means "a view of nothing" (zero / empty):
+      // bytes the caller handed over are not that, however few they are.
+      inline constexpr char view_no_bytes = 0;
+      [[nodiscard, gnu::always_inline]] constexpr std::span<const char> view_given_bytes(
+         std::span<const char> s) noexcept
+      {
+         return s.data() == nullptr ? std::span<const char>{&view_no_bytes, 0} : s;
       }
       // The source of a sub-view: the parent's kind carries over.
       template <storage Store>
       [[nodiscard, gnu::always_inline]] inline view_source<Store> view_src(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          return view_source<Store>{s};
       }
@@ -229,31 +261,46 @@ namespace psio {
       // absent) from one that has bytes.
       template <storage Store, std::size_t Size>
       [[nodiscard, gnu::always_inline]] inline bool view_has_scalar(
-         std::span<const char> s) noexcept;
+         std::span<const char> s);
    }  // namespace detail
 
-// A compare the trusted view leaves out; made, and fatal, with PSIO_DEBUG_VIEWS.
-#ifdef PSIO_DEBUG_VIEWS
-#define PSIO_VIEW_TRUST(cond, what) \
-   (static_cast<bool>(cond) ? void(0) : ::psio::detail::view_trust_violation(what))
-#else
-#define PSIO_VIEW_TRUST(cond, what) void(0)
-#endif
+// A compare that places a member inside the bytes. A view of either kind
+// makes it where it reads the offset, and fails when it does not hold
+// (psio::detail::view_malformed): a view never reads outside its bytes and
+// never hands out a member it could not place.
+#define PSIO_VIEW_TRUST(cond, what)                                    \
+   (static_cast<bool>(cond) ? void(0)                                  \
+                            : ::psio::detail::view_malformed(          \
+                                 "view: the bytes are not a frame of the type: " what))
 
    namespace detail {
       template <storage Store, std::size_t Size>
       [[nodiscard, gnu::always_inline]] inline bool view_has_scalar(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
-         if constexpr (trusted_store_v<Store>)
+         if (s.data() == nullptr)
+            return false;
+         PSIO_VIEW_TRUST(s.size() >= Size, "a scalar is cut short");
+         return true;
+      }
+   }  // namespace detail
+
+   namespace detail {
+      // The scalar at `s`; zero for a view of nothing. A bool is read as
+      // its byte (any nonzero byte is true): bytes nobody validated must
+      // not become a bool object that is neither true nor false.
+      template <storage Store, typename T>
+      [[nodiscard, gnu::always_inline]] inline T view_scalar(std::span<const char> s)
+      {
+         T out{};
+         if (view_has_scalar<Store, sizeof(T)>(s))
          {
-            if (s.data() == nullptr)
-               return false;
-            PSIO_VIEW_TRUST(s.size() >= Size, "a scalar is cut short");
-            return true;
+            if constexpr (std::is_same_v<T, bool>)
+               out = static_cast<unsigned char>(s[0]) != 0;
+            else
+               std::memcpy(&out, s.data(), sizeof(T));
          }
-         else
-            return s.size() >= Size;
+         return out;
       }
    }  // namespace detail
 
@@ -334,43 +381,43 @@ namespace psio {
          using reference         = value_type;
 
          view_iterator() = default;
-         view_iterator(const V& owner, std::size_t index) noexcept : owner_(owner), index_(index)
+         view_iterator(const V& owner, std::size_t index) : owner_(owner), index_(index)
          {
          }
 
-         [[nodiscard]] reference operator*() const noexcept { return owner_[index_]; }
-         [[nodiscard]] pointer   operator->() const noexcept { return {owner_[index_]}; }
-         [[nodiscard]] reference operator[](difference_type n) const noexcept
+         [[nodiscard]] reference operator*() const { return owner_[index_]; }
+         [[nodiscard]] pointer   operator->() const { return {owner_[index_]}; }
+         [[nodiscard]] reference operator[](difference_type n) const
          {
             return owner_[static_cast<std::size_t>(static_cast<difference_type>(index_) + n)];
          }
-         view_iterator& operator++() noexcept { ++index_; return *this; }
-         view_iterator  operator++(int) noexcept { auto copy = *this; ++index_; return copy; }
-         view_iterator& operator--() noexcept { --index_; return *this; }
-         view_iterator  operator--(int) noexcept { auto copy = *this; --index_; return copy; }
-         view_iterator& operator+=(difference_type n) noexcept
+         view_iterator& operator++() { ++index_; return *this; }
+         view_iterator  operator++(int) { auto copy = *this; ++index_; return copy; }
+         view_iterator& operator--() { --index_; return *this; }
+         view_iterator  operator--(int) { auto copy = *this; --index_; return copy; }
+         view_iterator& operator+=(difference_type n)
          {
             index_ = static_cast<std::size_t>(static_cast<difference_type>(index_) + n);
             return *this;
          }
-         view_iterator& operator-=(difference_type n) noexcept { return *this += -n; }
-         friend view_iterator operator+(view_iterator it, difference_type n) noexcept { return it += n; }
-         friend view_iterator operator+(difference_type n, view_iterator it) noexcept { return it += n; }
-         friend view_iterator operator-(view_iterator it, difference_type n) noexcept { return it -= n; }
-         friend difference_type operator-(const view_iterator& a, const view_iterator& b) noexcept
+         view_iterator& operator-=(difference_type n) { return *this += -n; }
+         friend view_iterator operator+(view_iterator it, difference_type n) { return it += n; }
+         friend view_iterator operator+(difference_type n, view_iterator it) { return it += n; }
+         friend view_iterator operator-(view_iterator it, difference_type n) { return it -= n; }
+         friend difference_type operator-(const view_iterator& a, const view_iterator& b)
          {
             return static_cast<difference_type>(a.index_) - static_cast<difference_type>(b.index_);
          }
-         friend bool operator==(const view_iterator& a, const view_iterator& b) noexcept
+         friend bool operator==(const view_iterator& a, const view_iterator& b)
          {
             return a.index_ == b.index_;
          }
          friend std::strong_ordering operator<=>(const view_iterator& a,
-                                                 const view_iterator& b) noexcept
+                                                 const view_iterator& b)
          {
             return a.index_ <=> b.index_;
          }
-         [[nodiscard]] std::size_t index() const noexcept { return index_; }
+         [[nodiscard]] std::size_t index() const { return index_; }
       };
    }  // namespace detail
 
@@ -426,7 +473,7 @@ namespace psio {
 #define PSIO_VIEW_TO_SAFE_AS_(ELEM, ROOT)                                                  \
    template <storage PsioTo>                                                               \
       requires (PsioTo == storage::const_borrow && storage_kind == storage::trusted_borrow) \
-   operator view<ELEM, format_type, PsioTo>() const noexcept                               \
+   operator view<ELEM, format_type, PsioTo>() const                               \
    {                                                                                       \
       return view<ELEM, format_type, PsioTo>{this->_psio_data(), ROOT};                    \
    }
@@ -452,10 +499,10 @@ namespace psio {
     public:
       using base::base;
       view() = default;
-      view(const base& v) noexcept : base(v) {}
+      view(const base& v) : base(v) {}
       template <storage PsioTo>
          requires (PsioTo == storage::const_borrow && Store == storage::trusted_borrow)
-      operator view<const T, Fmt, PsioTo>() const noexcept
+      operator view<const T, Fmt, PsioTo>() const
       {
          return view<const T, Fmt, PsioTo>{view<T, Fmt, PsioTo>(static_cast<const base&>(*this))};
       }
@@ -590,8 +637,8 @@ namespace psio {
       // Compile with PSIO_VIEW_NO_RECORD_STATE to measure the difference.
       struct no_record_state
       {
-         constexpr no_record_state() noexcept = default;
-         constexpr explicit no_record_state(std::span<const char>) noexcept {}
+         constexpr no_record_state() = default;
+         constexpr explicit no_record_state(std::span<const char>) {}
       };
       template <typename Fmt, typename T, typename = void>
       struct record_state
@@ -610,32 +657,33 @@ namespace psio {
 
       // ── Dispatch on the view's kind ────────────────────────────────────
       //
-      // What the shape templates call: the format's unchecked form for a
-      // trusted view when the format has one, the checked form otherwise.
+      // What the shape templates call, for a view of either kind: the
+      // format's placing form (the overload tagged `unchecked`, which
+      // fails on a member it cannot place) when the format has one, the
+      // form that returns an empty span otherwise.
 #define PSIO_VIEW_DISPATCH_(CALL, ...)                                                    \
-   if constexpr (::psio::detail::trusted_store_v<Store> &&                                \
-                 requires { traits<Fmt>::template CALL(__VA_ARGS__, unchecked); })        \
+   if constexpr (requires { traits<Fmt>::template CALL(__VA_ARGS__, unchecked); })        \
       return traits<Fmt>::template CALL(__VA_ARGS__, unchecked);                          \
    else                                                                                   \
       return traits<Fmt>::template CALL(__VA_ARGS__);
 
       template <typename Fmt, storage Store, typename T>
       [[nodiscard, gnu::always_inline]] inline std::size_t count_of(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          PSIO_VIEW_DISPATCH_(vector_count<T>, s)
       }
       template <typename Fmt, storage Store, typename T>
       [[nodiscard, gnu::always_inline]] inline std::span<const char> element_of(
-         std::span<const char> s, std::size_t i) noexcept
+         std::span<const char> s, std::size_t i)
       {
          PSIO_VIEW_DISPATCH_(vector_element_span<T>, s, i)
       }
       template <typename Fmt, storage Store, typename T, std::size_t N>
       [[nodiscard, gnu::always_inline]] inline std::span<const char> array_element_of(
-         std::span<const char> s, std::size_t i) noexcept
+         std::span<const char> s, std::size_t i)
       {
-         if constexpr (::psio::detail::trusted_store_v<Store> && requires {
+         if constexpr (requires {
                           traits<Fmt>::template array_element_span<T, N>(s, i, unchecked);
                        })
             return traits<Fmt>::template array_element_span<T, N>(s, i, unchecked);
@@ -644,34 +692,34 @@ namespace psio {
       }
       template <typename Fmt, storage Store, typename T>
       [[nodiscard, gnu::always_inline]] inline bool optional_has(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          PSIO_VIEW_DISPATCH_(optional_has_value<T>, s)
       }
       template <typename Fmt, storage Store, typename T>
       [[nodiscard, gnu::always_inline]] inline std::span<const char> optional_payload_of(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          PSIO_VIEW_DISPATCH_(optional_payload_span<T>, s)
       }
       template <typename Fmt, storage Store, typename... Ts>
       [[nodiscard, gnu::always_inline]] inline std::size_t variant_index_of(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          PSIO_VIEW_DISPATCH_(variant_index<Ts...>, s)
       }
       template <typename Fmt, storage Store, typename... Ts>
       [[nodiscard, gnu::always_inline]] inline std::span<const char> variant_payload_of(
-         std::span<const char> s) noexcept
+         std::span<const char> s)
       {
          PSIO_VIEW_DISPATCH_(variant_payload_span<Ts...>, s)
       }
       // Member N of record T, without per-record state.
       template <typename Fmt, storage Store, typename T, std::size_t N>
       [[nodiscard, gnu::always_inline]] inline std::span<const char> field_of(
-         std::span<const char> s, std::span<const char> root) noexcept
+         std::span<const char> s, std::span<const char> root)
       {
-         if constexpr (::psio::detail::trusted_store_v<Store> && requires {
+         if constexpr (requires {
                           traits<Fmt>::template record_field_span<T, N>(s, root, unchecked);
                        })
             return traits<Fmt>::template record_field_span<T, N>(s, root, unchecked);
@@ -680,28 +728,33 @@ namespace psio {
       }
 #undef PSIO_VIEW_DISPATCH_
 
-      // The per-record state of a view of kind Store: for a trusted view,
-      // the format's `trusted_record_state<T>` when it has one (constructed
-      // from the record's span without checking it, and taken by an
-      // overload of record_field_span as record_state is); none otherwise,
-      // and member access goes through the unchecked record_field_span.
+      // The per-record state of a view: the format's
+      // `trusted_record_state<T>` when it has one (constructed from the
+      // record's span — the one place a record's header is read and
+      // compared with the record — and taken by an overload of
+      // record_field_span); the format's `record_state<T>` otherwise. Both
+      // kinds of view use the same one: they place members the same way.
       template <typename Fmt, storage Store, typename T, typename = void>
       struct record_state_for : record_state<Fmt, T>
       {
       };
-      template <typename Fmt, typename T, typename Enable>
-      struct record_state_for<Fmt, storage::trusted_borrow, T, Enable>
-      {
-         using type = no_record_state;
-         static constexpr bool present = false;
-      };
 #ifndef PSIO_VIEW_NO_RECORD_STATE
-      template <typename Fmt, typename T>
-      struct record_state_for<Fmt, storage::trusted_borrow, T,
+      template <typename Fmt, storage Store, typename T>
+      struct record_state_for<Fmt, Store, T,
                               std::void_t<typename traits<Fmt>::template trusted_record_state<T>>>
       {
          using type = typename traits<Fmt>::template trusted_record_state<T>;
          static constexpr bool present = true;
+      };
+#else
+      // Without per-record state a format that has the placing form of
+      // record_field_span is read through it (field_of).
+      template <typename Fmt, storage Store, typename T>
+      struct record_state_for<Fmt, Store, T,
+                              std::void_t<typename traits<Fmt>::template trusted_record_state<T>>>
+      {
+         using type = no_record_state;
+         static constexpr bool present = false;
       };
 #endif
 
@@ -730,30 +783,27 @@ namespace psio {
 
       view() = default;
       // From a span (the safe view) or psio::trusted (the trusted view).
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
       // Indirect-friendly ctor: the parent vector / record view passes
       // a root span for formats that follow offsets (flatbuf, capnp).
       // Primitives never indirect, so the root is discarded.
-      view(detail::view_source<Store> s, std::span<const char> /*r*/) noexcept
+      view(detail::view_source<Store> s, std::span<const char> /*r*/)
          : data_(detail::view_source_bytes(s))
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
 
-      [[nodiscard]] T get() const noexcept
+      [[nodiscard]] T get() const
       {
-         T out{};
-         if (detail::view_has_scalar<Store, sizeof(T)>(data_))
-            std::memcpy(&out, data_.data(), sizeof(T));
-         return out;
+         return detail::view_scalar<Store, T>(data_);
       }
-      [[nodiscard]] T unpack() const noexcept { return get(); }
+      [[nodiscard]] T unpack() const { return get(); }
       // A scalar view is its value.
-      operator T() const noexcept { return get(); }
+      operator T() const { return get(); }
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
@@ -774,28 +824,28 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
       // Indirect-friendly ctor: same rationale as the primitive view —
       // strings are leaf payloads, so the root span is discarded.
-      view(detail::view_source<Store> s, std::span<const char> /*r*/) noexcept
+      view(detail::view_source<Store> s, std::span<const char> /*r*/)
          : data_(detail::view_source_bytes(s))
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
 
-      [[nodiscard]] std::string_view view_() const noexcept
+      [[nodiscard]] std::string_view view_() const
       {
          return std::string_view{data_.data(), data_.size()};
       }
       // The characters, borrowed. (An owned std::string is unpack().)
-      operator std::string_view() const noexcept { return view_(); }
-      [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
-      [[nodiscard]] bool        empty() const noexcept { return data_.empty(); }
-      [[nodiscard]] const char* data() const noexcept { return data_.data(); }
+      operator std::string_view() const { return view_(); }
+      [[nodiscard]] std::size_t size() const { return data_.size(); }
+      [[nodiscard]] bool        empty() const { return data_.empty(); }
+      [[nodiscard]] const char* data() const { return data_.data(); }
       [[nodiscard]] std::string unpack() const { return std::string{view_()}; }
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
@@ -821,35 +871,35 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept
+      explicit view(detail::view_source<Store> s)
          : data_(detail::view_source_bytes(s)), root_(data_)
       {
       }
-      view(detail::view_source<Store> s, std::span<const char> r) noexcept
+      view(detail::view_source<Store> s, std::span<const char> r)
          : data_(detail::view_source_bytes(s)), root_(r)
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
-      [[nodiscard]] std::span<const char> _psio_root() const noexcept
+      [[nodiscard]] std::span<const char> _psio_root() const
       {
          return root_;
       }
 
-      [[nodiscard]] std::size_t size() const noexcept
+      [[nodiscard]] std::size_t size() const
       {
          return view_layout::count_of<Fmt, Store, T>(data_);
       }
 
-      [[nodiscard]] bool empty() const noexcept { return size() == 0; }
+      [[nodiscard]] bool empty() const { return size() == 0; }
 
       // Element i. Precondition: i < size(). (Past the end the safe view
       // returns an empty view; for the trusted view it is undefined. at(i)
       // is checked in both.)
-      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t i) const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t i) const
       {
          if constexpr (detail::trusted_store_v<Store>)
             PSIO_VIEW_TRUST(i < size(), "operator[] past the end of a list");
@@ -857,14 +907,14 @@ namespace psio {
             detail::view_src<Store>(view_layout::element_of<Fmt, Store, T>(data_, i)), root_};
       }
 
-      [[nodiscard]] view<T, child_format, Store> at(std::size_t i) const noexcept
+      [[nodiscard]] view<T, child_format, Store> at(std::size_t i) const
       {
          return i < size() ? (*this)[i] : view<T, child_format, Store>{};
       }
 
       // Precondition: !empty().
-      [[nodiscard]] view<T, child_format, Store> front() const noexcept { return (*this)[0]; }
-      [[nodiscard]] view<T, child_format, Store> back() const noexcept
+      [[nodiscard]] view<T, child_format, Store> front() const { return (*this)[0]; }
+      [[nodiscard]] view<T, child_format, Store> back() const
       {
          return (*this)[size() - 1];
       }
@@ -873,18 +923,18 @@ namespace psio {
       using const_iterator   = iterator;
       using reverse_iterator = std::reverse_iterator<iterator>;
 
-      [[nodiscard]] iterator begin() const noexcept { return {*this, 0}; }
-      [[nodiscard]] iterator end() const noexcept { return {*this, size()}; }
-      [[nodiscard]] reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
-      [[nodiscard]] reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
+      [[nodiscard]] iterator begin() const { return {*this, 0}; }
+      [[nodiscard]] iterator end() const { return {*this, size()}; }
+      [[nodiscard]] reverse_iterator rbegin() const { return reverse_iterator{end()}; }
+      [[nodiscard]] reverse_iterator rend() const { return reverse_iterator{begin()}; }
 
       // A byte list is its bytes, borrowed.
-      operator std::span<const T>() const noexcept
+      operator std::span<const T>() const
          requires detail::view_byte_v<T>
       {
          return std::span<const T>{data(), data_.size()};
       }
-      [[nodiscard]] const T* data() const noexcept
+      [[nodiscard]] const T* data() const
          requires detail::view_byte_v<T>
       {
          return reinterpret_cast<const T*>(data_.data());
@@ -910,20 +960,20 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(detail::view_source<Store> bytes) noexcept
+      explicit view(detail::view_source<Store> bytes)
          : data_(detail::view_source_bytes(bytes)), root_(data_)
       {
       }
-      view(detail::view_source<Store> bytes, std::span<const char> root) noexcept
+      view(detail::view_source<Store> bytes, std::span<const char> root)
          : data_(detail::view_source_bytes(bytes)), root_(root)
       {
       }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
-      [[nodiscard]] std::span<const char> _psio_root() const noexcept { return root_; }
-      [[nodiscard]] constexpr std::size_t size() const noexcept { return N; }
-      [[nodiscard]] constexpr bool empty() const noexcept { return N == 0; }
+      [[nodiscard]] std::span<const char> _psio_data() const { return data_; }
+      [[nodiscard]] std::span<const char> _psio_root() const { return root_; }
+      [[nodiscard]] constexpr std::size_t size() const { return N; }
+      [[nodiscard]] constexpr bool empty() const { return N == 0; }
       // Element `index`. Precondition: index < N (see the list view).
-      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t index) const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator[](std::size_t index) const
       {
          if constexpr (detail::trusted_store_v<Store>)
             PSIO_VIEW_TRUST(index < N, "operator[] past the end of an array");
@@ -932,34 +982,34 @@ namespace psio {
                view_layout::array_element_of<Fmt, Store, T, N>(data_, index)),
             root_};
       }
-      [[nodiscard]] view<T, child_format, Store> at(std::size_t index) const noexcept
+      [[nodiscard]] view<T, child_format, Store> at(std::size_t index) const
       {
          return index < N ? (*this)[index] : view<T, child_format, Store>{};
       }
       // Precondition: N != 0.
-      [[nodiscard]] view<T, child_format, Store> front() const noexcept { return (*this)[0]; }
-      [[nodiscard]] view<T, child_format, Store> back() const noexcept { return (*this)[N - 1]; }
+      [[nodiscard]] view<T, child_format, Store> front() const { return (*this)[0]; }
+      [[nodiscard]] view<T, child_format, Store> back() const { return (*this)[N - 1]; }
 
       using iterator         = detail::view_iterator<view>;
       using const_iterator   = iterator;
       using reverse_iterator = std::reverse_iterator<iterator>;
-      [[nodiscard]] iterator begin() const noexcept { return {*this, 0}; }
-      [[nodiscard]] iterator end() const noexcept { return {*this, N}; }
-      [[nodiscard]] reverse_iterator rbegin() const noexcept { return reverse_iterator{end()}; }
-      [[nodiscard]] reverse_iterator rend() const noexcept { return reverse_iterator{begin()}; }
+      [[nodiscard]] iterator begin() const { return {*this, 0}; }
+      [[nodiscard]] iterator end() const { return {*this, N}; }
+      [[nodiscard]] reverse_iterator rbegin() const { return reverse_iterator{end()}; }
+      [[nodiscard]] reverse_iterator rend() const { return reverse_iterator{begin()}; }
 
       // A fixed array of bytes is its bytes, borrowed.
-      operator std::span<const T, N>() const noexcept
+      operator std::span<const T, N>() const
          requires detail::view_byte_v<T>
       {
          return std::span<const T, N>{data(), N};
       }
-      operator std::span<const T>() const noexcept
+      operator std::span<const T>() const
          requires (detail::view_byte_v<T> && N != std::dynamic_extent)
       {
          return std::span<const T>{data(), N};
       }
-      [[nodiscard]] const T* data() const noexcept
+      [[nodiscard]] const T* data() const
          requires detail::view_byte_v<T>
       {
          return reinterpret_cast<const T*>(data_.data());
@@ -986,42 +1036,42 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept
+      explicit view(detail::view_source<Store> s)
          : data_(detail::view_source_bytes(s)), root_(data_)
       {
       }
-      view(detail::view_source<Store> s, std::span<const char> root) noexcept
+      view(detail::view_source<Store> s, std::span<const char> root)
          : data_(detail::view_source_bytes(s)), root_(root)
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
 
-      [[nodiscard]] bool has_value() const noexcept
+      [[nodiscard]] bool has_value() const
       {
          return view_layout::optional_has<Fmt, Store, T>(data_);
       }
 
-      [[nodiscard]] explicit operator bool() const noexcept
+      [[nodiscard]] explicit operator bool() const
       {
          return has_value();
       }
 
       // Precondition: has_value(). Returns a view over the payload bytes.
-      [[nodiscard]] view<T, child_format, Store> operator*() const noexcept
+      [[nodiscard]] view<T, child_format, Store> operator*() const
       {
          return view<T, child_format, Store>{
             detail::view_src<Store>(view_layout::optional_payload_of<Fmt, Store, T>(data_)),
             root_};
       }
 
-      [[nodiscard]] view<T, child_format, Store> get() const noexcept { return **this; }
+      [[nodiscard]] view<T, child_format, Store> get() const { return **this; }
 
       // `opt->member()`: the payload's view. Precondition: has_value().
-      [[nodiscard]] detail::arrow_proxy<view<T, child_format, Store>> operator->() const noexcept
+      [[nodiscard]] detail::arrow_proxy<view<T, child_format, Store>> operator->() const
       {
          return {**this};
       }
@@ -1065,21 +1115,21 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept
+      explicit view(detail::view_source<Store> s)
          : data_(detail::view_source_bytes(s)), root_(data_)
       {
       }
-      view(detail::view_source<Store> s, std::span<const char> root) noexcept
+      view(detail::view_source<Store> s, std::span<const char> root)
          : data_(detail::view_source_bytes(s)), root_(root)
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
 
-      [[nodiscard]] std::size_t index() const noexcept
+      [[nodiscard]] std::size_t index() const
       {
          return view_layout::variant_index_of<Fmt, Store, Ts...>(data_);
       }
@@ -1098,7 +1148,7 @@ namespace psio {
       template <std::size_t I>
       [[nodiscard]] std::optional<
          view<std::variant_alternative_t<I, std::variant<Ts...>>, child_format, Store>>
-      get_if() const noexcept
+      get_if() const
       {
          using V = view<std::variant_alternative_t<I, std::variant<Ts...>>, child_format, Store>;
          if (index() != I)
@@ -1110,7 +1160,7 @@ namespace psio {
       // By type: Alt must be exactly one of the alternatives.
       template <typename Alt>
          requires ((std::size_t{std::is_same_v<Alt, Ts>} + ...) == 1)
-      [[nodiscard]] auto get_if() const noexcept
+      [[nodiscard]] auto get_if() const
       {
          constexpr std::size_t I = [] {
             std::size_t i = 0, found = 0;
@@ -1121,7 +1171,7 @@ namespace psio {
       }
       template <typename Alt>
          requires ((std::size_t{std::is_same_v<Alt, Ts>} + ...) == 1)
-      [[nodiscard]] bool holds_alternative() const noexcept
+      [[nodiscard]] bool holds_alternative() const
       {
          return this->template get_if<Alt>().has_value();
       }
@@ -1197,22 +1247,22 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
       // Indirect-friendly ctor — the parent (record / vector / …) view
       // passes a root span used by formats that follow offsets. The
       // adapter view is opaque, so the root is discarded.
-      view(detail::view_source<Store> s, std::span<const char> /*root*/) noexcept
+      view(detail::view_source<Store> s, std::span<const char> /*root*/)
          : data_(detail::view_source_bytes(s))
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return data_;
       }
 
       // Raw bytes of the adapter payload — zero-copy.
-      [[nodiscard]] std::span<const char> bytes() const noexcept
+      [[nodiscard]] std::span<const char> bytes() const
       {
          return data_;
       }
@@ -1299,13 +1349,13 @@ namespace psio {
 
        public:
          record_view_projection() = default;
-         record_view_projection(std::span<const char> s, std::span<const char> r) noexcept
+         record_view_projection(std::span<const char> s, std::span<const char> r)
             : data_(s), root_(r), state_(s)
          {
          }
 
          template <std::size_t N>
-         [[nodiscard]] auto _psio_member() const noexcept
+         [[nodiscard]] auto _psio_member() const
          {
             using FieldT = std::remove_cvref_t<
                typename ::psio::reflect<T>::template member_type<N>>;
@@ -1318,10 +1368,7 @@ namespace psio {
             if constexpr (std::is_arithmetic_v<FieldT>
                           || std::is_same_v<FieldT, bool>)
             {
-               FieldT out{};
-               if (detail::view_has_scalar<Store, sizeof(FieldT)>(field_span))
-                  std::memcpy(&out, field_span.data(), sizeof(FieldT));
-               return out;
+               return detail::view_scalar<Store, FieldT>(field_span);
             }
             else
             {
@@ -1333,7 +1380,7 @@ namespace psio {
          // The projection reflect<T>::proxy calls: member I, named by its
          // member pointer.
          template <std::size_t I, auto MemberPtr>
-         [[nodiscard]] auto get() const noexcept
+         [[nodiscard]] auto get() const
          {
             return this->template _psio_member<I>();
          }
@@ -1374,20 +1421,26 @@ namespace psio {
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept
-         : base(projection{detail::view_source_bytes(s), detail::view_source_bytes(s)})
+      // Over the caller's bytes. (No bytes at all are still bytes — a row
+      // of size zero — and not a view of nothing: only `view()` is that.)
+      explicit view(detail::view_source<Store> s)
+         : base(reflect<T>::member_count == 0
+                   // (A record without members is no bytes: nothing to place.)
+                   ? projection{detail::view_source_bytes(s), detail::view_source_bytes(s)}
+                   : projection{detail::view_given_bytes(detail::view_source_bytes(s)),
+                                detail::view_given_bytes(detail::view_source_bytes(s))})
       {
       }
-      view(detail::view_source<Store> s, std::span<const char> r) noexcept
+      view(detail::view_source<Store> s, std::span<const char> r)
          : base(projection{detail::view_source_bytes(s), r})
       {
       }
 
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const
       {
          return this->projection::data_;
       }
-      [[nodiscard]] std::span<const char> _psio_root() const noexcept
+      [[nodiscard]] std::span<const char> _psio_root() const
       {
          return this->projection::root_;
       }
@@ -1395,7 +1448,7 @@ namespace psio {
       // Member N: its value for an arithmetic member, its view otherwise.
       // The named accessor of the member returns the same.
       template <std::size_t N>
-      [[nodiscard]] auto get() const noexcept
+      [[nodiscard]] auto get() const
       {
          return this->projection::template _psio_member<N>();
       }
@@ -1408,20 +1461,20 @@ namespace psio {
 
    template <typename T, typename Fmt, storage S>
       requires requires(const view<T, Fmt, S>& v) { v._psio_data(); }
-   [[nodiscard]] std::span<const char> bytes(const view<T, Fmt, S>& v) noexcept
+   [[nodiscard]] std::span<const char> bytes(const view<T, Fmt, S>& v)
    {
       return v._psio_data();
    }
 
    template <typename T, typename Fmt, storage S>
       requires requires(const view<T, Fmt, S>& v) { v._psio_data(); }
-   [[nodiscard]] std::size_t size(const view<T, Fmt, S>& v) noexcept
+   [[nodiscard]] std::size_t size(const view<T, Fmt, S>& v)
    {
       return v._psio_data().size();
    }
 
    template <typename T, typename Fmt, storage S>
-   [[nodiscard]] constexpr Fmt format_of(const view<T, Fmt, S>&) noexcept
+   [[nodiscard]] constexpr Fmt format_of(const view<T, Fmt, S>&)
    {
       return {};
    }
@@ -1485,7 +1538,7 @@ namespace psio {
       // nor tuple-like (a std::optional counting as what it holds); true
       // for every other pair, for which the comparison itself is the test.
       template <typename R, typename U>
-      consteval bool comparison_operand() noexcept
+      consteval bool comparison_operand()
       {
          if constexpr (cmp_optional<R>)
          {
@@ -1553,17 +1606,17 @@ namespace psio {
 
    // get_if<Alt>(variant_view) / get_if<I>(variant_view), found by ADL.
    template <typename Alt, typename... Ts, typename Fmt, storage Store>
-   [[nodiscard]] auto get_if(const view<std::variant<Ts...>, Fmt, Store>& v) noexcept
+   [[nodiscard]] auto get_if(const view<std::variant<Ts...>, Fmt, Store>& v)
    {
       return v.template get_if<Alt>();
    }
    template <std::size_t I, typename... Ts, typename Fmt, storage Store>
-   [[nodiscard]] auto get_if(const view<std::variant<Ts...>, Fmt, Store>& v) noexcept
+   [[nodiscard]] auto get_if(const view<std::variant<Ts...>, Fmt, Store>& v)
    {
       return v.template get_if<I>();
    }
    template <typename Alt, typename... Ts, typename Fmt, storage Store>
-   [[nodiscard]] bool holds_alternative(const view<std::variant<Ts...>, Fmt, Store>& v) noexcept
+   [[nodiscard]] bool holds_alternative(const view<std::variant<Ts...>, Fmt, Store>& v)
    {
       return v.template holds_alternative<Alt>();
    }
@@ -1580,7 +1633,7 @@ namespace psio {
    // viewed as: buffer.hpp buffer_view_format.)
    template <typename T, typename Fmt, storage S>
    [[nodiscard]] view<T, detail::buffer_view_format_t<Fmt, T>, storage::const_borrow>
-   as_view(const buffer<T, Fmt, S>& b) noexcept
+   as_view(const buffer<T, Fmt, S>& b)
    {
       return view<T, detail::buffer_view_format_t<Fmt, T>, storage::const_borrow>{bytes(b)};
    }
@@ -1618,18 +1671,18 @@ namespace psio {
     public:
 
       checked_view() = default;
-      explicit checked_view(codec_status status) noexcept : status_(std::move(status)) {}
+      explicit checked_view(codec_status status) : status_(std::move(status)) {}
       // Bytes that have just validated.
-      explicit checked_view(trusted bytes) noexcept : view_(bytes) {}
+      explicit checked_view(trusted bytes) : view_(bytes) {}
 
-      [[nodiscard]] bool ok() const noexcept { return status_.ok(); }
-      explicit           operator bool() const noexcept { return ok(); }
-      [[nodiscard]] const codec_error& error() const noexcept { return status_.error(); }
-      [[nodiscard]] codec_status status() && noexcept { return std::move(status_); }
+      [[nodiscard]] bool ok() const { return status_.ok(); }
+      explicit           operator bool() const { return ok(); }
+      [[nodiscard]] const codec_error& error() const { return status_.error(); }
+      [[nodiscard]] codec_status status() && { return std::move(status_); }
 
-      [[nodiscard]] view_type view() const noexcept { return view_; }
-      [[nodiscard]] view_type operator*() const noexcept { return view_; }
-      [[nodiscard]] detail::arrow_proxy<view_type> operator->() const noexcept { return {view_}; }
+      [[nodiscard]] view_type view() const { return view_; }
+      [[nodiscard]] view_type operator*() const { return view_; }
+      [[nodiscard]] detail::arrow_proxy<view_type> operator->() const { return {view_}; }
       [[nodiscard]] view_type value() const
       {
          if (!ok())

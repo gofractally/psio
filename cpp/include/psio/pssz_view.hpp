@@ -25,15 +25,14 @@
 // All three composite view templates from psio/view.hpp are written
 // once and reused here; this header only plugs in the wire policy.
 //
-// Each function has two forms (view.hpp "Safe and trusted views"): the
-// checked one, which the safe view (`psio::pssz_view<T>`) calls and which
-// compares every offset it reads before using it, and the unchecked one
-// (trailing `view_layout::unchecked_t`, or the trusted per-record state),
-// which the trusted view (`psio::pssz_trusted_view<T>`) calls on bytes that
-// are a valid encoding. The unchecked forms never consult the size of a
-// span unless the answer depends on it (a list's count, the end of the last
-// variable member, a length-disambiguated optional), so the end of a
-// sub-view that is only navigated through is never worked out.
+// Each function has two forms (view.hpp "Safe and trusted views"). The
+// PLACING form (trailing `view_layout::unchecked_t`, or the per-record
+// state `trusted_record_state`) is what a view of either kind calls
+// (`psio::pssz_view<T>`, `psio::pssz_trusted_view<T>`): it compares each
+// offset with the bytes where it reads it (PSIO_VIEW_TRUST) and fails —
+// psio::codec_abort — on a member it cannot place. The other form returns
+// an empty span instead; the mutable view and the code that walks bytes
+// without a view use it.
 
 #include <psio/pssz.hpp>
 #include <psio/view.hpp>
@@ -150,7 +149,7 @@ namespace psio::view_layout {
 
       // ── vector ─────────────────────────────────────────────────────────
       template <std::size_t W, typename T>
-      constexpr std::size_t vector_count(std::span<const char> s) noexcept
+      constexpr std::size_t vector_count(std::span<const char> s)
       {
          if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
          {
@@ -179,7 +178,7 @@ namespace psio::view_layout {
 
       template <std::size_t W, typename T>
       std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
          {
@@ -223,10 +222,20 @@ namespace psio::view_layout {
       // The unchecked forms (trusted view).
       template <std::size_t W, typename T>
       [[gnu::always_inline]] inline std::size_t vector_count(std::span<const char> s,
-                                                             unchecked_t) noexcept
+                                                             unchecked_t)
       {
          if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
-            return vector_count<W, T>(s);
+         {
+            constexpr std::size_t esz = ::psio::detail::pssz_impl::fixed_size_of<T>();
+            if constexpr (esz == 0)
+               return 0;
+            else
+            {
+               PSIO_VIEW_TRUST(s.size() % esz == 0,
+                               "the span of a list is not a multiple of its element size");
+               return s.size() / esz;
+            }
+         }
          else
          {
             // An empty list is zero bytes (and so is a view of nothing).
@@ -241,13 +250,19 @@ namespace psio::view_layout {
 
       template <std::size_t W, typename T>
       [[gnu::always_inline]] inline std::span<const char> vector_element_span(
-         std::span<const char> s, std::size_t i, unchecked_t) noexcept
+         std::span<const char> s, std::size_t i, unchecked_t)
       {
          if constexpr (::psio::detail::pssz_impl::is_fixed_v<T>)
          {
             constexpr std::size_t esz = ::psio::detail::pssz_impl::fixed_size_of<T>();
-            PSIO_VIEW_TRUST(i * esz + esz <= s.size(), "a list element lies past the list");
-            return {s.data() + i * esz, esz};
+            if constexpr (esz == 0)
+               return {s.data(), 0};
+            else
+            {
+               // (Not `i * esz + esz <= size`: that wraps for a large index.)
+               PSIO_VIEW_TRUST(i < s.size() / esz, "a list element lies past the list");
+               return {s.data() + i * esz, esz};
+            }
          }
          else
          {
@@ -255,7 +270,7 @@ namespace psio::view_layout {
             PSIO_VIEW_TRUST(s.size() >= W, "a list is shorter than its first offset");
             // The offset table ends where the first element begins.
             const std::size_t table = read_offset<W>(s, 0);
-            PSIO_VIEW_TRUST(table <= s.size() && (i + 1) * W <= table,
+            PSIO_VIEW_TRUST(table <= s.size() && i < table / W,
                             "a list element lies past the offset table");
             const std::size_t start = read_offset<W>(s, i * W);
             const std::size_t stop =
@@ -273,7 +288,7 @@ namespace psio::view_layout {
       //   min(V) > 0  — no selector. Empty span = None; otherwise Some.
       //   min(V) == 0 — [u8 selector][payload if selector != 0].
       template <typename T>
-      bool optional_has_value(std::span<const char> s) noexcept
+      bool optional_has_value(std::span<const char> s)
       {
          using V = typename T::value_type;
          if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
@@ -288,7 +303,7 @@ namespace psio::view_layout {
 
       template <typename T>
       std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          using V = typename T::value_type;
          if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
@@ -301,7 +316,7 @@ namespace psio::view_layout {
       // constructed, `at(i)` past the end) has a null span.
       template <typename T>
       [[gnu::always_inline]] inline bool optional_has_value(std::span<const char> s,
-                                                            unchecked_t) noexcept
+                                                            unchecked_t)
       {
          using V = typename T::value_type;
          if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
@@ -317,11 +332,12 @@ namespace psio::view_layout {
 
       template <typename T>
       [[gnu::always_inline]] inline std::span<const char> optional_payload_span(
-         std::span<const char> s, unchecked_t) noexcept
+         std::span<const char> s, unchecked_t)
       {
          using V = typename T::value_type;
          if constexpr (!::psio::detail::pssz_impl::optional_uses_selector_v<V>)
-            return s;
+            // (No bytes is None: its payload is a view of nothing.)
+            return s.empty() ? std::span<const char>{} : s;
          else
          {
             if (s.data() == nullptr)
@@ -353,8 +369,8 @@ namespace psio::view_layout {
          // when the header was examined on each access.
          std::size_t fixed = no_record;
 
-         constexpr record_state() noexcept = default;
-         explicit record_state(std::span<const char> bytes) noexcept
+         constexpr record_state() = default;
+         explicit record_state(std::span<const char> bytes)
          {
             using namespace ::psio::detail::pssz_impl;
             constexpr auto fields = record_layout<W, T>(
@@ -379,13 +395,13 @@ namespace psio::view_layout {
 
       template <std::size_t W, typename T, std::size_t N>
       std::span<const char> record_field_span_in(std::span<const char> bytes,
-                                                 std::size_t           fixed_size) noexcept;
+                                                 std::size_t           fixed_size);
 
       // Member N given the record's state (the record's bytes include its
       // header).
       template <std::size_t W, typename T, std::size_t N>
       [[gnu::always_inline]] inline std::span<const char> record_field_span(
-         std::span<const char> bytes, const record_state<W, T>& state) noexcept
+         std::span<const char> bytes, const record_state<W, T>& state)
       {
          if (state.fixed == no_record) return {};
          if constexpr (!::psio::is_dwnc_v<T>)
@@ -394,7 +410,7 @@ namespace psio::view_layout {
       }
 
       template <std::size_t W, typename T, std::size_t N>
-      std::span<const char> record_field_span(std::span<const char> bytes) noexcept
+      std::span<const char> record_field_span(std::span<const char> bytes)
       {
          return record_field_span<W, T, N>(bytes, record_state<W, T>{bytes});
       }
@@ -402,7 +418,7 @@ namespace psio::view_layout {
       // `bytes`: the record after its header; `fixed_size` <= bytes.size().
       template <std::size_t W, typename T, std::size_t N>
       [[gnu::always_inline]] inline std::span<const char> record_field_span_in(
-         std::span<const char> bytes, const std::size_t fixed_size) noexcept
+         std::span<const char> bytes, const std::size_t fixed_size)
       {
          using namespace ::psio::detail::pssz_impl;
          constexpr auto fields = record_layout<W, T>(
@@ -471,8 +487,8 @@ namespace psio::view_layout {
       {
          std::size_t fixed = 0;
 
-         constexpr trusted_record_state() noexcept = default;
-         [[gnu::always_inline]] explicit trusted_record_state(std::span<const char> bytes) noexcept
+         constexpr trusted_record_state() = default;
+         [[gnu::always_inline]] explicit trusted_record_state(std::span<const char> bytes)
          {
             using namespace ::psio::detail::pssz_impl;
             if (bytes.data() == nullptr)
@@ -491,10 +507,23 @@ namespace psio::view_layout {
             }
             else
             {
+               constexpr auto fields = record_layout<W, T>(
+                  std::make_index_sequence<record_traits<T>::member_count>{});
+               // The fixed region of the members every writer writes.
+               constexpr auto required_size = [&] {
+                  std::size_t n = 0;
+                  for (std::size_t i = 0; i < required_field_count<T>(); ++i)
+                     n += fields[i].fixed_size;
+                  return n;
+               }();
                PSIO_VIEW_TRUST(bytes.size() >= W, "a record has no header");
                fixed = read_offset<W>(bytes, 0);
                PSIO_VIEW_TRUST(fixed <= bytes.size() - W,
                                "a record's header announces more than the record holds");
+               // Checked here, once: a required member is then read with
+               // no compare at all.
+               PSIO_VIEW_TRUST(fixed >= required_size,
+                               "a record's header omits a required member");
             }
          }
       };
@@ -510,7 +539,7 @@ namespace psio::view_layout {
       // view of nothing.
       template <std::size_t W, typename T, std::size_t N>
       [[gnu::always_inline]] inline std::span<const char> record_field_span(
-         std::span<const char> bytes, const trusted_record_state<W, T>& state) noexcept
+         std::span<const char> bytes, const trusted_record_state<W, T>& state)
       {
          using namespace ::psio::detail::pssz_impl;
          constexpr auto fields = record_layout<W, T>(
@@ -546,10 +575,10 @@ namespace psio::view_layout {
          const std::size_t     fixed_size = state.fixed;
          if constexpr (N < written)
          {
+            // (The state's constructor compared the header with the fixed
+            // region of the required members.)
             if (bytes.data() == nullptr)
                return {};
-            PSIO_VIEW_TRUST(fixed_off + fields[N].fixed_size <= fixed_size,
-                            "a record's header omits a required member");
          }
          else if (fixed_off + fields[N].fixed_size > fixed_size)
          {
@@ -599,13 +628,13 @@ namespace psio::view_layout {
 
       template <std::size_t W, typename T, std::size_t N>
       [[gnu::always_inline]] inline std::span<const char> record_field_span(
-         std::span<const char> bytes, unchecked_t) noexcept
+         std::span<const char> bytes, unchecked_t)
       {
          return record_field_span<W, T, N>(bytes, trusted_record_state<W, T>{bytes});
       }
 
       // ── variant ────────────────────────────────────────────────────────
-      inline std::size_t variant_index(std::span<const char> s) noexcept
+      inline std::size_t variant_index(std::span<const char> s)
       {
          if (s.empty())
             return 0;
@@ -614,14 +643,14 @@ namespace psio::view_layout {
       }
 
       inline std::span<const char>
-      variant_payload_span(std::span<const char> s) noexcept
+      variant_payload_span(std::span<const char> s)
       {
          return s.empty() ? std::span<const char>{} : s.subspan(1);
       }
 
       // The unchecked forms (trusted view).
       [[gnu::always_inline]] inline std::size_t variant_index(std::span<const char> s,
-                                                              unchecked_t) noexcept
+                                                              unchecked_t)
       {
          if (s.data() == nullptr)
             return 0;
@@ -630,7 +659,7 @@ namespace psio::view_layout {
       }
 
       [[gnu::always_inline]] inline std::span<const char> variant_payload_span(
-         std::span<const char> s, unchecked_t) noexcept
+         std::span<const char> s, unchecked_t)
       {
          if (s.data() == nullptr)
             return {};
@@ -650,7 +679,7 @@ namespace psio::view_layout {
    template <typename T, std::size_t N>                                                    \
    static std::span<const char> record_field_span(                                         \
       std::span<const char> s, std::span<const char>,                                      \
-      const trusted_record_state<T>& state) noexcept                                       \
+      const trusted_record_state<T>& state)                                       \
    {                                                                                       \
       return detail_pssz::record_field_span<PSIO_W(T), T, N>(s, state);                    \
    }                                                                                       \
@@ -658,24 +687,24 @@ namespace psio::view_layout {
       requires (::psio::detail::pssz_impl::Record<T> &&                                    \
                 N < ::psio::detail::pssz_impl::record_traits<T>::member_count)             \
    static std::span<const char> record_field_span(                                         \
-      std::span<const char> s, std::span<const char>, unchecked_t) noexcept                \
+      std::span<const char> s, std::span<const char>, unchecked_t)                \
    {                                                                                       \
       return detail_pssz::record_field_span<PSIO_W(T), T, N>(s, unchecked);                \
    }                                                                                       \
    template <typename T>                                                                   \
-   static std::size_t vector_count(std::span<const char> s, unchecked_t) noexcept          \
+   static std::size_t vector_count(std::span<const char> s, unchecked_t)          \
    {                                                                                       \
       return detail_pssz::vector_count<PSIO_W(std::vector<T>), T>(s, unchecked);           \
    }                                                                                       \
    template <typename T>                                                                   \
    static std::span<const char> vector_element_span(std::span<const char> s, std::size_t i, \
-                                                    unchecked_t) noexcept                  \
+                                                    unchecked_t)                  \
    {                                                                                       \
       return detail_pssz::vector_element_span<PSIO_W(std::vector<T>), T>(s, i, unchecked); \
    }                                                                                       \
    template <typename T, std::size_t N>                                                    \
    static std::span<const char> array_element_span(std::span<const char> s, std::size_t i, \
-                                                   unchecked_t) noexcept                   \
+                                                   unchecked_t)                   \
    {                                                                                       \
       /* (An array always has N elements: a view of nothing has N empty ones.) */          \
       if (s.data() == nullptr)                                                             \
@@ -683,24 +712,24 @@ namespace psio::view_layout {
       return detail_pssz::vector_element_span<PSIO_W(std::array<T, N>), T>(s, i, unchecked); \
    }                                                                                       \
    template <typename T>                                                                   \
-   static bool optional_has_value(std::span<const char> s, unchecked_t) noexcept           \
+   static bool optional_has_value(std::span<const char> s, unchecked_t)           \
    {                                                                                       \
       return detail_pssz::optional_has_value<std::optional<T>>(s, unchecked);              \
    }                                                                                       \
    template <typename T>                                                                   \
    static std::span<const char> optional_payload_span(std::span<const char> s,             \
-                                                      unchecked_t) noexcept                \
+                                                      unchecked_t)                \
    {                                                                                       \
       return detail_pssz::optional_payload_span<std::optional<T>>(s, unchecked);           \
    }                                                                                       \
    template <typename... Ts>                                                               \
-   static std::size_t variant_index(std::span<const char> s, unchecked_t) noexcept         \
+   static std::size_t variant_index(std::span<const char> s, unchecked_t)         \
    {                                                                                       \
       return detail_pssz::variant_index(s, unchecked);                                     \
    }                                                                                       \
    template <typename... Ts>                                                               \
    static std::span<const char> variant_payload_span(std::span<const char> s,              \
-                                                     unchecked_t) noexcept                 \
+                                                     unchecked_t)                 \
    {                                                                                       \
       return detail_pssz::variant_payload_span(s, unchecked);                              \
    }
@@ -720,57 +749,57 @@ namespace psio::view_layout {
          requires (::psio::detail::pssz_impl::Record<T> &&
                    N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char> = {}) noexcept
+         std::span<const char> s, std::span<const char> = {})
       { return detail_pssz::record_field_span<W, T, N>(s); }
       template <typename T>
          requires ::psio::detail::pssz_impl::Record<T>
       using record_state = detail_pssz::record_state<W, T>;
       template <typename T, std::size_t N>
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+         std::span<const char> s, std::span<const char>, const record_state<T>& state)
       { return detail_pssz::record_field_span<W, T, N>(s, state); }
 
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s) noexcept
+      static std::size_t vector_count(std::span<const char> s)
       {
          return detail_pssz::vector_count<W, T>(s);
       }
 
       template <typename T>
       static std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 
       template <typename T, std::size_t N>
-      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i)
       {
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 
       template <typename T>
-      static bool optional_has_value(std::span<const char> s) noexcept
+      static bool optional_has_value(std::span<const char> s)
       {
          return detail_pssz::optional_has_value<std::optional<T>>(s);
       }
 
       template <typename T>
       static std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          return detail_pssz::optional_payload_span<std::optional<T>>(s);
       }
 
       template <typename... Ts>
-      static std::size_t variant_index(std::span<const char> s) noexcept
+      static std::size_t variant_index(std::span<const char> s)
       {
          return detail_pssz::variant_index(s);
       }
 
       template <typename... Ts>
       static std::span<const char>
-      variant_payload_span(std::span<const char> s) noexcept
+      variant_payload_span(std::span<const char> s)
       {
          return detail_pssz::variant_payload_span(s);
       }
@@ -805,7 +834,7 @@ namespace psio::view_layout {
          requires (::psio::detail::pssz_impl::Record<T> &&
                    N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char> = {}) noexcept
+         std::span<const char> s, std::span<const char> = {})
       {
          return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s);
       }
@@ -814,7 +843,7 @@ namespace psio::view_layout {
       using record_state = detail_pssz::record_state<::psio::auto_pssz_width_v<T>, T>;
       template <typename T, std::size_t N>
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+         std::span<const char> s, std::span<const char>, const record_state<T>& state)
       {
          return detail_pssz::record_field_span<::psio::auto_pssz_width_v<T>, T, N>(s, state);
       }
@@ -831,7 +860,7 @@ namespace psio::view_layout {
          ::psio::detail::pssz_impl::field_ann<T, ::psio::detail::pssz_impl::no_ann, N>>;
 
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s) noexcept
+      static std::size_t vector_count(std::span<const char> s)
       {
          constexpr std::size_t W =
             ::psio::auto_pssz_width_v<std::vector<T>>;
@@ -840,7 +869,7 @@ namespace psio::view_layout {
 
       template <typename T>
       static std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          constexpr std::size_t W =
             ::psio::auto_pssz_width_v<std::vector<T>>;
@@ -850,34 +879,34 @@ namespace psio::view_layout {
       // A fixed-count array owns its own logical width, which can differ
       // from a vector of the same element type.
       template <typename T, std::size_t N>
-      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i)
       {
          constexpr auto W = ::psio::auto_pssz_width_v<std::array<T, N>>;
          return detail_pssz::vector_element_span<W, T>(s, i);
       }
 
       template <typename T>
-      static bool optional_has_value(std::span<const char> s) noexcept
+      static bool optional_has_value(std::span<const char> s)
       {
          return detail_pssz::optional_has_value<std::optional<T>>(s);
       }
 
       template <typename T>
       static std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          return detail_pssz::optional_payload_span<std::optional<T>>(s);
       }
 
       template <typename... Ts>
-      static std::size_t variant_index(std::span<const char> s) noexcept
+      static std::size_t variant_index(std::span<const char> s)
       {
          return detail_pssz::variant_index(s);
       }
 
       template <typename... Ts>
       static std::span<const char>
-      variant_payload_span(std::span<const char> s) noexcept
+      variant_payload_span(std::span<const char> s)
       {
          return detail_pssz::variant_payload_span(s);
       }
@@ -914,7 +943,7 @@ namespace psio::view_layout {
          requires (::psio::detail::pssz_impl::Record<T> &&
                    N < ::psio::detail::pssz_impl::record_traits<T>::member_count)
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char> = {}) noexcept
+         std::span<const char> s, std::span<const char> = {})
       {
          return detail_pssz::record_field_span<width<T>, T, N>(s);
       }
@@ -923,7 +952,7 @@ namespace psio::view_layout {
       using record_state = detail_pssz::record_state<width<T>, T>;
       template <typename T, std::size_t N>
       static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char>, const record_state<T>& state) noexcept
+         std::span<const char> s, std::span<const char>, const record_state<T>& state)
       {
          return detail_pssz::record_field_span<width<T>, T, N>(s, state);
       }
@@ -974,40 +1003,40 @@ namespace psio::view_layout {
       using nested_format = typename nested_format_of<Parent>::type;
 
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s) noexcept
+      static std::size_t vector_count(std::span<const char> s)
       {
          return detail_pssz::vector_count<width<std::vector<T>>, T>(s);
       }
       template <typename T>
       static std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          return detail_pssz::vector_element_span<width<std::vector<T>>, T>(s, i);
       }
       template <typename T, std::size_t N>
-      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i) noexcept
+      static std::span<const char> array_element_span(std::span<const char> s, std::size_t i)
       {
          return detail_pssz::vector_element_span<width<std::array<T, N>>, T>(s, i);
       }
       template <typename T>
-      static bool optional_has_value(std::span<const char> s) noexcept
+      static bool optional_has_value(std::span<const char> s)
       {
          return detail_pssz::optional_has_value<std::optional<T>>(s);
       }
       template <typename T>
       static std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          return detail_pssz::optional_payload_span<std::optional<T>>(s);
       }
       template <typename... Ts>
-      static std::size_t variant_index(std::span<const char> s) noexcept
+      static std::size_t variant_index(std::span<const char> s)
       {
          return detail_pssz::variant_index(s);
       }
       template <typename... Ts>
       static std::span<const char>
-      variant_payload_span(std::span<const char> s) noexcept
+      variant_payload_span(std::span<const char> s)
       {
          return detail_pssz::variant_payload_span(s);
       }
@@ -1067,15 +1096,15 @@ namespace psio {
          static constexpr storage storage_kind = Store;
          static_assert(sizeof(detail::read_view_store<Store>) > 0);
          tuple_view() = default;
-         explicit tuple_view(view_source<Store> s) noexcept : data_(view_source_bytes(s)) {}
-         tuple_view(view_source<Store> s, std::span<const char>) noexcept
+         explicit tuple_view(view_source<Store> s) : data_(view_source_bytes(s)) {}
+         tuple_view(view_source<Store> s, std::span<const char>)
             : data_(view_source_bytes(s))
          {
          }
-         std::span<const char> _psio_data() const noexcept { return data_; }
+         std::span<const char> _psio_data() const { return data_; }
          // Element N: its value for an arithmetic element, its view
          // otherwise. Structured bindings work: `auto [a, b] = tuple_view;`.
-         template <std::size_t N> auto get() const noexcept
+         template <std::size_t N> auto get() const
          {
             using F = std::remove_cvref_t<std::tuple_element_t<N, Tuple>>;
             auto span = view_layout::field_of<Fmt, Store, Tuple, N>(data_, {});
@@ -1145,9 +1174,9 @@ namespace psio {
       using element_type = std::pair<A, B>;
       using format_type  = Fmt;
       using base::base;
-      auto first() const noexcept { return this->template get<0>(); }
-      auto second() const noexcept { return this->template get<1>(); }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      auto first() const { return this->template get<0>(); }
+      auto second() const { return this->template get<1>(); }
+      [[nodiscard]] std::span<const char> _psio_data() const { return base::_psio_data(); }
       static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
       PSIO_VIEW_TO_SAFE_(_psio_data())
@@ -1176,7 +1205,7 @@ namespace psio {
          std::is_integral_v<key_type> && !std::is_same_v<key_type, char>;
 
       // The key of entry i, as a view (or a value for an arithmetic key).
-      [[nodiscard]] auto key_at(std::size_t i) const noexcept
+      [[nodiscard]] auto key_at(std::size_t i) const
       {
          if constexpr (detail::is_map_v<M>)
             return (*this)[i].template get<0>();
@@ -1188,7 +1217,7 @@ namespace psio {
       using element_type = M;
       using format_type  = Fmt;
       using base::base;
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      [[nodiscard]] std::span<const char> _psio_data() const { return base::_psio_data(); }
 
       // ── Lookup ─────────────────────────────────────────────────────────
       //
@@ -1313,19 +1342,19 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
-      view(detail::view_source<Store> s, std::span<const char>) noexcept
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>)
          : data_(detail::view_source_bytes(s))
       {
       }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
-      [[nodiscard]] std::string_view view_() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const { return data_; }
+      [[nodiscard]] std::string_view view_() const
       {
          return std::string_view{data_.data(), data_.size()};
       }
-      operator std::string_view() const noexcept { return view_(); }
-      [[nodiscard]] std::size_t size() const noexcept { return data_.size(); }
-      [[nodiscard]] bool        empty() const noexcept { return data_.empty(); }
+      operator std::string_view() const { return view_(); }
+      [[nodiscard]] std::size_t size() const { return data_.size(); }
+      [[nodiscard]] bool        empty() const { return data_.empty(); }
       PSIO_VIEW_UNPACK_
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
@@ -1344,21 +1373,21 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
-      view(detail::view_source<Store> s, std::span<const char>) noexcept
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>)
          : data_(detail::view_source_bytes(s))
       {
       }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
-      [[nodiscard]] T get() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const { return data_; }
+      [[nodiscard]] T get() const
       {
          std::underlying_type_t<T> raw{};
          if (detail::view_has_scalar<Store, sizeof(raw)>(data_))
             std::memcpy(&raw, data_.data(), sizeof(raw));
          return static_cast<T>(raw);
       }
-      [[nodiscard]] T unpack() const noexcept { return get(); }
-      operator T() const noexcept { return get(); }
+      [[nodiscard]] T unpack() const { return get(); }
+      operator T() const { return get(); }
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
@@ -1375,21 +1404,21 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
-      view(detail::view_source<Store> s, std::span<const char>) noexcept
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>)
          : data_(detail::view_source_bytes(s))
       {
       }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
-      [[nodiscard]] T get() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const { return data_; }
+      [[nodiscard]] T get() const
       {
          ::psio::time_rep_t<T> raw{};
          if (detail::view_has_scalar<Store, sizeof(raw)>(data_))
             std::memcpy(&raw, data_.data(), sizeof(raw));
          return ::psio::time_from_ticks<T>(raw);
       }
-      [[nodiscard]] T unpack() const noexcept { return get(); }
-      operator T() const noexcept { return get(); }
+      [[nodiscard]] T unpack() const { return get(); }
+      operator T() const { return get(); }
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
@@ -1406,21 +1435,21 @@ namespace psio {
       static constexpr storage storage_kind = Store;
       static_assert(sizeof(detail::read_view_store<Store>) > 0);
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
-      view(detail::view_source<Store> s, std::span<const char>) noexcept
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>)
          : data_(detail::view_source_bytes(s))
       {
       }
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
-      [[nodiscard]] uint256 get() const noexcept
+      [[nodiscard]] std::span<const char> _psio_data() const { return data_; }
+      [[nodiscard]] uint256 get() const
       {
          uint256 out{};
          if (detail::view_has_scalar<Store, sizeof(out.limb)>(data_))
             std::memcpy(out.limb, data_.data(), sizeof(out.limb));
          return out;
       }
-      [[nodiscard]] uint256 unpack() const noexcept { return get(); }
-      operator uint256() const noexcept { return get(); }
+      [[nodiscard]] uint256 unpack() const { return get(); }
+      operator uint256() const { return get(); }
       PSIO_VIEW_TO_SAFE_(_psio_data())
    };
 
@@ -1449,8 +1478,8 @@ namespace psio {
       using format_type  = Fmt;
       using base::base;
       view() = default;
-      view(const base& inner) noexcept : base(inner) {}
-      [[nodiscard]] std::span<const char> _psio_data() const noexcept { return base::_psio_data(); }
+      view(const base& inner) : base(inner) {}
+      [[nodiscard]] std::span<const char> _psio_data() const { return base::_psio_data(); }
       static constexpr storage storage_kind = Store;
       PSIO_VIEW_UNPACK_
       PSIO_VIEW_TO_SAFE_(_psio_data())

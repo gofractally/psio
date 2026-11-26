@@ -70,7 +70,7 @@ namespace psio::view_layout {
       // canonical_size<T> elements.  count = size/elem_size; element span
       // is a fixed-size sub-slice.
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s) noexcept
+      static std::size_t vector_count(std::span<const char> s)
       {
          constexpr std::size_t esz =
             ::psio::detail::wit_impl::canonical_size<T>();
@@ -82,7 +82,7 @@ namespace psio::view_layout {
 
       template <typename T>
       static std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          constexpr std::size_t esz =
             ::psio::detail::wit_impl::canonical_size<T>();
@@ -94,10 +94,10 @@ namespace psio::view_layout {
       // The unchecked form (trusted view).
       template <typename T>
       [[gnu::always_inline]] static std::span<const char> vector_element_span(
-         std::span<const char> s, std::size_t i, unchecked_t) noexcept
+         std::span<const char> s, std::size_t i, unchecked_t)
       {
          constexpr std::size_t esz = ::psio::detail::wit_impl::canonical_size<T>();
-         PSIO_VIEW_TRUST(i * esz + esz <= s.size(), "a list element lies past the list");
+         PSIO_VIEW_TRUST(esz != 0 && i < s.size() / esz, "a list element lies past the list");
          return {s.data() + i * esz, esz};
       }
 
@@ -106,7 +106,7 @@ namespace psio::view_layout {
       // Canonical-ABI option<T>: [u8 discriminator][padding to align<T>]
       // [canonical_size<T> payload].  No heap-pointer-follow.
       template <typename T>
-      static bool optional_has_value(std::span<const char> s) noexcept
+      static bool optional_has_value(std::span<const char> s)
       {
          if (s.empty())
             return false;
@@ -115,7 +115,7 @@ namespace psio::view_layout {
 
       template <typename T>
       static std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          constexpr std::size_t align =
             ::psio::detail::wit_impl::canonical_align<T>();
@@ -128,7 +128,7 @@ namespace psio::view_layout {
       // The unchecked forms (trusted view). A view of nothing (default-
       // constructed, `at(i)` past the end) has a null span.
       template <typename T>
-      static bool optional_has_value(std::span<const char> s, unchecked_t) noexcept
+      static bool optional_has_value(std::span<const char> s, unchecked_t)
       {
          if (s.data() == nullptr)
             return false;
@@ -137,7 +137,7 @@ namespace psio::view_layout {
       }
       template <typename T>
       static std::span<const char> optional_payload_span(std::span<const char> s,
-                                                         unchecked_t) noexcept
+                                                         unchecked_t)
       {
          constexpr std::size_t align = ::psio::detail::wit_impl::canonical_align<T>();
          constexpr std::size_t payload_off = align == 0 ? 1 : align;
@@ -159,7 +159,7 @@ namespace psio::view_layout {
                   && (N < ::psio::reflect<T>::member_count)
       static std::span<const char>
       record_field_span(std::span<const char> s,
-                        std::span<const char> root = {}) noexcept
+                        std::span<const char> root = {})
       {
          using R      = ::psio::reflect<T>;
          using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;
@@ -209,7 +209,7 @@ namespace psio::view_layout {
          requires ::psio::Reflected<T>
                   && (N < ::psio::reflect<T>::member_count)
       [[gnu::always_inline]] static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char> root, unchecked_t) noexcept
+         std::span<const char> s, std::span<const char> root, unchecked_t)
       {
          using R      = ::psio::reflect<T>;
          using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;
@@ -230,6 +230,10 @@ namespace psio::view_layout {
                   return std::size_t{1};
             }();
             const std::size_t total = std::size_t{len} * esz;
+            // (An empty string or list has no bytes: its pointer is not
+            // followed, and validation does not look at it.)
+            if (total == 0)
+               return {s.data(), 0};
             PSIO_VIEW_TRUST(!root.empty() && std::size_t{ptr} + total <= root.size(),
                             "a (pointer, length) pair points outside the buffer");
             return {root.data() + ptr, total};

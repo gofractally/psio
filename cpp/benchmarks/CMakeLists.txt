@@ -202,6 +202,14 @@ target_link_libraries(psio_bench_write_modes PRIVATE psio)
 target_compile_features(psio_bench_write_modes PRIVATE cxx_std_23)
 target_compile_options(psio_bench_write_modes PRIVATE -O3 -DNDEBUG)
 
+# What a pssz view costs per access (a table-row shape: fixed fields and
+# three strings; a list of records), safe and trusted: the price of placing
+# every member inside the bytes (gofractally/psio#15).
+add_executable(psio_bench_view_access bench_view_access.cpp)
+target_link_libraries(psio_bench_view_access PRIVATE psio)
+target_compile_features(psio_bench_view_access PRIVATE cxx_std_23)
+target_compile_options(psio_bench_view_access PRIVATE -O3 -DNDEBUG)
+
 # Varint codec library — leb128, prefix2 (BE + LE), prefix3.
 add_executable(psio_bench_varint bench_varint.cpp)
 target_link_libraries(psio_bench_varint PRIVATE psio)

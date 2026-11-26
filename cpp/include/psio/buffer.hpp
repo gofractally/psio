@@ -202,7 +202,7 @@ namespace psio {
          // / `unchecked`). It converts implicitly to the safe view,
          // psio::view<T, Fmt>; psio::as_view(buffer) is that directly.
          // (A format whose views have one kind hands that out.)
-         [[nodiscard]] auto view() const noexcept
+         [[nodiscard]] auto view() const
          {
             using VF = buffer_view_format_t<Fmt, T>;
             if constexpr (requires { requires view_layout::traits<VF>::trusted_views; })
@@ -210,9 +210,9 @@ namespace psio {
             else
                return ::psio::view<T, VF, storage::const_borrow>{self().bytes()};
          }
-         [[nodiscard]] auto get() const noexcept { return view(); }
-         [[nodiscard]] auto operator*() const noexcept { return view(); }
-         [[nodiscard]] auto operator->() const noexcept
+         [[nodiscard]] auto get() const { return view(); }
+         [[nodiscard]] auto operator*() const { return view(); }
+         [[nodiscard]] auto operator->() const
          {
             return arrow_proxy<decltype(view())>{view()};
          }

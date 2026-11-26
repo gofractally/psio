@@ -116,14 +116,12 @@ target_compile_definitions(psio_view_unvalidated_stateless_tests PRIVATE
 psio_add_test(psio_view_trusted_tests view_trusted_tests.cpp)
 psio_add_test(psio_view_trusted_stateless_tests view_trusted_tests.cpp)
 target_compile_definitions(psio_view_trusted_stateless_tests PRIVATE PSIO_VIEW_NO_RECORD_STATE=1)
-psio_add_test(psio_view_trusted_debug_tests view_trusted_tests.cpp)
-target_compile_definitions(psio_view_trusted_debug_tests PRIVATE PSIO_DEBUG_VIEWS=1)
-# With PSIO_DEBUG_VIEWS a trusted view over bytes that are not a valid encoding
-# aborts with a message instead of reading out of bounds.
+# A trusted view over bytes that are not a frame of its type fails with a
+# message where a member cannot be placed, instead of reading out of bounds
+# (it did so only under PSIO_DEBUG_VIEWS before gofractally/psio#15).
 add_executable(psio_view_trusted_debug_abort view_trusted_debug_abort.cpp)
 target_link_libraries(psio_view_trusted_debug_abort PRIVATE psio)
 target_compile_features(psio_view_trusted_debug_abort PRIVATE cxx_std_23)
-target_compile_definitions(psio_view_trusted_debug_abort PRIVATE PSIO_DEBUG_VIEWS=1)
 add_test(NAME psio_view_trusted_debug_valid COMMAND psio_view_trusted_debug_abort valid)
 foreach(case pssz-record-header pssz-member-offset pssz-truncated pssz-index pssz-scalar
              ssz-offset ssz-truncated wit-pointer)
@@ -981,6 +979,20 @@ if(PSIO_HAVE_ASAN_UBSAN)
    message(STATUS "psio_flatbuf_fuzz_tests_sanitized: enabled")
 else()
    message(STATUS "psio_flatbuf_fuzz_tests_sanitized: sanitizers do not link — skipping")
+endif()
+
+# Trusted reads and views on bytes that are not a frame of the type
+# (gofractally/psio#15): the pssz, ssz and canonical-ABI views of both kinds
+# and the trusted decode, over every truncation, every single-byte corruption
+# and random edits of valid encodings. No read outside the bytes, bounded
+# work, and a failure — not an empty member — where a member cannot be
+# placed. Again with the sanitizers, which is what sees a read outside.
+psio_add_test(psio_trusted_structure_tests trusted_structure_tests.cpp)
+if(PSIO_HAVE_ASAN_UBSAN)
+   psio_add_test(psio_trusted_structure_tests_sanitized trusted_structure_tests.cpp)
+   target_compile_options(psio_trusted_structure_tests_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_trusted_structure_tests_sanitized PRIVATE -fsanitize=address,undefined)
 endif()
 
 # The schema-text parsers (fbs_parser.hpp, capnp_parser.hpp) on arbitrary

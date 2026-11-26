@@ -3,9 +3,11 @@
 // A read view is specified for validated bytes, but what the PSSZ / SSZ /
 // canonical-ABI views do elsewhere is relied on and is pinned here:
 //   * a default-constructed view, and `at(i)` past the end, read as zero /
-//     empty;
+//     empty: a view of nothing;
 //   * on truncated or corrupted bytes, navigation never hands out a span
-//     outside the buffer (so nothing reads out of bounds).
+//     outside the buffer (so nothing reads out of bounds): a member that
+//     cannot be placed FAILS (psio::codec_abort; gofractally/psio#15,
+//     trusted_structure_tests.cpp), it does not read as empty.
 // The PSSZ record view works its header out once per view (view.hpp
 // "Per-record state"); these cases hold with and without that
 // (PSIO_VIEW_NO_RECORD_STATE).
@@ -138,12 +140,23 @@ namespace
    void truncations_and_corruptions(const Bytes& good)
    {
       const std::vector<char> bytes(good.begin(), good.end());
+      // A walk ends normally or with the failure of a member that cannot be
+      // placed; what it handed out before that lies in the bytes.
+      const auto walk = [](const bounds& b, std::span<const char> s) {
+         try
+         {
+            walk_order(b, View{s});
+         }
+         catch (const psio::codec_exception&)
+         {
+         }
+      };
       // Every prefix.
       for (std::size_t n = 0; n <= bytes.size(); ++n)
       {
          const std::vector<char>     cut(bytes.begin(), bytes.begin() + n);
          const std::span<const char> s{cut.data(), cut.size()};
-         walk_order(bounds{s}, View{s});
+         walk(bounds{s}, s);
       }
       // Every byte set to 0x00, 0xff, and incremented.
       for (std::size_t i = 0; i < bytes.size(); ++i)
@@ -152,7 +165,7 @@ namespace
             std::vector<char> bad = bytes;
             bad[i] = mode == 0 ? char(0) : mode == 1 ? char(0xff) : char(bad[i] + 1);
             const std::span<const char> s{bad.data(), bad.size()};
-            walk_order(bounds{s}, View{s});
+            walk(bounds{s}, s);
          }
    }
 }  // namespace
@@ -173,7 +186,9 @@ TEST_CASE("view: a default-constructed record view reads as zero / empty", "[vie
    check(psio::pssz_view<UvOrder>{});
    check(psio::ssz_view<UvOrder>{});
    check(psio::wit_view<UvOrder>{});
-   check(psio::pssz_view<UvOrder>{std::span<const char>{}});
+   // No bytes handed over by the caller are bytes, not a view of nothing:
+   // they are not a frame of the record.
+   CHECK_THROWS_AS(psio::pssz_view<UvOrder>{std::span<const char>{}}.id(), psio::codec_exception);
 
    psio::pssz_view<UvOrderOpt> o{};
    CHECK_FALSE(o.score().has_value());
@@ -212,7 +227,8 @@ namespace
    PSIO_REFLECT(UvShapes, id, corners, numbers, maybe_corners, words)
 }  // namespace
 
-TEST_CASE("view: fixed-size elements the bytes do not hold read as zero / empty",
+TEST_CASE("view: fixed-size elements of a view of nothing read as zero / empty; elements the "
+          "bytes do not hold fail",
           "[view][unvalidated]")
 {
    // An array always has N elements; a view of nothing has N empty ones.
@@ -226,9 +242,9 @@ TEST_CASE("view: fixed-size elements the bytes do not hold read as zero / empty"
    const std::vector<char>                    twelve(12, char(1));
    const psio::pssz_view<std::array<UvPoint, 3>> cut{std::span<const char>{twelve}};
    CHECK(cut[0].x() == 0x01010101);
-   CHECK(psio::bytes(cut[1]).empty());
-   CHECK(cut[1].x() == 0);
-   CHECK(cut.at(2).y() == 0);
+   // The second and third points are not in the bytes: not placed.
+   CHECK_THROWS_AS(cut[1], psio::codec_exception);
+   CHECK_THROWS_AS(cut.at(2), psio::codec_exception);
 
    // operator[] past the end of a list of fixed-size elements.
    UvShapes value;
@@ -238,14 +254,18 @@ TEST_CASE("view: fixed-size elements the bytes do not hold read as zero / empty"
    const auto                 s = psio::to_ssz(value.numbers);
    psio::pssz_view<UvShapes>  v{std::span<const char>{p}};
    CHECK(v.numbers()[2] == 3u);
-   CHECK(v.numbers()[3] == 0u);
-   CHECK(v.numbers()[1000] == 0u);
-   CHECK(psio::bytes(v.numbers()[1000]).empty());
-   CHECK(v.numbers()[~std::size_t{0} / 4] == 0u);
+   // operator[] past the end fails; at(i) is the checked access and returns
+   // a view of nothing.
+   CHECK_THROWS_AS(v.numbers()[3], psio::codec_exception);
+   CHECK_THROWS_AS(v.numbers()[1000], psio::codec_exception);
+   CHECK_THROWS_AS(v.numbers()[~std::size_t{0} / 4], psio::codec_exception);
+   CHECK(v.numbers().at(3) == 0u);
+   CHECK(psio::bytes(v.numbers().at(1000)).empty());
    psio::ssz_view<std::vector<std::uint32_t>> sv{std::span<const char>{s}};
    CHECK(sv[2] == 3u);
-   CHECK(sv[3] == 0u);
-   CHECK(psio::bytes(sv[1u << 20]).empty());
+   CHECK_THROWS_AS(sv[3], psio::codec_exception);
+   CHECK(sv.at(3) == 0u);
+   CHECK(psio::bytes(sv.at(1u << 20)).empty());
 }
 
 TEST_CASE("view: a list never reports more elements than its bytes hold", "[view][unvalidated]")
@@ -260,19 +280,19 @@ TEST_CASE("view: a list never reports more elements than its bytes hold", "[view
       const std::size_t width = psio::auto_pssz_width_v<std::vector<std::string>>;
       for (std::size_t i = 0; i < width; ++i)
          bad[i] = char(0xff);
+      // Such a list has no count: asking for it fails.
       psio::pssz_view<std::vector<std::string>> v{std::span<const char>{bad}};
-      CHECK(v.size() == 0);
-      CHECK(v.empty());
-      CHECK(v.begin() == v.end());
-      CHECK(v.at(0).view_().empty());
+      CHECK_THROWS_AS(v.size(), psio::codec_exception);
+      CHECK_THROWS_AS(v.empty(), psio::codec_exception);
+      CHECK_THROWS_AS(v.at(0), psio::codec_exception);
    }
    {
       const auto        good = psio::to_ssz(words);
       std::vector<char> bad(good.begin(), good.end());
       bad[0] = bad[1] = bad[2] = char(0xff);
       psio::ssz_view<std::vector<std::string>> v{std::span<const char>{bad}};
-      CHECK(v.size() == 0);
-      CHECK(v.at(0).view_().empty());
+      CHECK_THROWS_AS(v.size(), psio::codec_exception);
+      CHECK_THROWS_AS(v.at(0), psio::codec_exception);
    }
 }
 

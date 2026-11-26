@@ -2182,10 +2182,12 @@ namespace psio {
             else return LegacyW;
          }();
          enforce_exact_fixed_span<T>(src, pos, end);
+         // (Every profile: a trusted read does not validate, and it does not
+         // read outside the bytes it was given either.)
+         if (pos > end || end > src.size())
+            size_failure("pssz: value span out of bounds");
          if constexpr (Auto)
          {
-            if (pos > end || end > src.size())
-               size_failure("pssz: value span out of bounds");
             enforce_max_dynamic<T>(end - pos);
             enforce_fixed_caps<T>();
          }
@@ -2359,6 +2361,13 @@ namespace psio {
             if (end - pos < W)
                return out;
             const std::uint32_t first = read_offset<W>(src, pos);
+            // The offset table lies inside the list. A trusted read makes
+            // this one compare too: the count comes from the bytes, and
+            // without it a first offset that is not one would size the
+            // result (and the walk of the table) by a number the bytes do
+            // not back.
+            if (first > end - pos)
+               size_failure("pssz: offset table past the end of the list");
             const std::size_t   n     = first / W;
             // The offset table is read in place: no temporary copy of it
             // (a heap allocation per list decoded).
@@ -2576,10 +2585,12 @@ namespace psio {
             else return LegacyW;
          }();
          enforce_exact_fixed_span<T>(src, pos, end);
+         // (Every profile: a trusted read does not validate, and it does not
+         // read outside the bytes it was given either.)
+         if (pos > end || end > src.size())
+            size_failure("pssz: value span out of bounds");
          if constexpr (Auto)
          {
-            if (pos > end || end > src.size())
-               size_failure("pssz: value span out of bounds");
             enforce_max_dynamic<T>(end - pos);
             enforce_fixed_caps<T>();
          }

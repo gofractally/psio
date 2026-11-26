@@ -57,7 +57,7 @@ For a format `F`:
 | `F_size(v)` | size of the encoding of `v` | `psio::size_of(psio::F{}, v)` |
 | `F_view<T>` | read-only view over borrowed bytes | `psio::view<T, psio::F>` |
 | `F_view<const T>` | the same type as `F_view<T>` | `psio::view<T, psio::F>` |
-| `F_trusted_view<T>` | read-only view over bytes the caller vouches for: no per-access checks (pssz, ssz, wit) | `psio::view<T, psio::F, psio::storage::trusted_borrow>` |
+| `F_trusted_view<T>` | read-only view over bytes the caller vouches for: places members as the safe view does and fails on bytes that are not a frame (pssz, ssz, wit) | `psio::view<T, psio::F, psio::storage::trusted_borrow>` |
 | `F_mutable_view<T>` | view that writes into borrowed bytes | `psio::mutable_view<T, psio::F>` |
 | `F_buffer<T>` | typed bytes, owned | `psio::buffer<T, psio::F, psio::storage::owning>` |
 | `shared_F<T>` | typed bytes, reference-counted and immutable | `psio::buffer<T, psio::F, psio::storage::shared>` |
@@ -293,17 +293,23 @@ must outlive the view. None of them validates.
 ### Safe and trusted views
 
 There are two read views of the same bytes. They have the same members
-(they are the same templates) and read the same values from a valid
-encoding. They differ in what happens when the bytes are *not* a valid
-encoding of `T`.
+(they are the same templates), place a member the same way and read the
+same values. They differ in how they are obtained — in what the caller says
+about the bytes.
 
 | | `psio::pssz_view<T>` — safe | `psio::pssz_trusted_view<T>` — trusted |
 |---|---|---|
 | Made from | any bytes: `psio::pssz_view<T>{bytes}` | `psio::pssz_trusted_view<T>{psio::trusted{bytes}}`, `psio::validated_pssz_view<T>(bytes)`, `buffer.view()` |
-| Every offset read from the bytes | compared with the size of what it points into before it is used | used as it is |
-| Bytes that are not a valid `T` | navigation never leaves the bytes; what is not there reads as zero / empty | **undefined behaviour** |
-| Cost (PSSZ, ns: all 5 members of a nested record / iterate 16 records) | 2.5 / 10.6 | 0.7 / 2.7 |
-| `unpack()` | a trusted decode in both: undefined on bytes that are not valid | |
+| Every offset read from the bytes | compared with the size of what it points into, where it is read | the same |
+| Bytes that are not a frame of `T` | navigation never leaves the bytes; a member that cannot be placed **fails** (`psio::codec_abort`: a `psio::codec_exception`, or the abort handler and `std::abort` without exceptions) | the same |
+| What `T` declares (bounds, `utf8`, order, invariants) | not looked at | not looked at |
+| Cost (PSSZ, ns, a row of 4 fixed members and 3 strings: construct and read 1 fixed member / read 1 fixed member of a view that exists / construct and read all 7 / walk a list of 16 records; `psio_bench_view_access`) | 0.6 / 0.4 / 1.5 / 15 | the same (before the compares were always made: 0.3 / 0.4 / 1.2 / 3.9) |
+| `unpack()` | a trusted decode in both: for PSSZ it fails on bytes that are not a frame ([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)) | |
+
+A view fails where a decode of the same bytes fails; it does not hand out
+an empty string or a zero in place of a member it could not find. Before
+gofractally/psio#15 the safe view did exactly that, and the trusted view
+read outside the bytes.
 
 **Which one.**
 
@@ -315,8 +321,8 @@ encoding of `T`.
   returns.
 - The bytes come from outside and you will read one or two members of a
   large value, or you cannot afford the validation pass: the safe view. Its
-  navigation is safe on anything; do not call `unpack()` on it (or on any
-  view of bytes that were not validated).
+  navigation is safe on anything and fails on what is not a frame; what it
+  reads has not been held against anything `T` declares.
 - You do not know: the safe view. It is the default name for that reason.
 
 ```cpp
@@ -338,7 +344,7 @@ auto owner = theirs.owner();
 auto checked = psio::validated_pssz_view<TheirRow>(foreign_bytes);   // or: check, then trust
 ```
 
-**What the caller of a trusted view guarantees.** The bytes
+**What the caller of a trusted view says.** The bytes
 
 1. were accepted by `psio::validate_F<T>` **for this `T`** (that is what
    `psio::validated_view` / `psio::validated_pssz_view` do), or were produced
@@ -346,15 +352,20 @@ auto checked = psio::validated_pssz_view<TheirRow>(foreign_bytes);   // or: chec
    and
 2. are not modified while the view, or any view obtained from it, is in use.
 
-If either does not hold the behaviour is undefined — reads outside the
-bytes — exactly as for `psio::from_F<T>(psio::trusted{bytes})`.
+If the first does not hold, a PSSZ / SSZ / WIT view fails where it cannot
+place a member, and reads some unspecified value where the bytes happen to
+place every member (another type's row, a corrupted number): only
+validation refuses those. If the second does not hold the behaviour is
+undefined, as for any borrowed bytes.
 
 "For this `T`" matters when a type evolves. PSSZ lets a record grow by
 appending `std::optional` members, and both views read a row written before
 the member existed correctly (the member reads as absent). A row written
-before a **non-optional** member was appended is not a valid encoding of the
-new type: `validate_pssz` refuses it, the safe view reads the member as
-zero, and the trusted view reads past the row. Append optionals only.
+before a **non-optional** member was appended is not a frame of the new
+type: `validate_pssz` refuses it, and a view of either kind fails when it is
+constructed (`a record's header omits a required member`), as
+`from_pssz(psio::trusted{…})` fails (`pssz: required record field
+missing`). Append optionals only.
 
 **Trust is in the type.**
 
@@ -374,12 +385,13 @@ zero, and the trusted view reads past the row. Append optionals only.
   `psio::pssz_trusted_view<T>` cannot be handed unvalidated bytes by
   accident.
 
-**What a trusted view still does.** `list.at(i)` is bounds-checked and
-returns an empty view past the end (`list[i]` is not: its precondition is
-`i < list.size()`). A default-constructed trusted view reads as zero / empty.
-What is wire meaning rather than a check stays: a trailing optional the
-writer did not write reads as absent, fields a newer writer appended are
-skipped, an empty list is zero bytes. It is read-only, like every view.
+**A view of nothing.** `list.at(i)` is bounds-checked and returns an empty
+view past the end (`list[i]` past the end fails). A default-constructed
+view reads as zero / empty. What is wire meaning rather than a check stays:
+a trailing optional the writer did not write reads as absent, fields a
+newer writer appended are skipped, an empty list is zero bytes. None of
+these is a member that could not be placed: there are no bytes. A view is
+read-only.
 
 **Validating helpers.**
 
@@ -391,14 +403,19 @@ skipped, an empty list is zero bytes. It is read-only, like every view.
 | `F_buffer<T>` / `shared_F<T>`: `b.view()`, `*b`, `b->member()`, `b.get()` | the trusted view: the buffer validated on construction (see below for the constructors that take the caller's word instead) |
 | `psio::as_view(b)` | the safe view of a buffer's bytes |
 
-**Debugging.** Compile with `-DPSIO_DEBUG_VIEWS` (the whole program: it
-changes inline functions) and a trusted view makes every compare it
-otherwise skips, and calls `psio::detail::view_trust_violation` — a message
-on stderr, then `std::abort` — when one fails:
+**The failure.** A member that cannot be placed ends in
+`psio::codec_abort` with a message that says what did not fit:
 
 ```
-psio: trusted view over bytes that are not a valid encoding: a record's header announces more than the record holds
+view: the bytes are not a frame of the type: a record's header announces more than the record holds
 ```
+
+A record's header is compared with the record when its view is constructed
+(and with the fixed part of the members every writer writes, so a fixed
+member of a constructed view is then read with no compare at all); the
+offsets of a variable member, a list's count and an element's span are
+compared when they are read. `PSIO_DEBUG_VIEWS`, which used to turn these
+compares on for the trusted view, no longer does anything.
 
 **Other views.** `psio::mutable_view` has no trusted form: it already
 requires validated bytes for writing, and the reads it offers are of
@@ -409,8 +426,10 @@ name, and it has not been split into a safe and a trusted kind yet.
 The FlatBuffers views (`docs/flatbuffers.md`) are cursor views too and have
 both kinds: `psio::flatbuf_view<T>` compares every offset, vtable entry and
 length with the buffer before it reads and may be constructed over any
-bytes; `psio::flatbuf_trusted_view<T>` (from `psio::validated_view`, or
-`psio::trusted{bytes}`) compares nothing. The trusted one is a single
+bytes (what does not fit reads as absent: in FlatBuffers an absent field is
+its default); `psio::flatbuf_trusted_view<T>` (from `psio::validated_view`,
+or `psio::trusted{bytes}`) compares nothing and is for validated bytes
+only: over other bytes it reads outside them. The trusted one is a single
 pointer and does not carry the buffer's bounds, so — unlike the PSSZ / SSZ /
 WIT trusted views — it does not convert to the safe view.
 `psio::flatbuf_mutable_view<T>` navigates as the safe view does.

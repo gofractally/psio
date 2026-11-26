@@ -162,7 +162,7 @@ namespace psio
       [[nodiscard]] std::vector<char> release() && noexcept { return std::move(bytes_); }
 
       // Zero-copy access. As for every view, the bytes are assumed valid.
-      [[nodiscard]] ::psio::view<T, ::psio::pssz, storage::const_borrow> view() const noexcept
+      [[nodiscard]] ::psio::view<T, ::psio::pssz, storage::const_borrow> view() const
       {
          return ::psio::view<T, ::psio::pssz, storage::const_borrow>{bytes()};
       }
@@ -263,20 +263,20 @@ namespace psio
       using inner_view = view<T, ::psio::pssz, inner_storage>;
 
       view() = default;
-      explicit view(detail::view_source<Store> s) noexcept : data_(detail::view_source_bytes(s)) {}
-      view(detail::view_source<Store> s, std::span<const char>) noexcept
+      explicit view(detail::view_source<Store> s) : data_(detail::view_source_bytes(s)) {}
+      view(detail::view_source<Store> s, std::span<const char>)
          : data_(detail::view_source_bytes(s))
       {
       }
       [[nodiscard]] std::span<const char> _psio_data() const noexcept { return data_; }
       [[nodiscard]] std::span<const char> bytes() const noexcept { return data_; }
-      [[nodiscard]] inner_view get() const noexcept
+      [[nodiscard]] inner_view get() const
       {
          return inner_view{detail::view_src<inner_storage>(data_)};
       }
-      [[nodiscard]] inner_view operator*() const noexcept { return get(); }
+      [[nodiscard]] inner_view operator*() const { return get(); }
       // `member->field()`: the inner value's view.
-      [[nodiscard]] detail::arrow_proxy<inner_view> operator->() const noexcept
+      [[nodiscard]] detail::arrow_proxy<inner_view> operator->() const
       {
          return {get()};
       }

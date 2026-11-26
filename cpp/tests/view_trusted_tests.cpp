@@ -14,8 +14,8 @@
 //     zero / empty;
 //   * bytes validation accepts are bytes the trusted view reads inside of.
 //
-// This file is also built with PSIO_DEBUG_VIEWS (psio_view_trusted_debug_
-// tests): on valid bytes no compare the trusted view skips may fail.
+// On valid bytes no compare a view makes may fail: every case below reads
+// valid bytes through both kinds.
 
 #include <psio/mutable_view.hpp>
 #include <psio/nested.hpp>
@@ -779,9 +779,14 @@ TEST_CASE("trusted view: default-constructed reads as zero / empty", "[view][tru
    check(psio::pssz_trusted_view<TvOrder>{});
    check(psio::ssz_trusted_view<TvOrder>{});
    check(psio::wit_trusted_view<TvOrder>{});
-   check(psio::pssz_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}});
-   check(psio::ssz_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}});
-   check(psio::wit_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}});
+   // No bytes handed over by the caller are bytes, not a view of nothing:
+   // they are not a frame of the record.
+   CHECK_THROWS_AS(psio::pssz_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}}.id(),
+                   psio::codec_exception);
+   CHECK_THROWS_AS(psio::ssz_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}}.id(),
+                   psio::codec_exception);
+   CHECK_THROWS_AS(psio::wit_trusted_view<TvOrder>{psio::trusted{std::span<const char>{}}}.id(),
+                   psio::codec_exception);
 
    psio::pssz_trusted_view<TvWide> w{};
    CHECK(w.id() == 0);
@@ -992,9 +997,8 @@ TEST_CASE("trusted view: the inner view of a deferred nested member is the safe 
    REQUIRE(psio::validate_pssz<TvEnvelope>(bad_bytes).ok());
    const auto checked = psio::validated_pssz_view<TvEnvelope>(bad_bytes);
    REQUIRE(checked.ok());
-   const auto inner = checked->opaque().get();
-   CHECK(inner.qty() == 0);
-   CHECK(inner.product().view_().empty());
+   // ... and fails: they are not a frame of the member's type.
+   CHECK_THROWS_AS(checked->opaque().get().qty(), psio::codec_exception);
 }
 
 namespace
@@ -1035,7 +1039,7 @@ TEST_CASE("trusted view: a method parameter declared as the trusted view", "[vie
 // Every truncation and every single-byte corruption of a valid encoding:
 // whenever validation accepts the result, the trusted view must hand out
 // only spans inside the bytes, the same ones the safe view hands out. (Under
-// PSIO_DEBUG_VIEWS, in addition, no skipped compare may fail: that aborts.)
+// no compare a view makes may fail on them: that is a codec_exception.)
 namespace
 {
    struct agreement
@@ -1291,42 +1295,9 @@ TEST_CASE("trusted view: whatever PSSZ validation accepts, the trusted view read
    CHECK(validated_wide_mutations_agree(w) > 100);
 }
 
-// The safe view makes no assumption: on every truncation and corruption,
-// validated or not, the same walk hands out only spans inside the bytes.
-// (view_unvalidated_tests.cpp pins this for records, lists and strings; this
-// is the rest of the PSSZ surface.)
-TEST_CASE("safe view: no corruption of the PSSZ-only shapes yields a span outside the bytes",
-          "[view][trusted][unvalidated]")
-{
-   auto w = sample_wide();
-   w.trailing_a = 5;
-   w.trailing_b = "tail";
-   w.maybe_list = std::vector<std::uint8_t>{1, 2, 3};
-   for (int pass = 0; pass < 2; ++pass)
-   {
-      if (pass == 1)
-         w.choice = TvPoint{3, 4};
-      const auto              good = psio::to_pssz(w);
-      const std::vector<char> bytes(good.begin(), good.end());
-      const auto              probe = [&](const std::vector<char>& candidate) {
-         const std::span<const char>   s{candidate.data(), candidate.size()};
-         const psio::pssz_view<TvWide> v{s};
-         agree_wide(agreement{s}, v, v, false);
-      };
-      for (std::size_t n = 0; n <= bytes.size(); ++n)
-         probe(std::vector<char>(bytes.begin(), bytes.begin() + n));
-      for (std::size_t i = 0; i < bytes.size(); ++i)
-         for (int mode = 0; mode < 4; ++mode)
-         {
-            std::vector<char> bad = bytes;
-            bad[i] = mode == 0   ? char(0)
-                     : mode == 1 ? char(0xff)
-                     : mode == 2 ? char(bad[i] + 1)
-                                 : char(bad[i] - 1);
-            probe(bad);
-         }
-   }
-}
+// (Every truncation and corruption, validated or not, of the PSSZ-only
+// shapes: trusted_structure_tests.cpp — a view of either kind hands out only
+// spans inside the bytes, and fails where a member cannot be placed.)
 
 TEST_CASE("trusted view: PSSZ evolution — what the writer did not write reads as absent",
           "[view][trusted]")

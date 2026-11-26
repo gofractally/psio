@@ -42,7 +42,7 @@ namespace psio::view_layout {
 
       // ── vector ─────────────────────────────────────────────────────────
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s) noexcept
+      static std::size_t vector_count(std::span<const char> s)
       {
          if constexpr (::psio::detail::ssz_impl::is_fixed_v<T>)
          {
@@ -70,7 +70,7 @@ namespace psio::view_layout {
 
       template <typename T>
       static std::span<const char>
-      vector_element_span(std::span<const char> s, std::size_t i) noexcept
+      vector_element_span(std::span<const char> s, std::size_t i)
       {
          if constexpr (::psio::detail::ssz_impl::is_fixed_v<T>)
          {
@@ -104,7 +104,7 @@ namespace psio::view_layout {
 
       // The unchecked forms (trusted view).
       template <typename T>
-      static std::size_t vector_count(std::span<const char> s, unchecked_t) noexcept
+      static std::size_t vector_count(std::span<const char> s, unchecked_t)
       {
          if constexpr (::psio::detail::ssz_impl::is_fixed_v<T>)
             return vector_count<T>(s);
@@ -123,12 +123,12 @@ namespace psio::view_layout {
 
       template <typename T>
       [[gnu::always_inline]] static std::span<const char> vector_element_span(
-         std::span<const char> s, std::size_t i, unchecked_t) noexcept
+         std::span<const char> s, std::size_t i, unchecked_t)
       {
          if constexpr (::psio::detail::ssz_impl::is_fixed_v<T>)
          {
             constexpr std::size_t esz = ::psio::detail::ssz_impl::fixed_size_of<T>();
-            PSIO_VIEW_TRUST(i * esz + esz <= s.size(), "a list element lies past the list");
+            PSIO_VIEW_TRUST(esz != 0 && i < s.size() / esz, "a list element lies past the list");
             return {s.data() + i * esz, esz};
          }
          else
@@ -136,7 +136,7 @@ namespace psio::view_layout {
             PSIO_VIEW_TRUST(s.size() >= 4, "a list is shorter than its first offset");
             std::uint32_t table = 0;
             std::memcpy(&table, s.data(), 4);
-            PSIO_VIEW_TRUST(table <= s.size() && (i + 1) * 4 <= table,
+            PSIO_VIEW_TRUST(table <= s.size() && i < table / 4,
                             "a list element lies past the offset table");
             std::uint32_t start = 0;
             std::memcpy(&start, s.data() + i * 4u, 4);
@@ -155,7 +155,7 @@ namespace psio::view_layout {
 
       // ── optional ───────────────────────────────────────────────────────
       template <typename T>
-      static bool optional_has_value(std::span<const char> s) noexcept
+      static bool optional_has_value(std::span<const char> s)
       {
          if (s.empty())
             return false;
@@ -164,7 +164,7 @@ namespace psio::view_layout {
 
       template <typename T>
       static std::span<const char>
-      optional_payload_span(std::span<const char> s) noexcept
+      optional_payload_span(std::span<const char> s)
       {
          if (s.empty())
             return {};
@@ -173,7 +173,7 @@ namespace psio::view_layout {
 
       // ── variant ────────────────────────────────────────────────────────
       template <typename... Ts>
-      static std::size_t variant_index(std::span<const char> s) noexcept
+      static std::size_t variant_index(std::span<const char> s)
       {
          if (s.empty())
             return 0;
@@ -183,7 +183,7 @@ namespace psio::view_layout {
 
       template <typename... Ts>
       static std::span<const char>
-      variant_payload_span(std::span<const char> s) noexcept
+      variant_payload_span(std::span<const char> s)
       {
          if (s.empty())
             return {};
@@ -193,7 +193,7 @@ namespace psio::view_layout {
       // The unchecked forms (trusted view). A view of nothing (default-
       // constructed, `at(i)` past the end) has a null span.
       template <typename T>
-      static bool optional_has_value(std::span<const char> s, unchecked_t) noexcept
+      static bool optional_has_value(std::span<const char> s, unchecked_t)
       {
          if (s.data() == nullptr)
             return false;
@@ -202,7 +202,7 @@ namespace psio::view_layout {
       }
       template <typename T>
       static std::span<const char> optional_payload_span(std::span<const char> s,
-                                                         unchecked_t) noexcept
+                                                         unchecked_t)
       {
          if (s.data() == nullptr)
             return {};
@@ -210,7 +210,7 @@ namespace psio::view_layout {
          return {s.data() + 1, s.size() - 1};
       }
       template <typename... Ts>
-      static std::size_t variant_index(std::span<const char> s, unchecked_t) noexcept
+      static std::size_t variant_index(std::span<const char> s, unchecked_t)
       {
          if (s.data() == nullptr)
             return 0;
@@ -219,7 +219,7 @@ namespace psio::view_layout {
       }
       template <typename... Ts>
       static std::span<const char> variant_payload_span(std::span<const char> s,
-                                                        unchecked_t) noexcept
+                                                        unchecked_t)
       {
          if (s.data() == nullptr)
             return {};
@@ -291,7 +291,7 @@ namespace psio::view_layout {
                   && (N < ::psio::reflect<T>::member_count)
       static std::span<const char>
       record_field_span(std::span<const char> s,
-                        std::span<const char> /*root*/ = {}) noexcept
+                        std::span<const char> /*root*/ = {})
       {
          using R      = ::psio::reflect<T>;
          using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;
@@ -340,7 +340,7 @@ namespace psio::view_layout {
          requires ::psio::detail::ssz_impl::Record<T>
                   && (N < ::psio::reflect<T>::member_count)
       [[gnu::always_inline]] static std::span<const char> record_field_span(
-         std::span<const char> s, std::span<const char> /*root*/, unchecked_t) noexcept
+         std::span<const char> s, std::span<const char> /*root*/, unchecked_t)
       {
          using R      = ::psio::reflect<T>;
          using FieldT = std::remove_cvref_t<typename R::template member_type<N>>;

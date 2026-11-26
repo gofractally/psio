@@ -242,7 +242,8 @@ TEST_CASE("a view over the annotated argument tuple (probes g8_capped_args_view,
 
    // Why the plain-tuple view is wrong here: other offset widths.
    psio::pssz_view<std::tuple<std::uint64_t, std::string, std::vector<std::string>>> plain{b};
-   REQUIRE(plain.get<1>().view_() != "nm");
+   // (These bytes are not a frame of it: its header does not fit them.)
+   REQUIRE_THROWS_AS(plain.get<1>(), psio::codec_exception);
 
    Capped c;
    psio::invoke_method_pssz<Capped, 0>(c, b);

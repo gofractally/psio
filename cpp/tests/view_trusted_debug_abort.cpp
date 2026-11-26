@@ -1,17 +1,15 @@
-// Built with PSIO_DEBUG_VIEWS: a trusted view makes the compares it skips,
-// and aborts when one fails (view.hpp "Safe and trusted views").
+// A trusted view over bytes that are not a frame of its type fails where a
+// member cannot be placed (view.hpp "Safe and trusted views";
+// gofractally/psio#15): psio::codec_abort, which nothing here catches.
 //
 //   view_trusted_debug_abort <case>
 //
 // Each case hands corrupted bytes to a trusted view — breaking the caller's
 // guarantee — and reads through it. The process must die with the message
-// psio::detail::view_trust_violation prints; reaching the end is the
-// failure (exit status 0, "NOT CAUGHT"). `valid` is the control: the same
-// reads on the valid bytes return normally.
-
-#ifndef PSIO_DEBUG_VIEWS
-#error "this test is built with PSIO_DEBUG_VIEWS"
-#endif
+// of psio::detail::view_malformed; reaching the end is the failure (exit
+// status 0, "NOT CAUGHT"). `valid` is the control: the same reads on the
+// valid bytes return normally. (The file keeps the name it had when these
+// compares were made only under PSIO_DEBUG_VIEWS.)
 
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
@@ -124,8 +122,8 @@ int main(int argc, char** argv)
    }
    else if (which == "pssz-index")
    {
-      // operator[] past the end: a precondition the trusted view does not
-      // check (at(i) is the checked form).
+      // operator[] past the end fails (at(i) is the form that returns a
+      // view of nothing).
       const auto bytes = psio::to_pssz(order);
       const psio::pssz_trusted_view<Order> v{psio::trusted{bytes}};
       result = v.numbers()[3];
