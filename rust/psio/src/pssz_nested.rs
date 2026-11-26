@@ -319,7 +319,7 @@ where
         r.ws();
         let at = r.position();
         let value = T::read_json(r)?;
-        match try_encode::<Pssz, T>(&value) {
+        match crate::pssz::try_encode_as_the_caller::<Pssz, T>(&value) {
             Ok(bytes) if bytes.len() <= N || !crate::pssz_checked::declared() => Ok(Self::unchecked(bytes)),
             Ok(_) => Err(r.err_at(at, "json: member length_bound violated")),
             Err(_) => Err(r.err_at(at, "json: nested value has no encoding")),

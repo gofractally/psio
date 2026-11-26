@@ -48,6 +48,8 @@ impl Seen {
 /// reports it (`"flatbuf: member length_bound violated"`); the texts of the
 /// order constraints are the same in every format.
 pub fn member<T: Bounds<S>, S>(value: &T, length: &'static str) -> Result<(), &'static str> {
+    // (A validation: it holds whatever write or read is in progress around it.)
+    let _validating = crate::pssz_checked::Declared::enter();
     match value.check() {
         Ok(()) => Ok(()),
         Err(error) => Err(match error.0 {

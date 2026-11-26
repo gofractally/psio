@@ -959,16 +959,29 @@ export function unwrapOption(node: Node, value: unknown, fail: (m: string) => ne
  * not fit its width, a `maxDynamicData` cap, the length of a fixed array,
  * UTF-8). `T.encode` / `T.encodeKey` / `T.valueToJson` are fast writes;
  * `T.encodeChecked` / `T.encodeKeyChecked` / `T.valueToJsonChecked` are the
- * validated ones. (JavaScript runs one write at a time: a counter is enough.)
+ * validated ones.
+ *
+ * The mode belongs to the CALL, not to whatever is running around it. A
+ * getter, an iterator or a handler that runs in the middle of a fast write
+ * and itself asks for a validating read or a validated write gets one:
+ * every validating entry point runs inside `validating`, which sets the mode
+ * for its own extent and puts the caller's back.
  */
 export const writeMode = { fast: 0 };
-export function fastWrite<T>(body: () => T): T {
-  ++writeMode.fast;
+function inMode<T>(fast: number, body: () => T): T {
+  const outer = writeMode.fast;
+  writeMode.fast = fast;
   try {
     return body();
   } finally {
-    --writeMode.fast;
+    writeMode.fast = outer;
   }
+}
+export function fastWrite<T>(body: () => T): T {
+  return inMode(1, body);
+}
+export function validating<T>(body: () => T): T {
+  return inMode(0, body);
 }
 
 /** The length a member `lengthBound` constrains, looking through Option. */

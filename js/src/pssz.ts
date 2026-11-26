@@ -34,7 +34,7 @@
 
 import {
   Codec, IR_VERSION, MemberInfo, Node, PsszError, boundCount, checkAttributes, checkIrVersion, findAttribute,
-  fastWrite, memberBoundAdmits, nestedMember, normalizeMember, normalizeSchema, normalizeType, parseCap, parseLengthBound,
+  fastWrite, validating as inValidatingMode, memberBoundAdmits, nestedMember, normalizeMember, normalizeSchema, normalizeType, parseCap, parseLengthBound,
   parseMaxFields, reservedCustomId, settleMember,
   type DecodeContext, type IrAnyType, type IrAttribute, type IrFunc, type IrFunctionType, type IrInterface, type IrSchema,
   type OrderTable, type OrderTree, type PsszCustomHandler, type PsszErrorKind, type PsszSchemaInput,
@@ -128,6 +128,12 @@ function guarded<T>(run: () => T): T {
     if (e instanceof PsszError) throw e;
     throw new PsszError('internal', e instanceof Error ? `${e.name}: ${e.message}` : String(e));
   }
+}
+
+// A validating read or a validated write: it validates whatever the caller
+// is in the middle of (a fast write whose getter or handler called it).
+function validating<T>(run: () => T): T {
+  return inValidatingMode(() => guarded(run));
 }
 
 function asBytes(bytes: unknown): Uint8Array {
@@ -245,7 +251,7 @@ export class PsszType<T = unknown, V = unknown> {
    * `to_pssz_checked`).
    */
   encode(value: T): Uint8Array {
-    return fastWrite(() => this.encodeChecked(value));
+    return fastWrite(() => guarded(() => this.write(value)));
   }
 
   /**
@@ -253,16 +259,19 @@ export class PsszType<T = unknown, V = unknown> {
    * PsszError for a value `validate` would refuse the bytes of.
    */
   encodeChecked(value: T): Uint8Array {
-    return guarded(() => {
-      const out = this.codec.encodeTop(this.ref, this.admit(value, 'value'), this.count);
-      this.admitBytes(out, 'value');
-      return out;
-    });
+    return validating(() => this.write(value));
+  }
+
+  // The write, in the mode of the caller.
+  private write(value: T): Uint8Array {
+    const out = this.codec.encodeTop(this.ref, this.admit(value, 'value'), this.count);
+    this.admitBytes(out, 'value');
+    return out;
   }
 
   /** Decodes fully validated PSSZ bytes. */
   decode(bytes: Uint8Array, options?: PsszDecodeOptions): T {
-    return guarded(() => {
+    return validating(() => {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false };
       return this.read(input, ctx) as T;
@@ -301,7 +310,7 @@ export class PsszType<T = unknown, V = unknown> {
     try {
       const input = asBytes(bytes);
       const ctx: DecodeContext = { allowUnknown: true, hasUnknown: false };
-      guarded(() => this.read(input, ctx));
+      validating(() => this.read(input, ctx));
       return { ok: true, hasUnknown: ctx.hasUnknown };
     } catch (e) {
       return { ok: false, error: e as PsszError };
@@ -314,7 +323,7 @@ export class PsszType<T = unknown, V = unknown> {
    * violates an invariant of a registered handler has no key.
    */
   encodeKey(value: T): Uint8Array {
-    return fastWrite(() => this.encodeKeyChecked(value));
+    return fastWrite(() => guarded(() => this.writeKey(value)));
   }
 
   /**
@@ -323,11 +332,13 @@ export class PsszType<T = unknown, V = unknown> {
    * handler check). `encodeKey` is the fast write: every value has a key.
    */
   encodeKeyChecked(value: T): Uint8Array {
-    return guarded(() => {
-      const admitted = this.admit(value, 'value');
-      this.codec.checkValue(this.ref, admitted, 'value');
-      return encodeKey(this.codec, this.node, admitted);
-    });
+    return validating(() => this.writeKey(value));
+  }
+
+  private writeKey(value: T): Uint8Array {
+    const admitted = this.admit(value, 'value');
+    this.codec.checkValue(this.ref, admitted, 'value');
+    return encodeKey(this.codec, this.node, admitted);
   }
 
   /**
@@ -335,7 +346,7 @@ export class PsszType<T = unknown, V = unknown> {
    * whole input, or a PsszError.
    */
   decodeKey(bytes: Uint8Array): T {
-    return guarded(() => this.admit(decodeKey(this.codec, this.ref, asBytes(bytes)), 'bytes')) as T;
+    return validating(() => this.admit(decodeKey(this.codec, this.ref, asBytes(bytes)), 'bytes')) as T;
   }
 
   /** Checks key bytes against the type. Never throws. */
@@ -360,7 +371,7 @@ export class PsszType<T = unknown, V = unknown> {
 
   /** JSON / I-JSON text -> value. */
   jsonToValue(text: string | Uint8Array, format: JsonFormat = 'ijson'): T {
-    return guarded(() => this.admit(jsonToValue(this.codec, this.ref, format, text), 'json')) as T;
+    return validating(() => this.admit(jsonToValue(this.codec, this.ref, format, text), 'json')) as T;
   }
 
   /**
@@ -369,26 +380,26 @@ export class PsszType<T = unknown, V = unknown> {
    * still throws). `valueToJsonChecked` is the validated write.
    */
   valueToJson(value: T, format: JsonFormat = 'ijson'): string {
-    return fastWrite(() => this.valueToJsonChecked(value, format));
+    return fastWrite(() => guarded(() => valueToJson(this.codec, this.ref, format, this.admit(value, 'value'))));
   }
 
   /** The validated JSON write: the text, or a PsszError for a value `jsonToValue` would refuse. */
   valueToJsonChecked(value: T, format: JsonFormat = 'ijson'): string {
-    return guarded(() => valueToJson(this.codec, this.ref, format, this.admit(value, 'value')));
+    return validating(() => valueToJson(this.codec, this.ref, format, this.admit(value, 'value')));
   }
 
   /** JSON / I-JSON text -> canonical PSSZ bytes. */
   jsonToPssz(text: string | Uint8Array, format: JsonFormat = 'ijson'): Uint8Array {
     // (a json value is carried as its text: every number as it was written)
     // Text from outside: the validated write.
-    return this.encodeChecked(guarded(() => this.admit(jsonToValue(this.codec, this.ref, format, text, true), 'json')) as T);
+    return this.encodeChecked(validating(() => this.admit(jsonToValue(this.codec, this.ref, format, text, true), 'json')) as T);
   }
 
   /** PSSZ bytes (fully validated) -> JSON / I-JSON text. */
   psszToJson(bytes: Uint8Array, format: JsonFormat = 'ijson', options?: PsszDecodeOptions): string {
     // The decode runs the handlers' checks; the writer need not repeat them.
     // A json value is carried as its text: every number as it was written.
-    return guarded(() => {
+    return validating(() => {
       const ctx: DecodeContext = { allowUnknown: !options?.rejectUnknown, hasUnknown: false, jsonText: true };
       return valueToJson(this.codec, this.ref, format, this.read(asBytes(bytes), ctx), false);
     });
@@ -737,12 +748,15 @@ export class PsszMethod<A = unknown, R = unknown> {
 
   /** The PSSZ bytes of a result (the callee's side); no bytes for a method that returns nothing. */
   resultToPssz(value: R): Uint8Array {
-    return fastWrite(() => this.resultToPsszChecked(value));
+    return this.result ? this.result.encode(value) : this.noResult(value);
   }
 
   /** The validated write of a result: its bytes, or a PsszError for a value outside what `returns` declares. */
   resultToPsszChecked(value: R): Uint8Array {
-    if (this.result) return this.result.encodeChecked(value);
+    return this.result ? this.result.encodeChecked(value) : this.noResult(value);
+  }
+
+  private noResult(value: R): Uint8Array {
     if (value !== undefined && value !== null)
       throw new PsszError('value', `pssz: method "${this.name}" returns nothing`);
     return new Uint8Array(0);

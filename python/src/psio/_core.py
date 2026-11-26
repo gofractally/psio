@@ -525,7 +525,12 @@ class _WriteMode:
     needs stays checked (an offset that does not fit its width, a ``max_dynamic_data`` cap, the
     length of a fixed array, UTF-8, the Python type of a value).  ``psio.to_pssz`` / ``to_key`` /
     ``to_json`` are fast writes; ``to_pssz_checked`` / ``to_key_checked`` / ``to_json_checked`` are the
-    validated ones.  (A counter per thread: a write does not yield.)
+    validated ones.  (Per thread: a write does not yield.)
+
+    The mode belongs to the CALL, not to whatever runs around it: a property, an iterator or a
+    handler that runs in the middle of a fast write and itself asks for a validating read or a
+    validated write gets one.  Every validating entry point runs inside ``validating``, which sets
+    the mode for its own extent and puts the caller's back.
     """
 
     __slots__ = ("_local",)
@@ -538,11 +543,13 @@ class _WriteMode:
     def fast(self) -> int:
         return getattr(self._local, "fast", 0)
 
-    def enter(self) -> None:
-        self._local.fast = getattr(self._local, "fast", 0) + 1
-
-    def leave(self) -> None:
-        self._local.fast -= 1
+    def run(self, fast: int, body: Callable[[], Any]) -> Any:
+        outer = getattr(self._local, "fast", 0)
+        self._local.fast = fast
+        try:
+            return body()
+        finally:
+            self._local.fast = outer
 
 
 WRITE_MODE = _WriteMode()
@@ -550,11 +557,12 @@ WRITE_MODE = _WriteMode()
 
 def fast_write(run: Callable[[], Any]) -> Any:
     """``run()`` as a fast write."""
-    WRITE_MODE.enter()
-    try:
-        return run()
-    finally:
-        WRITE_MODE.leave()
+    return WRITE_MODE.run(1, run)
+
+
+def validating(run: Callable[[], Any]) -> Any:
+    """``run()`` as a validating read or a validated write, whatever the caller is in the middle of."""
+    return WRITE_MODE.run(0, run)
 
 
 def member_bound_admits(bound: LengthBound, node: Node, value: Any) -> bool:

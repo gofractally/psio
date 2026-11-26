@@ -165,6 +165,56 @@ class WriteModes(unittest.TestCase):
         self.assertEqual(psio.from_key(Holder, psio.to_key(fits)), fits)
         self.assertEqual(psio.from_json(Holder, psio.to_json(fits)), fits)
 
+    def test_a_validating_call_inside_a_fast_write_still_validates(self) -> None:
+        # The mode belongs to the call.  Code of the value that runs in the middle of a fast write
+        # (here: iterating a member) and asks for a validating read or a validated write gets one.
+        bad = Prop([3, 1, 2, 9], "much too long", ["toolong", "b", "c"], [], Even(1))
+        fast = {"pssz": psio.to_pssz(bad), "key": psio.to_key(bad), "json": psio.to_json(bad)}
+        seen: list = []
+
+        def refuses(run) -> bool:
+            try:
+                run()
+            except psio.PsioError:
+                return True
+            return False
+
+        class Probe(list):
+            def __iter__(inner):
+                seen.append({
+                    "from_pssz": refuses(lambda: psio.from_pssz(Prop, fast["pssz"])),
+                    "validate_pssz": not psio.validate_pssz(Prop, fast["pssz"]).ok,
+                    "to_pssz_checked": refuses(lambda: psio.to_pssz_checked(bad)),
+                    "from_key": refuses(lambda: psio.from_key(Prop, fast["key"])),
+                    "validate_key": not psio.validate_key(Prop, fast["key"]).ok,
+                    "to_key_checked": refuses(lambda: psio.to_key_checked(bad)),
+                    "from_json": refuses(lambda: psio.from_json(Prop, fast["json"])),
+                    "validate_json": not psio.validate_json(Prop, fast["json"]).ok,
+                    "to_json_checked": refuses(lambda: psio.to_json_checked(bad)),
+                    "validate_value": not psio.schema_of(Prop).validate_value(bad).ok
+                    if hasattr(psio.schema_of(Prop), "validate_value") else True,
+                })
+                return super().__iter__()
+
+        @dataclass
+        class Outer:
+            ids: Annotated[List[u32], psio.max(2)]
+
+        for write in (psio.to_pssz, psio.to_key, psio.to_json, psio.to_ijson):
+            seen.clear()
+            write(Outer(Probe([1, 2, 3])))  # itself a fast write of a value over its bound
+            self.assertTrue(seen, write.__name__)
+            for checks in seen:
+                self.assertEqual([name for name, held in checks.items() if not held], [], write.__name__)
+        # ... and the fast write goes on as a fast write after the validation inside it.
+        self.assertEqual(psio.from_pssz_trusted(Outer, psio.to_pssz(Outer(Probe([1, 2, 3])))).ids, [1, 2, 3])
+        # The validated write is not made fast by a fast write inside it either.
+        class Inner(list):
+            def __iter__(inner):
+                psio.to_pssz(bad)
+                return super().__iter__()
+        self.assertTrue(refuses(lambda: psio.to_pssz_checked(Outer(Inner([1, 2, 3])))))
+
 
 if __name__ == "__main__":
     unittest.main()

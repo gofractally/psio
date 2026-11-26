@@ -236,6 +236,7 @@ pub fn to_key<T: KeyPack + ?Sized>(value: &T) -> Vec<u8> {
 /// or the bound, order or invariant it (or a value it holds) violates —
 /// what [`validate_key`] would refuse the key for.
 pub fn try_to_key<T: KeyPack + ?Sized>(value: &T) -> KeyResult<Vec<u8>> {
+    let _validating = crate::pssz_checked::Declared::enter();
     value.key_check()?;
     Ok(key_bytes(value))
 }
@@ -260,6 +261,7 @@ pub fn to_key_into<T: KeyPack + ?Sized>(value: &T, out: &mut Vec<u8>) -> KeyResu
 /// key of `value`, or the bound, order or invariant it violates, leaving
 /// `out` as it was.
 pub fn try_to_key_into<T: KeyPack + ?Sized>(value: &T, out: &mut Vec<u8>) -> KeyResult<()> {
+    let _validating = crate::pssz_checked::Declared::enter();
     value.key_check()?;
     out.reserve(value.key_size());
     value.key_pack(out);
@@ -273,6 +275,13 @@ pub fn key_size<T: KeyPack + ?Sized>(value: &T) -> usize {
 
 /// Decodes a full key. `bytes` must be exactly one canonical `T`.
 pub fn from_key<T: KeyUnpack>(bytes: &[u8]) -> KeyResult<T> {
+    // A validating read validates whatever the caller is in the middle of.
+    let _validating = crate::pssz_checked::Declared::enter();
+    read_key::<T>(bytes)
+}
+
+// The read, in whatever mode the thread is in.
+fn read_key<T: KeyUnpack>(bytes: &[u8]) -> KeyResult<T> {
     let mut r = KeyReader::new(bytes);
     let value = T::key_unpack(&mut r)?;
     if !r.remaining().is_empty() {
@@ -290,7 +299,7 @@ pub fn from_key_trusted<T: KeyUnpack>(bytes: &[u8]) -> T {
     // The TRUSTED read: the key is parsed as strictly as ever, and the value
     // is not held against what T declares (bounds, order, invariants).
     let _trusted = crate::pssz_checked::Undeclared::enter();
-    match from_key::<T>(bytes) {
+    match read_key::<T>(bytes) {
         Ok(value) => value,
         Err(e) => panic!("from_key_trusted: the bytes are not valid: {e}"),
     }

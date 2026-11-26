@@ -442,6 +442,23 @@ impl Drop for Undeclared {
         UNDECLARED.with(|flag| flag.set(self.0));
     }
 }
+/// Scope of an explicit VALIDATING read or VALIDATED write (`from_pssz`,
+/// `validate_pssz`, `try_to_pssz`, and the key / JSON equivalents): what the
+/// type declares is checked whatever the caller is in the middle of. A fast
+/// write or a trusted read in progress — the scope a hand-written codec, a
+/// text handler or an invariant runs in — does not reach into a validation
+/// it asks for; the enclosing mode comes back when this scope ends.
+pub struct Declared(bool);
+impl Declared {
+    pub fn enter() -> Self {
+        Self(UNDECLARED.with(|flag| flag.replace(false)))
+    }
+}
+impl Drop for Declared {
+    fn drop(&mut self) {
+        UNDECLARED.with(|flag| flag.set(self.0));
+    }
+}
 /// Whether the codec holds a value against what its type declares: true
 /// except inside an [`Undeclared`] scope.
 #[inline]

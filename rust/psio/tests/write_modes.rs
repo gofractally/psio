@@ -303,3 +303,75 @@ fn the_fast_pssz_write_refuses_only_what_has_no_frame() {
     assert_eq!(out, [1]);
     assert!(quiet(|| std::panic::catch_unwind(|| psio::to_pssz(&first_long))).is_err());
 }
+
+/// An explicit validating read or validated write validates whatever the
+/// caller is doing: a fast write or a trusted read in progress (the scope a
+/// hand-written codec or a text handler runs in) does not leak into it.
+#[test]
+fn a_validating_call_inside_a_fast_write_or_a_trusted_read_still_validates() {
+    let row = Prop { name: "much too long".into(), even: Even { v: 3 }, ..Prop::default() };
+    let loose_pssz = psio::to_pssz(&row);
+    let loose_key = psio::to_key(&row);
+    let loose_json = psio::to_json(&row);
+    let check = |what: &str| {
+        assert!(psio::from_pssz::<Prop>(&loose_pssz).is_err(), "{what}: from_pssz");
+        assert!(psio::validate_pssz::<Prop>(&loose_pssz).is_err(), "{what}: validate_pssz");
+        assert!(psio::pssz::decode::<psio::Pssz, Prop>(&loose_pssz).is_err(), "{what}: pssz::decode");
+        assert!(psio::try_to_pssz(&row).is_err(), "{what}: try_to_pssz");
+        assert!(psio::pssz::try_encode::<psio::Pssz, _>(&row).is_err(), "{what}: pssz::try_encode");
+        let mut out = Vec::new();
+        assert!(psio::try_to_pssz_into(&row, &mut out).is_err(), "{what}: try_to_pssz_into");
+        assert!(psio::from_key::<Prop>(&loose_key).is_err(), "{what}: from_key");
+        assert!(psio::validate_key::<Prop>(&loose_key).is_err(), "{what}: validate_key");
+        assert!(psio::try_to_key(&row).is_err(), "{what}: try_to_key");
+        assert!(psio::try_to_key_into(&row, &mut out).is_err(), "{what}: try_to_key_into");
+        assert!(psio::from_json::<Prop>(&loose_json).is_err(), "{what}: from_json");
+        assert!(psio::validate_json::<Prop>(&loose_json).is_err(), "{what}: validate_json");
+        assert!(psio::from_ijson::<Prop>(&psio::to_ijson(&row)).is_err(), "{what}: from_ijson");
+        assert!(psio::try_to_json(&row).is_err(), "{what}: try_to_json");
+        assert!(psio::try_to_ijson(&row).is_err(), "{what}: try_to_ijson");
+        let mut text = String::new();
+        assert!(psio::try_to_json_into(&row, &mut text).is_err(), "{what}: try_to_json_into");
+        assert!(psio::pssz::Nested::<Prop>::new(&row).is_err(), "{what}: Nested::new");
+    };
+    check("outside any scope");
+    {
+        // What the body of a fast write or of a trusted read runs in.
+        let _scope = psio::pssz_checked::Undeclared::enter();
+        check("inside a fast write / trusted read");
+        // ... and the enclosing mode is restored afterwards.
+        assert!(!psio::pssz_checked::declared());
+    }
+    assert!(psio::pssz_checked::declared());
+}
+
+/// The same reached without naming the scope: a text handler that validates
+/// other bytes while the value it belongs to is written fast.
+#[derive(Debug, Clone, PartialEq, Default, psio::PsszPack, psio::PsszUnpack)]
+struct Envelope {
+    payload: Vec<u8>,
+}
+impl psio::json::JsonText for Envelope {
+    fn write_json(&self, w: &mut psio::json::Writer) -> Result<(), psio::json::JsonTextError> {
+        // The payload is the pSSZ of a Prop: this writer refuses to give text
+        // to bytes that are not one.
+        match psio::from_pssz::<Prop>(&self.payload) {
+            Ok(prop) => prop.write_json(w),
+            Err(_) => Err(w.err("Envelope: the payload is not a Prop")),
+        }
+    }
+    fn read_json(r: &mut psio::json::Reader) -> Result<Self, psio::json::JsonTextError> {
+        let prop = Prop::read_json(r)?;
+        Ok(Envelope { payload: psio::to_pssz(&prop) })
+    }
+}
+
+#[test]
+fn a_handler_that_validates_is_not_switched_off_by_the_fast_write_around_it() {
+    let bad = Prop { name: "much too long".into(), ..Prop::default() };
+    let envelope = Envelope { payload: psio::to_pssz(&bad) };
+    // The handler's own check is its own: it holds in both modes.
+    assert!(psio::try_to_json(&envelope).is_err());
+    let mut text = String::new();
+    assert!(psio::to_json_into(&envelope, &mut text).is_err(), "the fast write runs the handler's validating read");
+}

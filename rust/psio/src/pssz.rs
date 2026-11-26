@@ -2204,20 +2204,48 @@ pub fn encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> Vec<u8> {
     // cannot represent: an offset that does not fit its width, the depth
     // limit.
     let _fast = checked::Undeclared::enter();
-    try_encode::<F, T>(value).expect("pssz: the value has no encoding (an offset does not fit its width, or the depth limit); try_encode / try_to_pssz report it")
+    let mut out = Vec::new();
+    append::<F, T>(value, &mut out).expect("pssz: the value has no encoding (an offset does not fit its width, or the depth limit); try_encode / try_to_pssz report it");
+    out
 }
 
-/// Checked encode. Offset-width, bound, cap and depth failures are errors.
+/// The VALIDATED write: the encoding of `value`, or why a validating reader
+/// would refuse it (a bound, an order, an invariant) or why it has no
+/// encoding at all (an offset width, a cap, the depth limit). It validates
+/// whatever the caller is in the middle of.
 pub fn try_encode<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
+    let _validating = checked::Declared::enter();
     let mut out = Vec::new();
-    encode_into::<F, T>(value, &mut out)?;
+    append::<F, T>(value, &mut out)?;
     Ok(out)
 }
 
+/// The encoding of `value` in the mode of the caller: validated in a
+/// validating read (a `Nested` member read from text), fast in a trusted
+/// one.
+pub(crate) fn try_encode_as_the_caller<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<Vec<u8>> {
+    let mut out = Vec::new();
+    append::<F, T>(value, &mut out)?;
+    Ok(out)
+}
 
-/// `psio::encode(fmt, v, sink)`: appends the encoding of `value` to `out`.
+/// `psio::encode(fmt, v, sink)`: appends the encoding of `value` to `out` —
+/// the fast write, as [`encode`]; an error is a value that has no encoding.
 /// On error `out` is left as it was.
 pub fn encode_into<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    let _fast = checked::Undeclared::enter();
+    append::<F, T>(value, out)
+}
+
+/// The validated write, appended: [`try_encode`] into `out`. On error `out`
+/// is left as it was.
+pub fn try_encode_into<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
+    let _validating = checked::Declared::enter();
+    append::<F, T>(value, out)
+}
+
+// The write, in whatever mode the thread is in.
+fn append<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
     checked::format::<F>()?;
     let start = out.len();
     checked::reserve_hint::<F, T>(value, out);
@@ -2232,6 +2260,8 @@ pub fn encode_into<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T, out: &mut 
 
 /// `psio::size_of(fmt, v)`: the size of the encoding of `value`.
 pub fn size_of<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> usize {
+    // (Of the fast write: `try_size_of` is the validated size.)
+    let _fast = checked::Undeclared::enter();
     value.pssz_size()
 }
 
@@ -2239,6 +2269,7 @@ pub fn size_of<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> usize {
 /// same checks, and nothing is written or allocated (a hand-written codec
 /// without a size pass of its own is encoded and measured).
 pub fn try_size_of<F: PsszFormat, T: PsszPack<F> + ?Sized>(value: &T) -> PsszResult<usize> {
+    let _validating = checked::Declared::enter();
     checked::format::<F>()?;
     let size = value.pssz_size_at_depth(checked::encode_depth())?;
     checked::check_cap(T::MAX_DYNAMIC_DATA, size)?;
@@ -2256,6 +2287,7 @@ fn enter<F: PsszFormat>(cap: Option<usize>, bytes: &[u8]) -> PsszResult<()> {
 /// [`decode_strict`] to reject them. The decoder checks as it reads, so the
 /// input is read once.
 pub fn decode<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (_session, depth) = checked::DecodeSession::enter_at(true);
     T::pssz_unpack_at_depth(bytes, depth)
@@ -2263,6 +2295,7 @@ pub fn decode<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> Ps
 
 /// Exact-schema decode: additionally rejects unknown fields.
 pub fn decode_strict<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<T> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (session, depth) = checked::DecodeSession::enter_at(false);
     let value = T::pssz_unpack_at_depth(bytes, depth)?;
@@ -2283,6 +2316,7 @@ impl<T> Decoded<T> {
 /// Compatible decode that reports whether unknown optional suffix fields were
 /// present anywhere in the tree (C++ `decode_pssz_checked`).
 pub fn decode_checked<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<Decoded<T>> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (session, depth) = checked::DecodeSession::enter_at(true);
     let value = T::pssz_unpack_at_depth(bytes, depth)?;
@@ -2291,6 +2325,7 @@ pub fn decode_checked<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8
 
 /// Exact schema and bytes identical to the canonical re-encoding.
 pub fn validate_canonical_for_profile<F: PsszFormat, T: PsszPack<F> + PsszUnpack<F>>(bytes: &[u8]) -> PsszResult<()> {
+    let _validating = checked::Declared::enter();
     let value = decode_strict::<F, T>(bytes)?;
     if try_encode::<F, T>(&value)? != bytes { return Err(PsszError::new("pssz: noncanonical encoding")); }
     Ok(())
@@ -2300,6 +2335,7 @@ pub fn validate_canonical_for_profile<F: PsszFormat, T: PsszPack<F> + PsszUnpack
 /// suffix fields; rejects everything decode rejects, including unpruned
 /// records.
 pub fn validate<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (_session, depth) = checked::DecodeSession::enter_at(true);
     T::pssz_validate_at_depth(bytes, depth)
@@ -2307,6 +2343,7 @@ pub fn validate<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes:
 /// Structural validation reporting whether unknown fields were present
 /// (C++ `validate_pssz_compatible`).
 pub fn validate_compatible<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<bool> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (session, depth) = checked::DecodeSession::enter_at(true);
     T::pssz_validate_at_depth(bytes, depth).map(|_| session.has_unknown())
@@ -2314,6 +2351,7 @@ pub fn validate_compatible<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Si
 /// Exact-schema validation (C++ `psio::validate_strict`): rejects unknown
 /// fields. A raw string is any bytes here too.
 pub fn validate_strict<F: PsszFormat, T: PsszPack<F> + PsszValidate<F> + ?Sized>(bytes: &[u8]) -> PsszResult<()> {
+    let _validating = checked::Declared::enter();
     enter::<F>(T::MAX_DYNAMIC_DATA, bytes)?;
     let (session, depth) = checked::DecodeSession::enter_at(false);
     T::pssz_validate_at_depth(bytes, depth)?;
@@ -2337,7 +2375,7 @@ pub fn try_to_pssz<T: PsszPack<Pssz> + ?Sized>(value: &T) -> PsszResult<Vec<u8>>
 /// The validated write, appended (C++ `psio::to_pssz_checked(v, sink)`):
 /// [`try_to_pssz`] into `out`. On error `out` is left as it was.
 pub fn try_to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
-    encode_into::<Pssz, T>(value, out)
+    try_encode_into::<Pssz, T>(value, out)
 }
 
 /// Appends the encoding of `value` to `out`: the fast write, as [`to_pssz`]
@@ -2346,7 +2384,6 @@ pub fn try_to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>
 pub fn to_pssz_into<T: PsszPack<Pssz> + ?Sized>(value: &T, out: &mut Vec<u8>) -> PsszResult<()> {
     // The fast write, as `to_pssz`: an error is a value the format cannot
     // represent, not a declaration it violates.
-    let _fast = checked::Undeclared::enter();
     encode_into::<Pssz, T>(value, out)
 }
 
@@ -2411,7 +2448,7 @@ pub fn validate_pssz<T: PsszPack<Pssz> + PsszValidate<Pssz> + ?Sized>(bytes: &[u
 
 /// Size of the encoding of `value` (C++ `psio::pssz_size(v)`).
 pub fn pssz_size<T: PsszPack<Pssz> + ?Sized>(value: &T) -> usize {
-    value.pssz_size()
+    size_of::<Pssz, T>(value)
 }
 
 // ── The generic layer and the buffer names ──────────────────────────────────
@@ -2424,7 +2461,7 @@ macro_rules! format_impls {
         impl<T: PsszPack<$tag> + ?Sized> crate::Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> PsszResult<usize> {
                 let start = out.len();
-                encode_into::<$tag, T>(self, out)?;
+                try_encode_into::<$tag, T>(self, out)?;
                 Ok(out.len() - start)
             }
             fn encoded_size(&self) -> PsszResult<usize> {

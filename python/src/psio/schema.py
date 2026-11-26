@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Union
 from . import ir as _ir
 from ._core import (
     FUNC_FIELDS, FUNC_SIZE, MAX_TUPLE_ELEMENTS, MEMBER_BOUND, ROOT, Binding, Codec, Ctx, Handler, LengthBound, Node,
-    Order, Pos, _check_attributes, _parse_cap, _parse_length_bound, fast_write, member_bound_admits, nested_member,
+    Order, Pos, _check_attributes, _parse_cap, _parse_length_bound, fast_write, member_bound_admits, validating, nested_member,
     parse_max_fields, reserved_custom_id, strip,
 )
 from ._key import decode_key, encode_key, encode_key_prefix
@@ -81,7 +81,7 @@ def _as_bytes(data: Any, what: str = "pssz") -> bytes:
 _WRITE_ERRORS = (AttributeError, TypeError, KeyError, IndexError, ValueError, OverflowError)
 
 
-def _writing(run: Callable[[], Any]) -> Any:
+def _writing_as_called(run: Callable[[], Any]) -> Any:
     """A writer: anything a wrong value raises is an EncodeError."""
     try:
         return run()
@@ -93,7 +93,21 @@ def _writing(run: Callable[[], Any]) -> Any:
         raise EncodeError(f"psio: value does not fit its type: {type(e).__name__}: {e}") from e
 
 
+def _writing(run: Callable[[], Any]) -> Any:
+    """A validated write (or a check of a value): it validates whatever the caller is in the middle of."""
+    return validating(lambda: _writing_as_called(run))
+
+
+def _writing_fast(run: Callable[[], Any]) -> Any:
+    return fast_write(lambda: _writing_as_called(run))
+
+
 def _reading(run: Callable[[], Any], kind: Any = DecodeError) -> Any:
+    """A validating read: it validates whatever the caller is in the middle of."""
+    return validating(lambda: _reading_as_called(run, kind))
+
+
+def _reading_as_called(run: Callable[[], Any], kind: Any = DecodeError) -> Any:
     try:
         return run()
     except PsioError:
@@ -182,15 +196,15 @@ class SchemaType:
 
     def to_pssz(self, value: Any) -> bytes:
         """The PSSZ bytes of ``value``: the fast write (``to_pssz_checked`` validates)."""
-        return fast_write(lambda: self.to_pssz_checked(value))
+        return self._pssz(value, _writing_fast)
 
     def to_key(self, value: Any) -> bytes:
         """The ``key`` bytes of ``value``: the fast write (``to_key_checked`` validates)."""
-        return fast_write(lambda: self.to_key_checked(value))
+        return self._key(value, _writing_fast)
 
     def to_json(self, value: Any, format: str = "json") -> str:
         """JSON text of ``value``: the fast write (``to_json_checked`` validates)."""
-        return fast_write(lambda: self.to_json_checked(value, format))
+        return self._json(value, format, _writing_fast)
 
     def to_ijson_checked(self, value: Any) -> str:
         return self.to_json_checked(value, "ijson")
@@ -198,11 +212,14 @@ class SchemaType:
     def to_pssz_checked(self, value: Any) -> bytes:
         """The validated write: the canonical PSSZ bytes of ``value``, or an ``EncodeError`` for a
         value ``validate_pssz`` would refuse the bytes of."""
+        return self._pssz(value, _writing)
+
+    def _pssz(self, value: Any, writing: Callable[[Callable[[], Any]], Any]) -> bytes:
         codec, node = self._codec, self._node
         if codec.W == 0 or node.cap is None:
             enc = self._enc
-            return _writing(lambda: enc(value, 0))
-        return _writing(lambda: codec.encode_top(self._ref, value, self._pos))
+            return writing(lambda: enc(value, 0))
+        return writing(lambda: codec.encode_top(self._ref, value, self._pos))
 
     def pssz_size(self, value: Any) -> int:
         """The size of the encoding of ``value``."""
@@ -254,10 +271,13 @@ class SchemaType:
 
     def to_key_checked(self, value: Any) -> bytes:
         """The ``key`` bytes of ``value``: bytewise order is value order."""
+        return self._key(value, _writing)
+
+    def _key(self, value: Any, writing: Callable[[Callable[[], Any]], Any]) -> bytes:
         def run() -> bytes:
             self._codec.check_value(self._ref, value, "value")
             return encode_key(self._codec, self._ref, value)
-        return _writing(run)
+        return writing(run)
 
     def from_key(self, data: Any) -> Any:
         """Decodes key bytes: exactly one canonical key spanning the whole input."""
@@ -274,7 +294,7 @@ class SchemaType:
     def key_prefix(self, elements: Any) -> bytes:
         """The key of the leading ``elements`` of a tuple / record type: what every full key with them starts with.
         A fast write, as ``to_key``."""
-        return fast_write(lambda: _writing(lambda: encode_key_prefix(self._codec, self._ref, elements)))
+        return _writing_fast(lambda: encode_key_prefix(self._codec, self._ref, elements))
 
     def key_size(self, value: Any) -> int:
         return len(self.to_key(value))
@@ -282,8 +302,11 @@ class SchemaType:
     # ── JSON / I-JSON ───────────────────────────────────────────────────────
 
     def to_json_checked(self, value: Any, format: str = "json") -> str:
+        return self._json(value, format, _writing)
+
+    def _json(self, value: Any, format: str, writing: Callable[[Callable[[], Any]], Any]) -> str:
         from ._json import value_to_json
-        return _writing(lambda: value_to_json(self._codec, self._ref, format, value))
+        return writing(lambda: value_to_json(self._codec, self._ref, format, value))
 
     def to_ijson(self, value: Any) -> str:
         return self.to_json(value, "ijson")

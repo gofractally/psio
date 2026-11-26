@@ -264,6 +264,13 @@ macro_rules! json_text_form {
 /// The text of `value`, or why it has none (NaN, an infinity, a `RawString`
 /// that is not UTF-8, a violated invariant).
 pub fn try_encode<F: JsonFormat, T: JsonText>(value: &T) -> Result<String> {
+    // The validated write validates whatever the caller is in the middle of.
+    let _validating = crate::pssz_checked::Declared::enter();
+    write_text::<F, T>(value)
+}
+
+// The text, in whatever mode the thread is in.
+fn write_text<F: JsonFormat, T: JsonText>(value: &T) -> Result<String> {
     let mut w = Writer::new(F::IJSON);
     value.write_json(&mut w)?;
     // The writer only emits validated UTF-8.
@@ -274,7 +281,9 @@ pub fn try_encode<F: JsonFormat, T: JsonText>(value: &T) -> Result<String> {
 /// [`try_encode`] where that can depend on data.
 #[track_caller]
 pub fn encode<F: JsonFormat, T: JsonText>(value: &T) -> String {
-    match try_encode::<F, T>(value) {
+    // The fast write.
+    let _fast = crate::pssz_checked::Undeclared::enter();
+    match write_text::<F, T>(value) {
         Ok(text) => text,
         Err(e) => panic!("{}: the value has no text: {e}", F::NAME),
     }
@@ -286,6 +295,19 @@ pub fn encode<F: JsonFormat, T: JsonText>(value: &T) -> String {
 /// used before any is allocated (text that fits it never reallocates), and
 /// past it the buffer grows by doubling. No second buffer is made.
 pub fn encode_into<F: JsonFormat, T: JsonText>(value: &T, out: &mut String) -> Result<()> {
+    // The fast write, as `encode`: an error is a value that has no text.
+    let _fast = crate::pssz_checked::Undeclared::enter();
+    append_string::<F, T>(value, out)
+}
+
+/// The validated write, appended: [`try_encode`] into `out`. On error `out`
+/// is left as it was.
+pub fn try_encode_into<F: JsonFormat, T: JsonText>(value: &T, out: &mut String) -> Result<()> {
+    let _validating = crate::pssz_checked::Declared::enter();
+    append_string::<F, T>(value, out)
+}
+
+fn append_string<F: JsonFormat, T: JsonText>(value: &T, out: &mut String) -> Result<()> {
     let start = out.len();
     let mut bytes = std::mem::take(out).into_bytes();
     let result = append_text::<F, T>(value, &mut bytes);
@@ -320,7 +342,13 @@ fn append_text<F: JsonFormat, T: JsonText>(value: &T, out: &mut Vec<u8>) -> Resu
 
 /// Reads `text` as exactly one `T`. The reader checks as it reads.
 pub fn decode<F: JsonFormat, T: JsonText>(text: impl AsRef<[u8]>) -> Result<T> {
-    let text = text.as_ref();
+    // A validating read validates whatever the caller is in the middle of.
+    let _validating = crate::pssz_checked::Declared::enter();
+    read_text::<F, T>(text.as_ref())
+}
+
+// The read, in whatever mode the thread is in.
+fn read_text<F: JsonFormat, T: JsonText>(text: &[u8]) -> Result<T> {
     let mut r = Reader::new(text, F::IJSON);
     if text.is_empty() {
         return Err(r.err("json: empty input"));
@@ -351,7 +379,6 @@ macro_rules! helper_names {
         #[doc = concat!("The ", $name, " text of `value` (C++ `psio::", $cpp, "`): the FAST write. The value is not held against what its type declares (bounds, order, invariants). Panics when the value has no text at all (NaN, an infinity, non-UTF-8 raw bytes); [`", stringify!($try_to), "`] is the validated write.")]
         #[track_caller]
         pub fn $to<T: JsonText>(value: &T) -> String {
-            let _fast = crate::pssz_checked::Undeclared::enter();
             encode::<$tag, T>(value)
         }
         #[doc = concat!("The VALIDATED write (C++ `psio::", stringify!($to), "_checked(v)`): the text, or why a validating reader would refuse it — a member outside its bound or order, a violated invariant — or why the value has no text.")]
@@ -360,11 +387,10 @@ macro_rules! helper_names {
         }
         #[doc = concat!("The validated write, appended: [`", stringify!($try_to), "`] into `out`. On error `out` is left as it was.")]
         pub fn $try_to_into<T: JsonText>(value: &T, out: &mut String) -> Result<()> {
-            encode_into::<$tag, T>(value, out)
+            try_encode_into::<$tag, T>(value, out)
         }
         #[doc = concat!("Appends the ", $name, " text of `value` to `out`: the fast write, as [`", stringify!($to), "`]. An error is a value that has no text; `out` is left as it was.")]
         pub fn $to_into<T: JsonText>(value: &T, out: &mut String) -> Result<()> {
-            let _fast = crate::pssz_checked::Undeclared::enter();
             encode_into::<$tag, T>(value, out)
         }
         #[doc = concat!("The checked decode: reads ", $name, " `text` as exactly one `T`. A missing member is an error unless it is an `Option`, which is `None`.")]
@@ -375,7 +401,7 @@ macro_rules! helper_names {
         #[track_caller]
         pub fn $from_trusted<T: JsonText>(text: impl AsRef<[u8]>) -> T {
             let _trusted = crate::pssz_checked::Undeclared::enter();
-            match decode::<$tag, T>(text) {
+            match read_text::<$tag, T>(text.as_ref()) {
                 Ok(value) => value,
                 Err(e) => panic!(concat!(stringify!($from_trusted), ": the text is not valid: {}"), e),
             }
@@ -408,6 +434,7 @@ macro_rules! format_impls {
         impl<T: JsonText> Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize> {
                 // In place: the capacity of `out` is used, no second buffer.
+                let _validating = crate::pssz_checked::Declared::enter();
                 append_text::<$tag, T>(self, out)
             }
         }

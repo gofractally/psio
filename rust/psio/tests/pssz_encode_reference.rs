@@ -588,7 +588,7 @@ impl Transcript {
         // The append is a transaction: what was there stays, and on error
         // nothing is added. Both entry points agree with `try_encode`.
         let mut appended = vec![9u8, 8, 7];
-        let into = encode_into::<F, T>(value, &mut appended);
+        let into = psio::pssz::try_encode_into::<F, T>(value, &mut appended);
         let mut packed = vec![9u8, 8, 7];
         let checked = value.pssz_pack_checked(&mut packed);
         assert_eq!(&appended[..3], [9, 8, 7]);

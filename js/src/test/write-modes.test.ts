@@ -103,3 +103,52 @@ test('write modes: the fast write still refuses what the format cannot represent
   // A wrong JavaScript type is not a value in any mode.
   assert.throws(() => Pair.encode({ a: 1 as unknown as string, b: '' }), PsszError);
 });
+
+test('write modes: a validating call inside a fast write still validates', () => {
+  // The mode belongs to the call. Code of the value that runs in the middle
+  // of a fast write (here: a getter) and asks for a validating read or a
+  // validated write gets one.
+  const bad: PropValue = { ids: [3, 1, 2, 9], name: 'much too long', tags: ['toolong', 'b', 'c'], items: [], even: 1 };
+  const fast = { pssz: Prop.encode(bad), key: Prop.encodeKey(bad), json: Prop.valueToJson(bad) };
+  const refuses = (run: () => unknown): boolean => attempt(() => (run(), true)) === undefined;
+  const Outer = record('Outer', { ids: field(list(u32), { max: 2 }) });
+  let seen: Record<string, boolean>[] = [];
+  const probe = {
+    get ids(): number[] {
+      seen.push({
+        decode: refuses(() => Prop.decode(fast.pssz)),
+        validate: !Prop.validate(fast.pssz).ok,
+        encodeChecked: refuses(() => Prop.encodeChecked(bad)),
+        decodeKey: refuses(() => Prop.decodeKey(fast.key)),
+        validateKey: !Prop.validateKey(fast.key).ok,
+        encodeKeyChecked: refuses(() => Prop.encodeKeyChecked(bad)),
+        jsonToValue: refuses(() => Prop.jsonToValue(fast.json)),
+        jsonToPssz: refuses(() => Prop.jsonToPssz(fast.json)),
+        valueToJsonChecked: refuses(() => Prop.valueToJsonChecked(bad)),
+      });
+      return [1, 2, 3]; // itself over the bound of the fast write around it
+    },
+  };
+  const writes: [string, () => unknown][] = [
+    ['encode', () => Outer.encode(probe)],
+    ['encodeKey', () => Outer.encodeKey(probe)],
+    ['valueToJson', () => Outer.valueToJson(probe)],
+  ];
+  for (const [name, write] of writes) {
+    seen = [];
+    write();
+    assert.ok(seen.length > 0, name);
+    for (const checks of seen)
+      assert.deepEqual(Object.entries(checks).filter(([, held]) => !held).map(([k]) => k), [], name);
+  }
+  // The validated write is not made fast by a fast write inside it either.
+  const inner = {
+    get ids(): number[] {
+      Prop.encode(bad);
+      return [1, 2, 3];
+    },
+  };
+  assert.ok(refuses(() => Outer.encodeChecked(inner)));
+  assert.ok(refuses(() => Outer.encodeKeyChecked(inner)));
+  assert.ok(refuses(() => Outer.valueToJsonChecked(inner)));
+});
