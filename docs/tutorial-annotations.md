@@ -165,9 +165,12 @@ not_text.owner   = "\xff";                                // not UTF-8
 CHECK_THROWS_AS(psio::to_pssz_checked(not_text), psio::codec_exception);
 ```
 
-A value outside its bounds has no encoding, and readers reject bytes that
-hold one (`pssz: member length_bound violated`,
-`utf8_spec: invalid leading byte`).
+A value outside its bounds is not a value of the type: readers reject bytes
+that hold one, and the validated write `psio::to_pssz_checked` refuses to
+make them (`pssz: member length_bound violated`,
+`utf8_spec: invalid leading byte`). The ordinary write `psio::to_pssz` is the
+fast write: it does not hold the value against its bounds
+([reference 7.2](annotations.md#72-reading-and-writing-the-two-modes)).
 
 What you saved: `Account{7, "alice", {"vip", "beta"}, 100}` is 33 bytes;
 the same value as `AccountPlain` is 48. The frame:
@@ -756,8 +759,9 @@ CHECK_THROWS_AS(psio::from_key<OwnerKey>(unbounded), psio::codec_exception);
 ```
 
 - Annotations do not change key bytes, and a key has no offset width.
-- The key writer checks what the pssz writer checks: `to_key` throws for a
-  value outside a member bound or with a `utf8` member that is not UTF-8,
+- `to_key` is the fast write: every value has a key. The validated write
+  checks what the validated pssz write checks: `to_key_checked` throws for
+  a value outside a member bound or with a `utf8` member that is not UTF-8,
   and `psio::encode_key_checked(value, out)` returns a status instead.
   Validate keys that arrive from outside (`validate_key` / `from_key`).
 

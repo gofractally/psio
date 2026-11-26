@@ -46,8 +46,11 @@ For a format `F`:
 
 | Name | Meaning | It is |
 |------|---------|-------|
-| `to_F(v)` | encode into a fresh buffer | `psio::encode(psio::F{}, v)` |
-| `to_F(v, sink)` | encode into an existing buffer | `psio::encode(psio::F{}, v, sink)` |
+| `to_F(v)` | the fast write: encode into a fresh buffer; the value is not held against what its type declares | `psio::encode(psio::F{}, v)` |
+| `to_F(v, sink)` | the fast write into an existing buffer | `psio::encode(psio::F{}, v, sink)` |
+| `to_F_checked(v)` | the validated write: the bytes (text for a text format), or the failure `from_F` has for bytes that hold such a value | `psio::encode_checked(psio::F{}, v, out)`, `psio::codec_abort` on failure |
+| `to_F_checked(v, sink)` | the validated write, appended to a `std::vector<char>` (or `std::string`); the sink is unchanged on failure | the same |
+| `encode_F_checked(v, out)` | the validated write as a `psio::codec_status`; never throws or aborts on a value | `psio::encode_checked(psio::F{}, v, out)` |
 | `from_F<T>(bytes)` | validate, then decode | `psio::validate<T>(psio::F{}, bytes)`, `psio::codec_abort` on failure, then `psio::decode<T>(psio::F{}, bytes)` |
 | `from_F<T>(psio::trusted{bytes})` | decode without the validation pass | `psio::decode<T>(psio::F{}, bytes)` |
 | `validate_F<T>(bytes)` | `psio::codec_status`; never throws or aborts | `psio::validate<T>(psio::F{}, bytes)` |
@@ -102,15 +105,39 @@ and has no helper names.
 pjson is not in the table. It has no format tag in the generic layer; its
 entry points are in `psio/pjson.hpp` and `psio/pjson_typed.hpp`.
 
-A value outside the bounds its type declares — a member `max<N>`, the bounds
-of its elements, keys and values (`element` / `keys` / `values` / `at<I>`), a
-`psio::bounded` or `psio::utf8_string`, a `maxDynamicData` cap — has no
-encoding: `to_F` throws, and `from_F` / `validate_F` refuse bytes that hold
-one. That is the behaviour of `pssz`, `json` and `ijson`. `to_key` is an
-exception: the C++ key encoder does not check member bounds or `utf8`;
-`from_key` and `validate_key` do. Which format reads which annotation:
+## Fast and validated write
+
+A value outside what its type declares — a member `max<N>` / `min<N>` /
+`exact<N>`, the bounds of its elements, keys and values (`element` / `keys` /
+`values` / `at<I>`), `utf8`, an order spec, an invariant, a `psio::bounded`
+or `psio::utf8_string` — is refused by `from_F` and `validate_F` of every
+format. Writing has two modes, the same in every format:
+
+* `to_F(v)` / `psio::encode(F{}, v)` is the **fast write**. It does not hold
+  `v` against the declaration. It fails only where the format cannot
+  represent the value: in `pssz` a payload that needs an offset its type's
+  width cannot express, a total over a `maxDynamicData` cap, a null `Box`,
+  the depth limit; in `json` a string that is not UTF-8 or a non-finite
+  float. No declaration changes the bytes of the other formats.
+* `to_F_checked(v)` / `encode_F_checked(v, out)` /
+  `psio::encode_checked(F{}, v, out)` is the **validated write**. It refuses
+  what `validate_F` would refuse, with the same message, and writes
+  nothing. `pssz`, `key` and `json` check as they encode
+  (`F::encode_checked`); the other formats write fast and run their own
+  validator on the bytes.
+* `psio::validate_value(v)` (`psio/value_contract.hpp`) checks `v` once,
+  for every format; write fast afterwards.
+
+`F_buffer<T>::from(v)` and `psio::nested<T>{v}` hold "a valid `T`" and use
+the validated write. A program whose bytes leave its hands (table rows
+later read with `psio::trusted`, arguments for another service, results,
+replies) should use the validated write there; a fast write of a violating
+value is found by the next validating reader, or by nobody. Rust:
+`try_to_F` is the validated write of every format; `to_flatbuf` /
+`to_capnp` / `to_protobuf` / `to_wit` are fast, `to_pssz` / `to_key` /
+`to_json` still validate. Which format reads which annotation:
 [annotations.md §1](annotations.md#1-one-declaration-every-format) and
-[§7.2](annotations.md#72-what-is-checked-where); see also
+[§7.2](annotations.md#72-reading-and-writing-the-two-modes); see also
 [bounds by annotation](psio-overview.md#bounds-by-annotation).
 
 ## Checked and trusted decode
@@ -128,7 +155,8 @@ with the validator's error, which
 ### Getting the error text without exceptions
 
 A build without exceptions can still learn *why* before it aborts. Every
-fail-fast path — the checked decode, `to_F` of a value with no encoding, a
+fail-fast path — the checked decode, `to_F_checked` of a value outside its
+declaration, `to_F` of a value the format cannot represent, a
 bounds-checked stream that overruns, `value()` of an absent optional view —
 hands its `psio::codec_error` to the embedder's abort handler first. There
 are two ways to provide one (`psio/error.hpp`):

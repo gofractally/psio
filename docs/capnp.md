@@ -83,11 +83,13 @@ in Cap'n Proto itself).
   of the type all the same: `validate_capnp` and `from_capnp` check the
   structure of the message and then hold the value it decodes to against
   what the type declares
-  ([annotations.md §7.2](annotations.md#72-what-is-checked-where)):
+  ([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)):
   `capnp: member length_bound violated`, the `utf8_spec` / `sorted`
   messages, the invariant's own, at position 0. A type that declares
   nothing is not decoded, and a Text member that is not declared `utf8` is
-  NOT checked for UTF-8 (neither does libcapnp). `to_capnp` does not check.
+  NOT checked for UTF-8 (neither does libcapnp). `to_capnp` is the fast
+  write and does not check; `to_capnp_checked` / `encode_capnp_checked`
+  refuse what `validate_capnp` refuses (Rust: `try_to_capnp`).
   Rust: the same for `validate_capnp` / `from_capnp` /
   `CapnpUnpack::capnp_unpack`; the view of the `CapnpView` derive checks
   the structure only.

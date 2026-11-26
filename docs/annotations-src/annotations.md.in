@@ -50,14 +50,13 @@ every format follows from that one statement:
 
 | Format | What the annotations above do |
 |---|---|
-| **pssz** (`psio::to_pssz`, `from_pssz`, `validate_pssz`) | The record's offsets are 8-bit instead of 32-bit (the bounds add up to 187 bytes), and so is the offset table of `tags`. A value outside a bound has no encoding; bytes that hold one are rejected. |
-| **key** (`psio::to_key`, `from_key`, `validate_key`) | No change to the bytes. The writer refuses a value outside a bound or with a `utf8` member that is not UTF-8 (`to_key` throws, `psio::encode_key_checked` returns a status); the readers reject a key that holds one ([7.2](#72-what-is-checked-where)). |
-| **json / ijson** (`psio::to_json`, `to_ijson`, …) | No change to the text. Writer and reader refuse a value outside a bound. |
+| **pssz** (`psio::to_pssz`, `to_pssz_checked`, `from_pssz`, `validate_pssz`) | The record's offsets are 8-bit instead of 32-bit (the bounds add up to 187 bytes), and so is the offset table of `tags`. Bytes that hold a value outside a bound are rejected by every validating reader; the validated write (`to_pssz_checked`) refuses the value; the fast write (`to_pssz`) refuses it only when the offsets cannot express it ([7.2](#72-reading-and-writing-the-two-modes)). |
+| **key** (`psio::to_key`, `to_key_checked`, `from_key`, `validate_key`) | No change to the bytes. The readers reject a key that holds a value outside a bound or a `utf8` member that is not UTF-8; the validated write (`to_key_checked` throws, `psio::encode_key_checked` returns a status) refuses the value; the fast write (`to_key`) writes it ([7.2](#72-reading-and-writing-the-two-modes)). |
+| **json / ijson** (`psio::to_json`, `to_json_checked`, …) | No change to the text. The readers and the validated write refuse a value outside a bound; the fast write does not look. |
 | **Schema IR** (`psio::SchemaBuilder`) | `owner` is `Custom{BoundedList<u8, 32>, "utf8"}`, `tags` is `BoundedList<Custom{BoundedList<u8, 16>, "utf8"}, 8>`: a reader that has only the schema derives the same width and enforces the same bounds. |
 | **WIT** (`psio::emit_wit`) | A bounded list is `list<T>/* @psio:max=N */`; a record cap is `@maxDynamicData(N)`. A string's bound is not shown. |
 | **GraphQL** (`psio/graphql.hpp`) | Bounds are not part of the GraphQL schema ([graphql.md](graphql.md)). |
-| **flatbuf, capnp, protobuf** (`psio::validate_flatbuf`, `from_flatbuf`, …) | No change to the bytes: they are the ones the format's own specification defines. Every validating read path refuses a value outside a member's bound, a `utf8` member that is not UTF-8, a list outside its order spec and a value its invariant rejects — the structure of the bytes first, then the declarations on the value ([7.2](#72-what-is-checked-where)). The writers do not check. `validate` also applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)); the three read `field<N>`, flatbuf also `deprecated_spec` ([5.12](#512-psio_reflect_enum-and-fieldn)). |
-| bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Member bounds and `utf8` are not read. `validate` applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)). |
+| **flatbuf, capnp, protobuf, bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI** (`psio::validate_F`, `from_F`, `to_F_checked`, …) | No change to the bytes: they are the ones the format's own specification defines. Every validating read path refuses a value outside a member's bound, a `utf8` member that is not UTF-8, a list outside its order spec and a value its invariant rejects — the structure of the bytes first, then the declarations on the value — and the validated write refuses the same value; the fast write (`to_F`) does not look ([7.2](#72-reading-and-writing-the-two-modes)). `validate` also applies a root type's `maxDynamicData` to the size of its own input ([5.4](#54-maxdynamicdatan)); protobuf, capnp and flatbuf read `field<N>`, flatbuf also `deprecated_spec` ([5.12](#512-psio_reflect_enum-and-fieldn)). |
 
 The owner's rules this design implements:
 
@@ -438,9 +437,9 @@ last checked against the tree in which all three run every row of
 
 | Annotation | C++ (`PSIO_REFLECT`) | Rust | TypeScript | Python | Schema IR | Honoured by |
 |---|---|---|---|---|---|---|
-| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `Annotated[T, psio.max(N)]`; in a type alias: `Annotated[str, psio.bounded(N)]` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson (enforced), key (enforced by writers and readers), flatbuf / capnp / protobuf (enforced by the validating readers), schema-driven codecs, WIT (comment on lists) |
+| length ≤ N | `attr(f, max<N>)`; `psio::bounded<T, N>`, `psio::utf8_string<N>` | `#[psio(max = N)]`; `BoundedList<T, N>`, `BoundedString<N>`, `BoundedRawString<N>`, `BoundedMap<K, V, N>`, `BoundedSet<K, N>`, `Nested<T, V, N>` | `field(T, { max: N })`; `boundedList(T, N)`, `boundedUtf8(N)`, `boundedBytes(N)`, `map(K, V, { max: N })`, `set(K, { max: N })` | `Annotated[T, psio.max(N)]`; in a type alias: `Annotated[str, psio.bounded(N)]` | `BoundedList{type, maxCount}` (under `Custom "utf8"` / `"string"` / `"hex"` / `"map"` / `"set"`); `lengthBound="max=N"` on a `Nested` member | pssz (width + enforced), json/ijson, key and every binary format (enforced by the validating readers and the validated writes: [7.2](#72-reading-and-writing-the-two-modes)), schema-driven codecs, WIT (comment on lists) |
 | length = N, length ≥ N, a range | `attr(f, exact<N>)`, `attr(f, min<N>)`, `attr(f, min<A> \| max<B>)` (= `psio::length_bound{.max = B, .min = A}`) — member only | — | `field(T, { lengthBound: { exact, min, max } })` — member only | `psio.exact(N)`, `psio.min(N)`, `psio.length(min=A, max=B)` — member only | member attribute `lengthBound="exact=N"` / `"min=A,max=B"` | as above (`min` alone gives no width) |
-| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | n/a: `str` is UTF-8, `psio.RawString` is raw bytes (`bytes` in Python) | `Custom{…, "utf8"}` (raw: `"string"`) | pssz, json/ijson and key (writers and readers), flatbuf / capnp (the validating readers; a protobuf `string` is UTF-8 by its own format), schema-driven codecs |
+| UTF-8 text | `attr(f, utf8)`; `psio::utf8_string<>` | n/a: `String` is UTF-8, `RawString` is raw bytes | `utf8` / `boundedUtf8(N)`; `field(rawString, { utf8: true })` | n/a: `str` is UTF-8, `psio.RawString` is raw bytes (`bytes` in Python) | `Custom{…, "utf8"}` (raw: `"string"`) | pssz, json/ijson, key and every binary format (the validating readers and the validated writes; a protobuf `string` and JSON text are UTF-8 by their own format), schema-driven codecs |
 | elements | `element(specs)` | `element(...)` | `element: { … }` | `psio.element(...)` | the element type's bounded node | as length |
 | map keys / values | `keys(specs)`, `values(specs)` | `keys(...)`, `values(...)` | `keys: { … }`, `values: { … }` | `psio.keys(...)`, `psio.values(...)` | the entry tuple's bounded members | as length |
 | tuple element / variant alternative | `at<I>(specs)` | tuple: `at(I, ...)`; variant: annotate the enum variant's fields | `at: { 0: { … } }` (tuple index, variant name or index) | `psio.at(i, ...)` (tuple index; union alternative index or name) | the member's bounded node | as length |
@@ -448,7 +447,7 @@ last checked against the tree in which all three run every row of
 | fixed layout | `definitionWillNotChange()` | `#[psio(definition_will_not_change)]` | `record(name, fields, { fixed: true })` | `@psio.record(definition_will_not_change=True)` | record attribute `definitionWillNotChange` | pssz (no header), bin / borsh / bincode fast paths, evolution check |
 | field-count cap | `maxFields(N)`, N ≤ 255, on a record or in `method(...)` | `#[psio(max_fields = N)]` on a record or an interface function | `record(name, fields, { maxFields: N })`, `argumentTuple(params, { maxFields: N })`, `method(params, { maxFields: N })` | `@psio.record(max_fields=N)`, `@psio.method(max_fields=N)` | attribute `maxFields="N"` on the record's `Object`, on an argument list's `Object` and on its `Func` | where the type is declared (C++ and Rust: compile time; TypeScript and Python: at declaration), the schema-driven codecs (a schema with more members than its `maxFields` is invalid), the compatibility checks of every language ([4.1](#41-tooling-per-language)), WIT `@maxFields(N)`. No byte, no width ([5.6](#56-maxfieldsn)) |
 | the type is its member | `transparent()`; the member may carry `utf8`, `max<N>` and position specs | `#[psio(transparent)]`; the member may carry `#[psio(max = N)]` | `transparent(name, T)` with a bounded `T` (`boundedUtf8(80)`) | `NewType("Name", T)`; `@psio.transparent` on a one-field class, whose field may carry `psio.max(N)` and position bounds | a named alias of the member's (bounded) type | pssz, key, json/ijson, views, schema, GraphQL |
-| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | pssz, key, json/ijson writers and checking readers; the validating readers of flatbuf / capnp / protobuf; not the trusted decode, not views |
+| value check | `invariant(fn)`, `PSIO_INVARIANT(T, fn)` | `#[psio(invariant = "path")]` | `custom(id, wire, { check })` | `@psio.invariant` on a method; `psio.custom(id, check=…)` | `Custom{wire type, id}` + a handler | the validating readers and the validated writes of every format; not the fast write, not the trusted decode, not views |
 | schema id only | `schemaId("Id")` | `#[psio(custom = "Id")]` (without a text form or an invariant) | `custom(id, wire)` (no handler) | `psio.custom("Id")` (no functions) | `Custom{wire type, id}` | the Schema IR only: a schema-driven tool may register a handler for the id. No codec, validator or view reads it ([5.15](#515-schemaidid)) |
 | integer text form | `attr(f, json_string)`, `json_number`, `ijson_string`, `ijson_number`; type level via `PSIO_TYPE_ATTRS` | `#[json(json_string)]`, … on a field or the type | `field(T, { jsonInt: 'string', ijsonInt: 'number' })` | `Annotated[u64, psio.json_string]`, `psio.json_number`, `psio.ijson_string`, `psio.ijson_number` | member attributes `jsonInt`, `ijsonInt` = `"number"` / `"string"` | json, ijson, schema-driven text |
 | custom text form | `PSIO_ADAPTER(T, psio::text_category, Impl)`; per member `attr(f, as<Tag>)` | `#[psio(custom)]` + `psio::json_text_form!(T)` | `custom(id, wire, { toText, fromText })` | `@psio.to_text` / `@psio.from_text` methods; `psio.custom(id, to_text=…, from_text=…)` | `Custom{wire type, id}` (a member `as<Tag>` is not expressible) | json, ijson, GraphQL scalar; binary unchanged |
@@ -457,7 +456,7 @@ last checked against the tree in which all three run every row of
 | field number | `attr(f, field<N>)` | `#[psio(field = N)]` on a field | `field(T, { number: N })` | `psio.number(N)` | member attribute `field` = `"N"` (absent: the 1-based position) | protobuf (the field number), capnp (ordinals in ascending order of it), flatbuf (field ids in ascending order of it); `emit_protobuf`, `emit_capnp`, `emit_fbs` and the layouts computed from a schema |
 | deprecation | `attr(f, deprecated_spec{.version = "…"})` | `#[psio(deprecated)]` on a field | `field(T, { deprecated: '…' })` | `psio.deprecated`, `psio.deprecated("…")` | member attribute `deprecated` = the version | GraphQL (`@deprecated`); flatbuf (the member keeps its field id and is neither written nor read); `emit_fbs` (`(deprecated)`) |
 | default of a scalar member | the member initialiser (`std::int16_t level = 7;`) | `#[psio(default = ..)]` on a field | `field(T, { default: v })` | `psio.default(v)` | member attribute `default` = the value as text (absent: zero) | flatbuf and capnp (a member equal to its default is not written / is zero on the wire, and an absent one reads as it); `emit_fbs`, `emit_capnp` (`= value`). Not read by pssz, key, JSON |
-| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | `#[psio(sorted)]`, `#[psio(unique)]` (`sorted_unique`), `#[psio(unique_keys)]` on a field, also inside `element(...)` and friends (ascending only) | `field(T, { sorted: true \| 'descending', unique: true, uniqueKeys: true })` | `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`, `psio.unique_keys` | — (not in the Schema IR: typed codecs only) | the typed pssz, json/ijson and key writers and checking readers (every language), the validating readers of flatbuf / capnp / protobuf (C++, Rust); order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
+| order, uniqueness of a list's elements | `sorted`, `unique` (`sorted_unique`), `sorted_spec{.ascending = false}`, `unique_keys` | `#[psio(sorted)]`, `#[psio(unique)]` (`sorted_unique`), `#[psio(unique_keys)]` on a field, also inside `element(...)` and friends (ascending only) | `field(T, { sorted: true \| 'descending', unique: true, uniqueKeys: true })` | `psio.sorted`, `psio.unique`, `psio.sorted(descending=True)`, `psio.unique_keys` | — (not in the Schema IR: typed codecs only) | the validating readers and the validated writes of the typed pssz, json/ijson and key codecs (every language) and of the other binary formats (C++; Rust: flatbuf, capnp, protobuf, wit); order is that of the elements' key bytes ([5.13](#513-sorted-unique-unique_keys)) |
 | reserved vocabulary | `hex_spec`, `skip_spec`, `default_value_spec`, `default_factory_spec`, `since_spec`, `unstable_spec`, `final_v`, `canonical`, `flags`, `padding` | Rust has `#[psio(skip)]` (a different, implemented meaning) | — | — | — | RESERVED: nothing reads them ([5.14](#514-reserved-vocabulary)) |
 
 ### 4.1 Tooling per language
@@ -469,7 +468,7 @@ the table above.
 |---|---|---|---|---|
 | compatibility check of two revisions | `psio::pssz_evolves_from<Old, New>` (compile time): fields, widths, bounds that only widen, `utf8`, order specs, caps, `maxFields` ([8](#8-evolution-what-may-change-after-publication)) | `pssz::pssz_evolves_from::<Old, New>()` (`const fn`): the C++ rule — fields, widths, bounds that only widen, caps, `max_fields`, alternatives appended to an enum with data. At run time, over two Schema IRs (C++ `psio::pssz_ir::evolves_from` / `equivalent`): `pssz::dynamic::evolves_from(&old, &old_type, &new, &new_type, Compare::Contract \| Compare::Wire)` and `equivalent(...)` → `Compatibility { ok, code, reason, path }`, with `evolves_from_func` / `_interface` / `_schema` and `equivalent_func` / `_interface` / `_schema` | `psszEvolvesFrom(Old, New, { compare: 'contract' \| 'wire' })` and `psszEquivalent(A, B, { compare })` → `{ ok: true }` or `{ ok: false, code, reason, path }`, at run time over two definitions or two fetched schema types, methods, interfaces or schemas: the rule of C++ `psio::pssz_ir::evolves_from` / `equivalent` (`'contract'`, the default, also compares names, custom ids, enums and text forms; `'wire'` the bytes only) | `psio.evolves_from(Old, New, mode="contract" \| "wire")` and `psio.equivalent(A, B, mode=…)` → a `psio.Compatibility` (`ok`, `code`, `reason`, `path`), at run time over two declarations or two schema types, methods, interfaces or `psio.Schema` values: the rule of C++ `psio::pssz_ir::evolves_from` / `equivalent` |
 | the inferred bound and the largest encoding ([5.4](#54-maxdynamicdatan)) | `psio::inferred_bound<T>()`, `psio::max_encoded_size<T>()` (compile time) | `pssz::inferred_bound::<T>()`, `pssz::max_encoded_size::<T>()` (`const fn`; `PsszPack::INFERRED_BOUND`, `MAX_ENCODED_SIZE`), `Option<usize>` | `T.inferredBound`, `T.maxEncodedSize`: `bigint` or `null`, of a definition or a fetched schema type | `psio.codec(T).inferred_bound`, `.max_encoded_size`: `int` or `None`, of a declaration or a schema type |
-| key writer checks bounds and UTF-8 | `psio::to_key` (throws), `psio::encode_key_checked` (status) | `psio::try_to_key`: derived members and the `BoundedString` / `BoundedRawString` / `BoundedList` / `BoundedMap` / `BoundedSet` wrapper types | `T.encodeKey` | `psio.to_key` |
+| the validated write (bounds, UTF-8, order, invariants) | `psio::to_F_checked(v)` (throws), `psio::encode_F_checked(v, out)` (status), `psio::encode_checked(F{}, v, out)`, for every format; `psio::validate_value(v)`. `to_F` / `psio::encode` are the fast write | `psio::try_to_pssz`, `try_to_key`, `try_to_json`, `try_to_flatbuf`, `try_to_capnp`, `try_to_protobuf`, `try_to_wit`. `to_flatbuf` / `to_capnp` / `to_protobuf` / `to_wit` are the fast write; `to_pssz` / `to_key` / `to_json` still validate and panic on a violating value (not yet the fast write) | `T.encode`, `T.encodeKey`, `T.valueToJson`: validated; no fast write yet | `psio.to_pssz`, `to_key`, `to_json`: validated; no fast write yet |
 | JSON form of an argument list | writes an object when every parameter is named, else an array; reads either for a named list | writes the object and reads either; a function marked `#[psio(positional)]` is the array only | a named list writes the object and reads either; `method([...])` / `argumentTuple([...])` without names is the array only | a named list writes the object and reads either; a list without names (`psio.arguments(..., named=False)`) is the array only |
 | result encoded as its `returns(...)` type | `psio::encode_method_result<T, I>`, `decode_method_result`, `validate_method_result`, `check_method_result` | `Method::result_to_pssz` / `result_from_pssz` of `args::<method>` | `defineInterface(...).methods.<m>.result` (a codec: `encode` / `decode` / `validate`); from a fetched schema `schema.interface(name).method(m).result` | `result_to_pssz` / `result_from_pssz` / `validate_result` of `psio.interface_of(T)[name]` |
 | interface → Schema IR `Interface` / `Func` | `PSIO_INTERFACE` + `SchemaBuilder::insert_interface<T>()` | `#[psio::interface]` + `SchemaBuilder::insert_interface::<I>()` | `defineInterface(...).schema`; `generateSchema(types, { interfaces: [...] })` | `@psio.interface`, `psio.interface_of(T).schema()` |
@@ -512,13 +511,13 @@ applies to the payload). Below the member (inside `element` / `keys` /
 
 | Format | Effect |
 |---|---|
-| pssz | `max` / `exact` enter the inferred bound (width). Enforced by `to_pssz` / `psio::encode` (throws `codec_exception`: `pssz: member length_bound violated`), `encode_pssz_checked` (status), `validate_pssz`, `validate_strict`, `decode_pssz_checked`, `from_pssz`, and the fail-fast `psio::decode` |
-| key | Bytes unchanged. The writer refuses a value outside the bound: `to_key`, `psio::encode(psio::key{}, …)` and `key_prefix` throw `codec_exception` (`key: member length_bound violated`), `psio::encode_key_checked(value, out)` returns the status and leaves `out` unchanged. `validate_key`, `from_key`, `psio::decode` reject a key that holds one. A key type with nothing to check pays nothing |
-| json / ijson | Text unchanged. Writer (`to_json` throws; `encode_json_checked` returns a status) and readers refuse a value outside the bound |
+| pssz | `max` / `exact` enter the inferred bound (width). Enforced by the validated write — `to_pssz_checked` (throws `codec_exception`: `pssz: member length_bound violated`), `encode_pssz_checked` (status) — and by `validate_pssz`, `validate_strict`, `decode_pssz_checked`, `from_pssz`, and the fail-fast `psio::decode`. The fast write (`to_pssz`, `psio::encode`) refuses a value only when its payload does not fit the offset width the bound gave the type ([7.2](#72-reading-and-writing-the-two-modes)) |
+| key | Bytes unchanged. The validated write refuses a value outside the bound: `to_key_checked` throws `codec_exception` (`key: member length_bound violated`), `psio::encode_key_checked(value, out)` returns the status and leaves `out` unchanged. `validate_key`, `from_key`, `psio::decode` reject a key that holds one. The fast write (`to_key`, `psio::encode(psio::key{}, …)`, `key_prefix`) writes the key of any value |
+| json / ijson | Text unchanged. The validated write (`to_json_checked` throws; `encode_json_checked` returns a status) and the readers refuse a value outside the bound; the fast write (`to_json`) does not look |
 | schema-driven codecs (`psio::pssz_ir`) | The same width and the same rejections, from the IR alone |
 | WIT | `list<T>/* @psio:max=N */` for a bounded list, map or set; a bounded string is `string` |
-| flatbuf, capnp, protobuf | Bytes unchanged. `validate_F`, `from_F` and the validated views refuse a value outside the bound (`flatbuf: member length_bound violated`, `capnp: …`, `protobuf: …`), at the member and at every position below it; in protobuf the bound is held against the finished value (a member written twice: the last scalar, the merged list). The writers (`to_flatbuf`, …) do not check ([7.2](#72-what-is-checked-where)) |
-| GraphQL; bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Not read |
+| flatbuf, capnp, protobuf, bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Bytes unchanged. `validate_F`, `from_F`, the validated views and the validated write (`to_F_checked`, `encode_F_checked`) refuse a value outside the bound (`flatbuf: member length_bound violated`, `bin: …`, …), at the member and at every position below it; in protobuf the bound is held against the finished value (a member written twice: the last scalar, the merged list). The fast write (`to_F`) does not look |
+| GraphQL | Not read |
 
 **Wire / width.** A bound is part of the type: it can change the `W` of
 the record, and the `W` of the list, map, set, array, tuple, pair or map
@@ -577,10 +576,10 @@ text. Across languages:
 
 | Format | Effect |
 |---|---|
-| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the encoder (`utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode. A raw string holds any bytes for every one of them: `validate_strict` means exact schema and canonical form, not "strings are text" (`tutorial 5`) |
-| key | Bytes unchanged (raw and UTF-8 strings have one key form). The writer (`to_key` throws, `encode_key_checked` reports) and the readers (`validate_key`, `from_key`) refuse a `utf8` string that is not UTF-8, for the annotation and for `psio::utf8_string` alike (`tutorial 7`). In Rust, TypeScript and Python a text value is UTF-8 by its type |
+| pssz | Bytes unchanged. A `utf8` string that is not UTF-8 is refused by the validated write (`to_pssz_checked`, `encode_pssz_checked`: `utf8_spec: invalid leading byte` and similar), `validate_pssz`, `validate_strict`, the checked decode and the fail-fast decode; the fast write (`to_pssz`) writes it. A raw string holds any bytes for every one of them: `validate_strict` means exact schema and canonical form, not "strings are text" (`tutorial 5`) |
+| key | Bytes unchanged (raw and UTF-8 strings have one key form). The validated write (`to_key_checked` throws, `encode_key_checked` reports) and the readers (`validate_key`, `from_key`) refuse a `utf8` string that is not UTF-8, for the annotation and for `psio::utf8_string` alike (`tutorial 7`); the fast write (`to_key`) writes it. In Rust, TypeScript and Python a text value is UTF-8 by its type |
 | json / ijson | Both kinds are JSON strings. JSON text is UTF-8, so a **raw string that is not UTF-8 has no JSON**: the writer fails |
-| flatbuf, capnp | Bytes unchanged (a FlatBuffers string and a Cap'n Proto `Text` hold any bytes for a C++ `std::string`). `validate_F`, `from_F` and the validated views refuse a `utf8` string that is not UTF-8 (`utf8_spec: invalid leading byte` and similar). In Rust `String` is UTF-8 by its type and `RawString` is raw |
+| flatbuf, capnp, bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI | Bytes unchanged (these formats hold any bytes for a C++ `std::string`). `validate_F`, `from_F`, the validated views and the validated write refuse a `utf8` string that is not UTF-8 (`utf8_spec: invalid leading byte` and similar). In Rust `String` is UTF-8 by its type and `RawString` is raw |
 | protobuf | A `std::string` is a protobuf `string`, which is UTF-8 by the format: refused with or without the annotation (`protobuf: a string is not UTF-8`) |
 | Schema IR | `"utf8"` vs `"string"`; schema-driven codecs enforce `"utf8"` |
 
@@ -595,7 +594,8 @@ or at any position below it (`tut-4c`: `AccountRawOwner`).
 string *is*, exactly as the type `psio::utf8_string` does. `psio::utf8` is
 `psio::utf8_spec{}`, and the spelled-out `attr(f, psio::utf8_spec{})` is
 the same statement. No annotation is checked by `validate_strict` alone:
-an annotation is enforced by every codec or it is reserved
+an annotation is enforced by every validating reader and every validated
+write, or it is reserved
 ([5.14](#514-reserved-vocabulary); test
 `reference: utf8 annotation and wrapper`, `NamesSpelled`).
 
@@ -906,12 +906,13 @@ encoding, and bytes or text that decode to one are rejected
 | Python | `@psio.invariant` on a method that returns `None` for a value of the type and a message otherwise; over any type: `Annotated[T, psio.custom("Id", check=fn)]` |
 | Schema IR | `Custom{wire type, id}`; a schema cannot carry a predicate, so schema-driven codecs take it as the `check` of the handler registered for `id` |
 
-**Where it runs.** pssz `to_pssz` / `encode`, `encode_pssz_checked`,
-`validate_pssz`, `validate_strict`, `decode_pssz_checked`, `from_pssz`;
-key encode, validate, decode; json / ijson writers and readers; GraphQL
-arguments and results. **Not** in the trusted decode
-(`from_pssz<T>(psio::trusted{bytes})`, `psio::decode`), not in views, not
-in the formats outside the core set.
+**Where it runs.** In every format: the validated write (`to_F_checked`,
+`encode_F_checked`) and the validating readers (`validate_F`, `from_F`,
+`validate_strict`; pssz `decode_pssz_checked`; key `psio::decode`);
+`psio::validate_value(v)`; GraphQL arguments and results. **Not** in the
+fast write (`to_F`, `psio::encode`), not in the trusted decode
+(`from_pssz<T>(psio::trusted{bytes})`, `psio::decode` of pssz), not in
+views.
 
 **Contract.** `noexcept`, returns its verdict, never throws or aborts,
 depends only on the value. One per type; arithmetic types take none.
@@ -1196,7 +1197,8 @@ the order of the values.
 
 @@RUN ref-sorted-run@@
 
-**Enforcement.** The pssz, json / ijson and key writers refuse a value that
+**Enforcement.** The validated writes of every format (`to_F_checked`,
+`encode_F_checked`; the fast write `to_F` does not look) refuse a value that
 violates one (`sorted: elements are not in order`,
 `sorted: elements are not in strictly ascending order`,
 `unique_keys: two elements have the same key`), and every checking reader
@@ -1677,10 +1679,11 @@ of its fields ([key-spec.md](key-spec.md)).
   ([key-spec.md §3](key-spec.md#3-composite-keys)).
 - The row itself: bound it and cap it at 65535 or less unless it holds
   genuinely unbounded content ([3.4](#34-how-to-pick-a-cap)).
-- The key writer checks member bounds, `utf8`, order specs and invariants,
-  like the pssz writer: `to_key` throws for a value that has no key;
-  `psio::encode_key_checked(value, out)` returns a status instead. Validate
-  a key that arrives from outside (`validate_key` / `from_key`).
+- `to_key` is the fast write: every value has a key, whatever its type
+  declares. The validated write checks member bounds, `utf8`, order specs
+  and invariants: `to_key_checked` throws, `psio::encode_key_checked(value,
+  out)` returns a status. Validate a key that arrives from outside
+  (`validate_key` / `from_key`).
 
 ### 6.20 Bit types
 
@@ -1737,20 +1740,72 @@ The same names exist per format: `from_json`, `validate_json`, `from_key`,
 
 @@RUN tut-11-run@@
 
-### 7.2 What is checked where
+### 7.2 Reading and writing: the two modes
+
+Every format has the same four calls. A read validates unless the caller
+vouches for the bytes; a write is fast unless the caller asks for the
+check.
+
+| | ordinary call | the other mode, asked for by name |
+|---|---|---|
+| **read** | **validating**: `from_F<T>(bytes)`, `validate_F<T>(bytes)`, `psio::validated_view` — the structure of the bytes and everything `T` declares | trusted: `from_F<T>(psio::trusted{bytes})`, `F_trusted_view` — nothing is held against the declaration |
+| **write** | **fast**: `to_F(v)`, `to_F(v, sink)`, `psio::encode(F{}, v)` — nothing is held against the declaration | **validated**: `to_F_checked(v)`, `to_F_checked(v, sink)` (fail as `from_F` does), `encode_F_checked(v, out)`, `psio::encode_checked(F{}, v, out)` (a `codec_status`; `out` unchanged on failure) |
+
+"What `T` declares": member bounds (`max` / `min` / `exact`, at the member
+and below it), `utf8`, the order specs, invariants, and the bounds of
+`psio::bounded` / `psio::utf8_string`. The validated write refuses exactly
+what the validating reader of the same format refuses, with its message.
+`psio::validate_value(v)` runs the same check without a format
+(`psio: member length_bound violated`, the `utf8_spec` / order messages, the
+invariant's own): validate once, then write fast to several formats.
+
+**The fast write and what it means for a service.** `to_pssz(row)` no
+longer tells a service that `row` violates its own type. The bytes are
+written; a validating reader — `from_pssz`, `validate_pssz`, another
+service's action dispatch, a schema-driven tool — refuses them later, and a
+reader that trusts them never notices. Use the validated write where bytes
+leave the writer's hands and the mistake would surface somewhere else, or
+nowhere: rows of a table that is later read with `psio::trusted`, arguments
+built for another service's action, action results, replies to HTTP / RPC
+callers, events. Keep the fast write for a value that was just validated
+(re-encoding a decoded argument) and for paths whose values the program
+constructs under test.
+
+**What the fast write still refuses.** A fast write never produces bytes
+that a trusted reader of the same type reads as a different value or reads
+outside the buffer. Where a declaration decides the layout, a value the
+layout cannot hold has no bytes, and the write fails — a comparison the
+encoder makes anyway while it sizes the value:
+
+| Format | A declaration changes the layout? | The fast write still fails on | Left to the validated write |
+|---|---|---|---|
+| pssz | yes: bounds and caps choose the offset width (1 / 2 / 4 bytes) of a record, list, map, tuple | a payload that needs an offset its type's width cannot express; a total over the root's `maxDynamicData`, a nested record over its own cap (the cap is the width budget); a total over 4 GiB; a nonempty vector of zero-size elements; a null `Box`; nesting over the depth limit | a bound exceeded while every offset still fits (in a record the last variable member ends where the record ends, so it can be far over its bound and still have a frame), `min`, `exact`, `utf8` and `utf8_string`, `bounded<T, N>`, order specs, bitlist capacity, invariants |
+| key | no | nothing a type declares | all of it |
+| json / ijson | no | what is not JSON whatever the type says: a string that is not UTF-8, a non-finite float, a null `Box`, a time point outside years 0000..9999 | member bounds, order specs, invariants |
+| bin, ssz, borsh, bincode, avro, msgpack, bson, wit ABI | no | the format's own limits | all of it |
+| flatbuf, capnp, protobuf | no | the format's own limits (2 GiB) | all of it |
+
+**What is checked where**, per call:
 
 | | structure | member bounds, `utf8`, order specs | `maxDynamicData` | invariants |
 |---|---|---|---|---|
-| pssz `to_pssz` / `encode` | — | yes | yes | yes |
+| pssz `to_pssz` / `encode` (fast) | — | only where the offsets cannot express the value | yes | **no** |
+| pssz `to_pssz_checked`, `encode_pssz_checked` (validated) | — | yes | yes | yes |
 | pssz `validate_pssz`, `from_pssz`, `validate_strict`, `decode_pssz_checked` | yes | yes | yes | yes |
 | pssz `from_pssz(psio::trusted{…})` / `psio::decode` | **no** | checked on the way | checked on the way | **no** |
 | `pssz_view` | **no** | **no** | **no** | **no** |
-| key `to_key`, `encode_key_checked`, `key_prefix` | — | yes | — | yes |
+| key `to_key`, `key_prefix` (fast) | — | **no** | — | **no** |
+| key `to_key_checked`, `encode_key_checked` (validated) | — | yes | — | yes |
 | key `validate_key`, `from_key` | yes | yes | — | yes |
-| json / ijson writers and readers | yes | yes | — (the cap is not a limit on text) | yes |
-| flatbuf / capnp / protobuf `validate_F`, `from_F`, `validate_strict`, `psio::validated_view` | yes | yes | the root type's, on the size of the input | yes |
-| flatbuf / capnp / protobuf `to_F` / `encode` | — | **no** | **no** | **no** |
-| flatbuf / capnp `from_F(psio::trusted{…})`, `F_trusted_view` | **no** | **no** | **no** | **no** |
+| json / ijson `to_json` (fast) | — | **no** (a string must be UTF-8: it is JSON text) | — | **no** |
+| json / ijson `to_json_checked`, `encode_json_checked` and the readers | yes | yes | — (the cap is not a limit on text) | yes |
+| the other binary formats, `to_F` (fast) | — | **no** | **no** | **no** |
+| the other binary formats, `to_F_checked`, `encode_F_checked`, `validate_F`, `from_F`, `validate_strict`, `psio::validated_view` | yes | yes | the root type's, on the size of the input | yes |
+| the other binary formats, `from_F(psio::trusted{…})`, `F_trusted_view` | **no** | **no** | **no** | **no** |
+
+The trusted pssz decode is the one trusted read that still holds bounds,
+`utf8` and order against the bytes as it goes (not invariants): a frame the
+fast write produced from a violating value is refused by it, not misread.
 
 @@RUN tut-11-limits@@
 
@@ -1758,39 +1813,49 @@ The same names exist per format: `from_json`, `validate_json`, `from_key`,
 
 A validator is what stands between bytes nobody vouches for and the
 program: `validate_F<T>(bytes)`, the checked decode `from_F<T>(bytes)` and
-a validating view. "yes" = a value that violates the declaration is
-refused; "—" = the declaration does not apply to that format.
+a validating view. The validated write of the format refuses the same
+values. "yes" = a value that violates the declaration is refused; "—" =
+the declaration does not apply to that format.
 
 | Declaration | pssz | key | json / ijson | flatbuf | capnp | protobuf | bin, ssz, borsh, bincode, msgpack, avro, bson, wit ABI |
 |---|---|---|---|---|---|---|---|
-| `max<N>`, `min<N>`, `exact<N>` on a string, byte list, list, map, set | yes | yes | yes | yes | yes (no maps or sets in the mapping) | yes | **no** |
-| a bound below the member: `element`, `keys`, `values`, `at<I>` | yes | yes | yes | yes | yes | yes | **no** |
-| `utf8` | yes | yes | yes | yes | yes | yes (every protobuf `string`) | **no** (`validate_strict` of bin, ssz and wit: yes) |
-| `sorted`, `unique`, `unique_keys` | yes | yes | yes | yes | yes | yes | **no** |
-| `invariant(fn)` | yes | yes | yes | yes | yes | yes | **no** |
+| `max<N>`, `min<N>`, `exact<N>` on a string, byte list, list, map, set | yes | yes | yes | yes | yes (no maps or sets in the mapping) | yes | yes (where the format's mapping has the type) |
+| a bound below the member: `element`, `keys`, `values`, `at<I>` | yes | yes | yes | yes | yes | yes | yes |
+| `utf8` | yes | yes | yes | yes | yes | yes (every protobuf `string`) | yes |
+| `sorted`, `unique`, `unique_keys` | yes | yes | yes | yes | yes | yes | yes |
+| `invariant(fn)` | yes | yes | yes | yes | yes | yes | yes |
 | `maxDynamicData(N)` | yes, at every record | — | — | the root type's, on the size of the input | as flatbuf | as flatbuf | as flatbuf |
 | `maxFields(N)` | at the declaration (compile time), and by the compatibility check: no run-time check in any format ([5.6](#56-maxfieldsn)) | | | | | | |
 
-The same table holds for Rust (`#[psio(max = N)]`, `element(...)`,
-`keys(...)`, `values(...)`, `sorted`, `unique`, `unique_keys`,
-`#[psio(invariant = "path")]`; Rust has no `min` / `exact`) with two
-differences: Rust has no bin / borsh / bincode / msgpack / avro / bson, and
-the view a `CapnpView` derive makes (`FooView::from_message`) checks the
-structure of the message only — validate with `psio::validate_capnp::<Foo>`
-first. TypeScript and Python have pssz, key and json / ijson; there a bound
-on a `nested` member is enforced by pssz only.
+Not covered: the optional `flatbuf_lib` adapter (its `validate` is not a
+verifier).
 
-How flatbuf, capnp and protobuf do it (`psio/value_contract.hpp`, Rust
-`psio::contract`):
+**The other languages.** The read side is the same in Rust for pssz, key,
+json, flatbuf, capnp, protobuf and wit (`#[psio(max = N)]`,
+`element(...)`, `keys(...)`, `values(...)`, `sorted`, `unique`,
+`unique_keys`, `#[psio(invariant = "path")]`; Rust has no `min` / `exact`
+and none of bin / borsh / bincode / msgpack / avro / bson), with one
+difference: the view a `CapnpView` derive makes (`FooView::from_message`)
+checks the structure of the message only — validate with
+`psio::validate_capnp::<Foo>` first. The validated write is `try_to_F` for
+every Rust format. The write modes are **not yet** the C++ ones in the
+other languages: Rust `to_flatbuf` / `to_capnp` / `to_protobuf` / `to_wit`
+are fast, while Rust `to_pssz` / `to_key` / `to_json` and every TypeScript
+and Python writer still validate (and panic / throw on a violating value).
+TypeScript and Python have pssz, key and json / ijson; there a bound on a
+`nested` member is enforced by pssz only.
 
-- **The structure first.** Bytes that are not valid FlatBuffers (Cap'n
-  Proto, protobuf) are refused for that, with the message and the position
-  they were refused with before.
+How the formats other than pssz, key and json check
+(`psio/value_contract.hpp`, Rust `psio::contract`):
+
+- **The structure first.** Bytes that are not valid for the format are
+  refused for that, with the message and the position they were refused
+  with before.
 - **Then the declarations, on the value.** The bytes are decoded and the
   value is held against what its type declares: the members in declaration
   order; for each member what it holds first, then its own annotations; the
   invariant of a type last. The first violation is reported, at position 0:
-  `flatbuf: member length_bound violated` (`capnp: …`, `protobuf: …`), the
+  `flatbuf: member length_bound violated` (`capnp: …`, `bin: …`, …), the
   `utf8_spec` / `sorted` / `unique_keys` messages pssz gives, the
   invariant's own status. In protobuf a member may be written more than
   once, so only the finished value has a length: the last scalar, the
@@ -1798,12 +1863,12 @@ How flatbuf, capnp and protobuf do it (`psio/value_contract.hpp`, Rust
 - **A type that declares nothing pays nothing** and accepts exactly what it
   accepted before (`psio::has_value_contract_v<T>` is false; the validator
   does not decode).
-- **The writers do not check** — `to_flatbuf` writes a value its own reader
-  refuses. Check before writing with
-  `psio::check_value_contract(value, message, "flatbuf")`.
-- C++ and Rust give the same verdict, message and position: the rows
-  `Bounded/…` of `conformance/flatbuf-vectors.json` and `PbBounded/…` of
-  `conformance/protobuf-vectors.json`.
+- **The validated write** of these formats writes fast and runs the
+  validator on the bytes it wrote: the verdict and the message are the
+  reader's by construction.
+- C++ and Rust give the same verdict, message and position for flatbuf and
+  protobuf: the rows `Bounded/…` of `conformance/flatbuf-vectors.json` and
+  `PbBounded/…` of `conformance/protobuf-vectors.json`.
 
 @@RUN tut-11-foreign@@
 
@@ -2000,7 +2065,7 @@ once published:
 | A member bound larger than the record's cap (`max<1000>` under `maxDynamicData(255)`) | Compiles, no diagnostic: the bound still limits the count, the cap selects the width ([3.3](#33-a-cap-narrows-what-lies-beneath-it)) |
 | An unbounded child record inside a parent with a small cap | Compiles; the child keeps 4-byte offsets. `static_assert(!psio::pssz_child_wider_than_cap_v<Parent>)` |
 | A `std::tuple` or parameter list of more than 255 elements (a record: the same limit, its own message) | `psio: a tuple has at most 255 elements (docs/pssz-spec.md 8.4); this one has more. Use a record, a list, or nested tuples` |
-| Expecting `attr(f, utf8_spec{})` to be a weaker `utf8` | It is `utf8`: enforced by every writer and reader |
+| Expecting `attr(f, utf8_spec{})` to be a weaker `utf8` | It is `utf8`: enforced by every validated write and validating reader |
 | `max<8> \| max<16>`, `min<9> \| max<8>` on one member | `psio: contradictory length bounds on one member or position: …` (`min<A> \| max<B>` with A ≤ B is fine: one range) |
 | More fields than `maxFields(N)`; `maxFields(300)`; a record of 256 fields | `psio: the record has more fields than its maxFields(N) allows` and the other texts of [5.6](#56-maxfieldsn) |
 | A bound on a non-length member | `psio: a spec in the effective annotations is attached to a field whose shape is not in the spec's applies_to set. …` |
@@ -2009,8 +2074,8 @@ once published:
 | `PSIO_FIELD_ATTRS` after the type was already used | `psio: PSIO_FIELD_ATTRS(T, f) comes after the first use of the field's annotations` |
 | `exact<N>`, `min<N>`, `sorted`, `json_string` or `as<Tag>` on a transparent type's member | `psio: the member of a transparent() type takes only the annotations that make it a bounded type: …` ([5.7](#57-transparent)); `utf8`, `max<N>` and position specs are accepted |
 | Tightening a published bound, dropping `utf8`, lowering a cap | compiles; `pssz_evolves_from` is false ([8.3](#83-annotations-bounds-may-only-widen)) |
-| An unsorted value in a member declared `sorted` | no encoding: the writers throw, the readers reject ([5.13](#513-sorted-unique-unique_keys)) |
-| `to_key` of a value outside a member bound | throws `codec_exception`; use `psio::encode_key_checked` for a status |
+| An unsorted value in a member declared `sorted` | the validated writes (`to_F_checked`) throw, the readers reject; the fast write (`to_F`) writes it ([5.13](#513-sorted-unique-unique_keys), [7.2](#72-reading-and-writing-the-two-modes)) |
+| Expecting `to_pssz` / `to_key` / `to_json` to refuse a value outside a member bound | They are the fast write. `to_F_checked` throws `codec_exception`; `psio::encode_F_checked` returns a status ([7.2](#72-reading-and-writing-the-two-modes)) |
 | An invariant that is not `noexcept` | `psio: invariant(fn) in PSIO_REFLECT(T) needs fn callable as fn(const T&), declared noexcept and returning psio::codec_status` |
 | Declaring an invariant that accepts everything to give a record a schema id | the record loses its mutable view (`psio::mutable_view: in-place mutation is blocked for this type`); write `schemaId("Id")` ([5.15](#515-schemaidid)) |
 | `schemaId("string")`, `schemaId("hex")`, … | `psio: schemaId(...) in PSIO_REFLECT(T) names an id reserved for one of PSIO's own types …` |

@@ -13,6 +13,13 @@
 //                               natural type (std::vector<char>, std::string
 //                               for the text formats)
 //    to_F(v, sink)              encode appending to an existing buffer
+//    to_F_checked(v)            the VALIDATED write: the bytes, or the
+//                               failure from_F has for bytes holding such a
+//                               value. to_F is the FAST write: it does not
+//                               hold a value against what its type declares
+//                               (bounds, utf8, order, invariants)
+//    to_F_checked(v, sink)      the same, appended; sink unchanged on failure
+//    encode_F_checked(v, out)   the validated write as a codec_status
 //    from_F<T>(bytes)           validate, then decode
 //    from_F<T>(trusted{bytes})  decode without the validation pass
 //    validate_F<T>(bytes)       codec_status, never throws or aborts

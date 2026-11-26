@@ -126,12 +126,13 @@ earlier `psio::flatbuf`, which wrote every record as a table.
   part of the type all the same: `validate_flatbuf`, `from_flatbuf` and
   `psio::validated_view` check the structure of the buffer and then hold
   the value it decodes to against what the type declares
-  ([annotations.md §7.2](annotations.md#72-what-is-checked-where)):
+  ([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)):
   `flatbuf: member length_bound violated`, the `utf8_spec` / `sorted`
   messages, the invariant's own, at position 0. A type that declares
   nothing is not decoded, and a string member that is not declared `utf8`
   is NOT checked for UTF-8 (neither does the official verifier by default).
-  `to_flatbuf` does not check: it writes a value outside its bounds.
+  `to_flatbuf` is the fast write and does not check; `to_flatbuf_checked` /
+  `encode_flatbuf_checked` refuse what `validate_flatbuf` refuses.
 * **`maxDynamicData`** — bounds the buffer size in `validate_flatbuf`.
 
 ## File identifier, size prefix
@@ -548,7 +549,8 @@ message: `validate_flatbuf`, `from_flatbuf`, `FbView::new` and
 (`FbUnpack::fb_check_declared`); a type that declares nothing
 (`FbUnpack::fb_has_declarations()` is false) is not decoded. `FbError`
 carries a constant text: an invariant whose message is a computed `String`
-is reported as `flatbuf: invariant violated`. `to_flatbuf` does not check.
+is reported as `flatbuf: invariant violated`. `to_flatbuf` does not check
+(the fast write); `try_to_flatbuf` is the validated write.
 
 Evidence: `rust/psio/tests/flatbuf_fuzz.rs`, the cases of the C++ fuzz
 test — every truncation and eight replacements of every byte of seven

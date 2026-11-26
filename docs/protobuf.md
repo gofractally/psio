@@ -213,16 +213,18 @@ decode. The reader is safe on arbitrary bytes:
 **What the type declares.** A member's `max<N>` / `min<N>` / `exact<N>`,
 a bound below it (`element`, `keys`, `values`), `sorted` / `unique` /
 `unique_keys` and an invariant are part of the type in protobuf too
-([annotations.md §7.2](annotations.md#72-what-is-checked-where)):
+([annotations.md §7.2](annotations.md#72-reading-and-writing-the-two-modes)):
 `validate_protobuf` and `from_protobuf` refuse a message whose value is
 outside them (`protobuf: member length_bound violated`, the `sorted`
 messages, the invariant's own; offset 0). A member may be written more
 than once — the last scalar wins, repeated members and messages merge — so
 the declarations are held against the finished value, after the reader has
 accepted the bytes. For such a type `validate_protobuf` reads into a value
-(it stores nothing for a type that declares nothing). `to_protobuf` does
-not check. Rust: the same, with the same messages
-(`PbMessage::pb_message_check_declared`).
+(it stores nothing for a type that declares nothing). `to_protobuf` is the
+fast write and does not check; `to_protobuf_checked` /
+`encode_protobuf_checked` refuse what `validate_protobuf` refuses. Rust: the
+same, with the same messages (`PbMessage::pb_message_check_declared`;
+`try_to_protobuf` is the validated write).
 
 Stricter than the official C++ parser, deliberately:
 

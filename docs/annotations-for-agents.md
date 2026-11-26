@@ -74,10 +74,10 @@ The C++ snippets are consecutive lines of
 |---|---|---|
 | R1 | **Validate untrusted bytes**: action arguments, cross-service data, user input. `psio::from_pssz<T>(bytes)` or `psio::validate_pssz<T>(bytes)` first. | [7.3](annotations.md#73-the-trust-rule) |
 | R2 | **`psio::trusted{bytes}` and views only for bytes your own service wrote and stored**, or validated earlier in the same flow. | [7.3](annotations.md#73-the-trust-rule) |
-| R3 | A `pssz_view` checks nothing: not structure, not bounds, not invariants. Use `psio::validated_pssz_view` on untrusted bytes. | [7.2](annotations.md#72-what-is-checked-where) |
-| R4 | Validate keys from outside with `validate_key` / `from_key`. The key writer checks bounds and `utf8` like the pssz writer: `to_key` throws; use `psio::encode_key_checked` where a status is needed. | [6.19](annotations.md#619-tables-and-keys) |
+| R3 | A `pssz_view` checks nothing: not structure, not bounds, not invariants. Use `psio::validated_pssz_view` on untrusted bytes. | [7.2](annotations.md#72-reading-and-writing-the-two-modes) |
+| R4 | Validate keys from outside with `validate_key` / `from_key`. `to_key` is the fast write and checks nothing; `to_key_checked` throws for a value outside its bounds or `utf8`, `psio::encode_key_checked` returns a status. | [6.19](annotations.md#619-tables-and-keys) |
 | R5 | Read views are const: do not try to write through one. In-place writes use `psio::pssz_mutable_view<T>`, fixed-size values only. | [7.4](annotations.md#74-const-safety) |
-| R6 | Handle the failure: `to_pssz` / `to_json` / `to_key` throw `psio::codec_exception` (abort without exceptions) for a value outside its bounds; use `encode_pssz_checked` / `encode_json_checked` / `encode_key_checked` / `validate_*` where a status is needed. | [5.1](annotations.md#51-maxn-exactn-minn--length-bounds) |
+| R6 | Choose the write mode. `to_F(v)` is the FAST write: it does not hold `v` against its bounds, `utf8`, order or invariants (pssz still fails where the offsets cannot express the value). Where bytes leave the service — table rows read back with `trusted`, arguments for another service, results, replies, events — use the VALIDATED write: `to_F_checked(v)` throws `psio::codec_exception` (abort without exceptions), `encode_F_checked(v, out)` returns a status. | [7.2](annotations.md#72-reading-and-writing-the-two-modes) |
 | R7 | `maxDynamicData` limits the pssz encoding, not JSON text: the JSON codecs do not apply it. Limits that must hold for text input are member bounds. | [5.4](annotations.md#54-maxdynamicdatan) |
 | R8 | JSON arguments: write the object keyed by parameter name; accept the positional array too. Binary arguments are always the positional tuple. | [5.11](annotations.md#511-methodname-) |
 
