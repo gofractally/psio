@@ -195,6 +195,13 @@ target_include_directories(psio_bench_nested_encode PRIVATE
 target_compile_features(psio_bench_nested_encode PRIVATE cxx_std_23)
 target_compile_options(psio_bench_nested_encode PRIVATE -O3 -DNDEBUG)
 
+# The two write modes: what the validated write (encode_F_checked) costs
+# over the fast write (to_F), per format and per kind of declaration.
+add_executable(psio_bench_write_modes bench_write_modes.cpp)
+target_link_libraries(psio_bench_write_modes PRIVATE psio)
+target_compile_features(psio_bench_write_modes PRIVATE cxx_std_23)
+target_compile_options(psio_bench_write_modes PRIVATE -O3 -DNDEBUG)
+
 # Varint codec library — leb128, prefix2 (BE + LE), prefix3.
 add_executable(psio_bench_varint bench_varint.cpp)
 target_link_libraries(psio_bench_varint PRIVATE psio)

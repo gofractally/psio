@@ -68,10 +68,12 @@
 
 #include <concepts>
 #include <cstddef>
+#include <iterator>
 #include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace psio {
 
@@ -182,6 +184,27 @@ namespace psio {
          }
       }
 
+      // What `to_F_checked(v)` returns: text for a text format, bytes
+      // otherwise.
+      template <typename Fmt>
+      using checked_buffer_t =
+         std::conditional_t<text_format<Fmt>, std::string, std::vector<char>>;
+
+      // `Fmt::encode_checked(v, out)` → codec_status — the validated write
+      // of a format that checks a value as it encodes it (pssz, key, json).
+      // A format without it writes fast and then runs its own validator on
+      // the bytes: the verdict and the message are the reader's.
+      template <typename Fmt, typename T, typename Sink>
+      concept encodes_checked_natively = requires(const T& v, Sink& out) {
+         { Fmt::encode_checked(v, out) } -> std::same_as<codec_status>;
+      };
+
+      template <typename Fmt, typename T, typename Sink>
+      concept encodes_checked =
+         encodes_checked_natively<Fmt, T, Sink> ||
+         (encodes<Fmt, T> && validates<Fmt, T> &&
+          requires(Sink& out, const char* p) { out.insert(out.end(), p, p); });
+
       inline std::span<const char> text(const char* s) noexcept
       {
          const std::string_view v{s};
@@ -189,6 +212,39 @@ namespace psio {
       }
 
    }  // namespace detail::helpers
+
+   // ── The validated write ───────────────────────────────────────────────
+   //
+   // `psio::encode(F{}, v)` / `to_F(v)` are the FAST write: the value is not
+   // held against what its type declares (member bounds, utf8, order specs,
+   // invariants); it fails only where the format cannot represent the value
+   // (docs/annotations.md "Reading and writing: the two modes").
+   //
+   // `psio::encode_checked(F{}, v, out)` is the VALIDATED write: it appends
+   // the encoding of `v` to `out`, or returns why a validating reader of F
+   // would refuse it and leaves `out` unchanged. It never throws or aborts
+   // on a value that violates its type. (A format's own hard limits — a
+   // message over 2 GiB — fail as they do in `encode`.)
+   template <typename Fmt, typename T, typename Sink>
+      requires detail::helpers::encodes_checked<Fmt, T, Sink>
+   [[nodiscard]] codec_status encode_checked(Fmt fmt, const T& v, Sink& out)
+   {
+      if constexpr (detail::helpers::encodes_checked_natively<Fmt, T, Sink>)
+      {
+         (void)fmt;
+         return Fmt::encode_checked(v, out);
+      }
+      else
+      {
+         const auto bytes = ::psio::encode(fmt, v);
+         if (auto st = ::psio::validate<T>(
+                fmt, std::span<const char>{std::data(bytes), std::size(bytes)});
+             !st.ok())
+            return st;
+         out.insert(out.end(), std::data(bytes), std::data(bytes) + std::size(bytes));
+         return codec_ok();
+      }
+   }
 
 }  // namespace psio
 
@@ -206,6 +262,29 @@ namespace psio {
    void to_##NAME(const T& v, Sink& sink)                                                 \
    {                                                                                      \
       ::psio::encode(TAG{}, v, sink);                                                     \
+   }                                                                                      \
+   template <typename T, typename Sink>                                                   \
+      requires ::psio::detail::helpers::encodes_checked<TAG, T, Sink>                     \
+   [[nodiscard]] ::psio::codec_status encode_##NAME##_checked(const T& v, Sink& out)      \
+   {                                                                                      \
+      return ::psio::encode_checked(TAG{}, v, out);                                       \
+   }                                                                                      \
+   template <typename T, typename Sink>                                                   \
+      requires ::psio::detail::helpers::encodes_checked<TAG, T, Sink>                     \
+   void to_##NAME##_checked(const T& v, Sink& sink)                                       \
+   {                                                                                      \
+      if (auto st = ::psio::encode_checked(TAG{}, v, sink); !st.ok())                     \
+         ::psio::codec_abort(st.error());                                                 \
+   }                                                                                      \
+   template <typename T>                                                                  \
+      requires ::psio::detail::helpers::encodes_checked<                                  \
+         TAG, T, ::psio::detail::helpers::checked_buffer_t<TAG>>                          \
+   [[nodiscard]] auto to_##NAME##_checked(const T& v)                                     \
+   {                                                                                      \
+      ::psio::detail::helpers::checked_buffer_t<TAG> out;                                 \
+      if (auto st = ::psio::encode_checked(TAG{}, v, out); !st.ok())                      \
+         ::psio::codec_abort(st.error());                                                 \
+      return out;                                                                         \
    }                                                                                      \
    template <typename T>                                                                  \
       requires ::psio::detail::helpers::decodes<TAG, T> &&                                \

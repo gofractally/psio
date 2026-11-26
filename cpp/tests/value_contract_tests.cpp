@@ -8,13 +8,23 @@
 // declarations, what a writer that does not know them produces — and read as
 // the declared type.
 
+#include <psio/avro.hpp>
+#include <psio/bin.hpp>
+#include <psio/bincode.hpp>
+#include <psio/borsh.hpp>
+#include <psio/bson.hpp>
+#include <psio/buffer.hpp>
 #include <psio/capnp.hpp>
 #include <psio/flatbuf.hpp>
 #include <psio/flatbuf_view.hpp>
 #include <psio/json.hpp>
 #include <psio/key.hpp>
+#include <psio/msgpack.hpp>
+#include <psio/nested.hpp>
 #include <psio/protobuf.hpp>
 #include <psio/pssz.hpp>
+#include <psio/ssz.hpp>
+#include <psio/wit.hpp>
 #include <psio/value_contract.hpp>
 #include <psio/view.hpp>
 
@@ -71,6 +81,7 @@ struct VcEvenLoose
 struct VcEven
 {
    std::uint32_t             v = 0;
+   friend bool               operator==(const VcEven&, const VcEven&) = default;
    static psio::codec_status even(const VcEven& e) noexcept
    {
       return e.v % 2 == 0 ? psio::codec_ok() : psio::codec_fail("VcEven: v is odd", 0, "VcEven");
@@ -310,9 +321,9 @@ TEST_CASE("value contract: the verdict is the one of pssz, key and json",
 {
    // The same violation, declared once, in six formats.
    const VcMaxList over{{1, 2, 3}};
-   CHECK_THROWS_AS(psio::to_pssz(over), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_key(over), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_json(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_json_checked(over), psio::codec_exception);
    const VcMaxListLoose loose{{1, 2, 3}};
    CHECK_FALSE(psio::validate_key<VcMaxList>(psio::to_key(loose)).ok());
    CHECK_FALSE(psio::validate_json<VcMaxList>(psio::to_json(loose)).ok());
@@ -331,4 +342,264 @@ TEST_CASE("value contract: the conformance value is at its limits", "[value_cont
          pb_bounded_at_limits());
    CHECK(psio::check_value_contract(conformance_bounded(), "x", "x").ok());
    CHECK(psio::check_value_contract(Bounded{}, "x", "x").ok());
+}
+
+// ── The two write modes, and the read side of every format ─────────────────
+//
+// docs/annotations.md "Reading and writing: the two modes". For every
+// format: the ordinary write (psio::encode / to_F) is FAST and writes a value
+// that violates what its type declares; the VALIDATED write
+// (psio::encode_checked / encode_F_checked / to_F_checked) refuses it with
+// the message of the format's validating reader and writes nothing; the
+// validating reader refuses the bytes the fast write produced.
+namespace
+{
+   template <typename Fmt, typename T, typename L, typename V>
+   void two_modes(const V& bad, const V& good, std::string_view error)
+   {
+      L loose_bad;
+      loose_bad.v = bad;
+      T declared_bad, declared_good;
+      declared_bad.v  = bad;
+      declared_good.v = good;
+
+      // Fast: the value is written, and the bytes are the ones a writer
+      // that does not know the declaration produces.
+      const auto bytes = psio::encode(Fmt{}, declared_bad);
+      CHECK(std::string_view(bytes.data(), bytes.size()) ==
+            [&] {
+               const auto b = psio::encode(Fmt{}, loose_bad);
+               return std::string(b.data(), b.size());
+            }());
+
+      // The validating reader refuses those bytes; the declaration decides.
+      const std::span<const char> span{bytes.data(), bytes.size()};
+      REQUIRE(psio::validate<L>(Fmt{}, span).ok());
+      const auto read = psio::validate<T>(Fmt{}, span);
+      REQUIRE_FALSE(read.ok());
+      CHECK(read.error().what == error);
+
+      // Validated: refused with the reader's message, nothing written.
+      psio::detail::helpers::checked_buffer_t<Fmt> out{'x'};
+      const auto                                   written = psio::encode_checked(Fmt{}, declared_bad, out);
+      REQUIRE_FALSE(written.ok());
+      CHECK(written.error().what == error);
+      CHECK(out.size() == 1);
+
+      // A value inside the declaration: both modes write the same bytes.
+      const auto good_bytes = psio::encode(Fmt{}, declared_good);
+      REQUIRE(psio::encode_checked(Fmt{}, declared_good, out).ok());
+      CHECK(std::string_view(out.data() + 1, out.size() - 1) ==
+            std::string_view(good_bytes.data(), good_bytes.size()));
+      CHECK(psio::validate<T>(Fmt{}, std::span<const char>{good_bytes.data(), good_bytes.size()})
+               .ok());
+   }
+
+   template <typename Fmt>
+   void every_kind(std::string_view length)
+   {
+      two_modes<Fmt, VcMaxList, VcMaxListLoose>(VcInts{1, 2, 3}, VcInts{1, 2}, length);
+      two_modes<Fmt, VcMaxString, VcMaxStringLoose>(std::string{"abc"}, std::string{"ab"}, length);
+      two_modes<Fmt, VcMinList, VcMinListLoose>(VcInts{1}, VcInts{1, 2}, length);
+      two_modes<Fmt, VcExactList, VcExactListLoose>(VcInts{1, 2, 3}, VcInts{1, 2}, length);
+      two_modes<Fmt, VcElement, VcElementLoose>(VcStrings{"ab", "abc"}, VcStrings{"ab"}, length);
+      two_modes<Fmt, VcSorted, VcSortedLoose>(VcInts{2, 1}, VcInts{1, 1, 2},
+                                              "sorted: elements are not in order");
+      two_modes<Fmt, VcUnique, VcUniqueLoose>(
+         VcInts{1, 1}, VcInts{1, 2}, "sorted: elements are not in strictly ascending order");
+      two_modes<Fmt, VcEven, VcEvenLoose>(std::uint32_t{3}, std::uint32_t{4}, "VcEven: v is odd");
+   }
+}  // namespace
+
+TEST_CASE("write modes: fast write, validated write and validating read, every format",
+          "[value_contract][write_modes]")
+{
+   SECTION("bin") { every_kind<psio::bin>("bin: member length_bound violated"); }
+   SECTION("ssz") { every_kind<psio::ssz>("ssz: member length_bound violated"); }
+   SECTION("borsh") { every_kind<psio::borsh>("borsh: member length_bound violated"); }
+   SECTION("bincode") { every_kind<psio::bincode>("bincode: member length_bound violated"); }
+   SECTION("avro") { every_kind<psio::avro>("avro: member length_bound violated"); }
+   SECTION("msgpack") { every_kind<psio::msgpack>("msgpack: member length_bound violated"); }
+   SECTION("bson") { every_kind<psio::bson>("bson: member length_bound violated"); }
+   SECTION("wit") { every_kind<psio::wit>("wit: member length_bound violated"); }
+   SECTION("flatbuf") { every_kind<psio::flatbuf>("flatbuf: member length_bound violated"); }
+   SECTION("capnp") { every_kind<psio::capnp>("capnp: member length_bound violated"); }
+   SECTION("protobuf") { every_kind<psio::protobuf>("protobuf: member length_bound violated"); }
+   SECTION("key") { every_kind<psio::key>("key: member length_bound violated"); }
+   SECTION("json") { every_kind<psio::json>("json: member length_bound violated"); }
+   SECTION("ijson") { every_kind<psio::ijson>("json: member length_bound violated"); }
+}
+
+TEST_CASE("write modes: the helper family of a format", "[value_contract][write_modes]")
+{
+   const VcMaxList over{{1, 2, 3}}, fits{{1, 2}};
+   // to_F: fast.
+   CHECK_NOTHROW(psio::to_pssz(over));
+   CHECK_NOTHROW(psio::to_key(over));
+   CHECK_NOTHROW(psio::to_json(over));
+   CHECK_NOTHROW(psio::to_bin(over));
+   CHECK_NOTHROW(psio::to_flatbuf(over));
+   // to_F_checked(v): the bytes, or the failure of from_F.
+   CHECK_THROWS_AS(psio::to_pssz_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_json_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_ijson_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_bin_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_ssz_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_borsh_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_bincode_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_avro_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_msgpack_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_bson_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_wit_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_flatbuf_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_capnp_checked(over), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_protobuf_checked(over), psio::codec_exception);
+   CHECK(psio::to_pssz_checked(fits) == psio::to_pssz(fits));
+   CHECK(psio::to_json_checked(fits) == psio::to_json(fits));
+   CHECK(psio::to_flatbuf_checked(fits) == psio::to_flatbuf(fits));
+   {
+      const auto fast = psio::to_key(fits);
+      CHECK(psio::to_key_checked(fits) == std::vector<char>(fast.begin(), fast.end()));
+   }
+   // to_F_checked(v, sink) appends or fails and leaves the sink.
+   std::vector<char> sink{'x'};
+   CHECK_THROWS_AS(psio::to_pssz_checked(over, sink), psio::codec_exception);
+   CHECK(sink == std::vector<char>{'x'});
+   psio::to_pssz_checked(fits, sink);
+   CHECK(sink.size() == 1 + psio::to_pssz(fits).size());
+   // encode_F_checked(v, out): the status.
+   std::vector<char> out;
+   CHECK(psio::encode_pssz_checked(over, out).error().what ==
+         std::string_view{"pssz: member length_bound violated"});
+   CHECK(psio::encode_key_checked(over, out).error().what ==
+         std::string_view{"key: member length_bound violated"});
+   CHECK(psio::encode_flatbuf_checked(over, out).error().what ==
+         std::string_view{"flatbuf: member length_bound violated"});
+   CHECK(psio::encode_bin_checked(over, out).error().what ==
+         std::string_view{"bin: member length_bound violated"});
+   std::string text;
+   CHECK(psio::encode_json_checked(over, text).error().what ==
+         std::string_view{"json: member length_bound violated"});
+   CHECK(out.empty());
+   CHECK(text.empty());
+   // validate_value: once, for every format.
+   CHECK(psio::validate_value(over).error().what ==
+         std::string_view{"psio: member length_bound violated"});
+   CHECK(psio::validate_value(fits).ok());
+   CHECK(psio::validate_value(VcEven{3}).error().what == std::string_view{"VcEven: v is odd"});
+   CHECK(psio::validate_value(std::vector<VcMaxList>{fits, over}).error().what ==
+         std::string_view{"psio: member length_bound violated"});
+   CHECK(psio::validate_value(psio::utf8_string<8>{"\xff"}).error().what ==
+         std::string_view{"utf8_spec: invalid leading byte"});
+   // What holds bytes as "a valid T" is made by the validated write.
+   CHECK_THROWS_AS(psio::nested<VcMaxList>{over}, psio::codec_exception);
+   CHECK_THROWS_AS(psio::pssz_buffer<VcMaxList>::from(over), psio::codec_exception);
+   CHECK_NOTHROW(psio::nested<VcMaxList>{fits});
+}
+
+// ── pssz: what the fast write still refuses ────────────────────────────────
+//
+// A declaration can decide a pssz layout (a bound or a cap sets an offset
+// width). The fast write holds nothing against the declaration, and it
+// never writes a frame a trusted reader would read as another value: either
+// the frame cannot be written and the write fails, or the trusted decode of
+// what was written is the value (or the decode refuses it: the trusted pssz
+// decode checks bounds as it reads), and the validating reader refuses it.
+struct WmTags
+{
+   std::vector<std::string> tags;
+   friend bool              operator==(const WmTags&, const WmTags&) = default;
+   PSIO_REFLECT(WmTags, attr(tags, max<8> | element(utf8 | max<16>)))
+};
+static_assert(psio::auto_pssz_width_v<WmTags> == 1);
+struct WmText
+{
+   std::string text;
+   friend bool operator==(const WmText&, const WmText&) = default;
+   PSIO_REFLECT(WmText, attr(text, utf8 | max<32>))
+};
+struct WmOrdered
+{
+   std::vector<std::uint32_t> ids;
+   std::vector<std::uint8_t>  digest;
+   friend bool                operator==(const WmOrdered&, const WmOrdered&) = default;
+   PSIO_REFLECT(WmOrdered, attr(ids, unique | min<1> | max<4>), attr(digest, exact<4>))
+};
+struct WmPair
+{
+   std::string a, b;
+   friend bool operator==(const WmPair&, const WmPair&) = default;
+   PSIO_REFLECT(WmPair, attr(a, max<100>), attr(b, max<100>))
+};
+static_assert(psio::auto_pssz_width_v<WmPair> == 1);
+struct WmCapped
+{
+   std::string a, b;
+   friend bool operator==(const WmCapped&, const WmCapped&) = default;
+   PSIO_REFLECT(WmCapped, a, b, maxDynamicData(200))
+};
+
+namespace
+{
+   // 0: the fast write failed; 1: it wrote a frame the validator refuses and
+   // the trusted decode reads back as the value. Anything else fails here.
+   template <typename T>
+   int fast_write(const T& value)
+   {
+      REQUIRE_FALSE(psio::encode_pssz_checked(value, *std::make_unique<std::vector<char>>()).ok());
+      std::vector<char> bytes;
+      try
+      {
+         bytes = psio::to_pssz(value);
+      }
+      catch (const psio::codec_exception&)
+      {
+         return 0;
+      }
+      CHECK_FALSE(psio::validate_pssz<T>(bytes).ok());
+      // The trusted decode of pssz checks bounds, utf8 and order as it
+      // reads (docs/annotations.md 7.2): it gives the value or refuses,
+      // never another value.
+      std::optional<T> read;
+      try
+      {
+         read = psio::from_pssz<T>(psio::trusted{bytes});
+      }
+      catch (const psio::codec_exception&)
+      {
+      }
+      if (read)
+         CHECK(*read == value);
+      return 1;
+   }
+}  // namespace
+
+TEST_CASE("write modes: the pssz fast write refuses only what has no frame",
+          "[value_contract][write_modes][pssz]")
+{
+   // Semantic: written, refused by the validating reader, read back intact.
+   CHECK(fast_write(WmText{std::string(33, 'x')}) == 1);          // max, inside the width
+   CHECK(fast_write(WmText{"\xff\xfe"}) == 1);                    // utf8
+   CHECK(fast_write(WmTags{std::vector<std::string>(9, "t")}) == 1);   // max, count
+   CHECK(fast_write(WmTags{{std::string(17, 'e')}}) == 1);        // a bound below the member
+   CHECK(fast_write(WmTags{{"\xff"}}) == 1);                      // utf8 below the member
+   CHECK(fast_write(WmOrdered{{2, 1}, {1, 2, 3, 4}}) == 1);       // order
+   CHECK(fast_write(WmOrdered{{1, 1}, {1, 2, 3, 4}}) == 1);       // uniqueness
+   CHECK(fast_write(WmOrdered{{}, {1, 2, 3, 4}}) == 1);           // min
+   CHECK(fast_write(WmOrdered{{1}, {1, 2, 3}}) == 1);             // exact
+   CHECK(fast_write(WmOrdered{{1, 2, 3, 4, 5}, {1, 2, 3, 4}}) == 1);   // max
+   CHECK(fast_write(VcEven{3}) == 1);                             // invariant
+   // Far over the bound and still a frame: the last member of a record ends
+   // where the record ends, so no offset has to name a position past 255.
+   CHECK(fast_write(WmText{std::string(300, 'x')}) == 1);
+   CHECK(fast_write(WmTags{{std::string(400, 'e')}}) == 1);
+   // Structural: the offsets of WmTags and WmPair are one byte wide, and
+   // these values need an offset that does not fit one.
+   CHECK(fast_write(WmTags{std::vector<std::string>(40, std::string(16, 't'))}) == 0);
+   CHECK(fast_write(WmPair{std::string(300, 'a'), "b"}) == 0);
+   CHECK(fast_write(WmPair{"a", std::string(300, 'b')}) == 1);
+   // The cap is the width budget: over it, no frame.
+   CHECK(fast_write(WmCapped{std::string(150, 'a'), std::string(100, 'b')}) == 0);
+   CHECK_NOTHROW(psio::to_pssz(WmCapped{std::string(100, 'a'), std::string(90, 'b')}));
 }

@@ -340,15 +340,15 @@ CHECK(psio::from_pssz<Account>(bytes) == alice);          // validate, then deco
 
 Account long_owner = alice;
 long_owner.owner   = std::string(33, 'x');                // one byte past max<32>
-CHECK_THROWS_AS(psio::to_pssz(long_owner), psio::codec_exception);
+CHECK_THROWS_AS(psio::to_pssz_checked(long_owner), psio::codec_exception);
 
 Account nine_tags = alice;
 nine_tags.tags    = std::vector<std::string>(9, "t");     // one element past max<8>
-CHECK_THROWS_AS(psio::to_pssz(nine_tags), psio::codec_exception);
+CHECK_THROWS_AS(psio::to_pssz_checked(nine_tags), psio::codec_exception);
 
 Account not_text = alice;
 not_text.owner   = "\xff";                                // not UTF-8
-CHECK_THROWS_AS(psio::to_pssz(not_text), psio::codec_exception);
+CHECK_THROWS_AS(psio::to_pssz_checked(not_text), psio::codec_exception);
 ```
 
 Both directions of an evolution (`tut-4-run`):

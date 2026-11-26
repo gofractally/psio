@@ -19,6 +19,7 @@
 #include <psio/adapter.hpp>
 #include <psio/time.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 #include <psio/wrappers.hpp>
 
@@ -858,7 +859,11 @@ namespace psio {
          if (pos != bytes.size())
             return codec_fail("borsh: trailing bytes",
                               static_cast<std::uint32_t>(pos), "borsh");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { std::size_t p = 0; return detail::borsh_impl::decode_value<T>(bytes, p); }, "borsh: member length_bound violated",
+            "borsh: decode failed during validate", "borsh");
       }
 
       template <typename T>
@@ -866,6 +871,10 @@ namespace psio {
                                      borsh, T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(borsh{}, bytes); !st.ok())
+            return st;
          if (bytes.empty())
             return codec_fail("borsh: empty buffer", 0, "borsh");
          return codec_ok();

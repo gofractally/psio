@@ -8,6 +8,7 @@
 // format rules; generation aborts when the implementation disagrees, so the
 // fixture cannot silently record a bug. Output is deterministic.
 
+#include "validated_write.hpp"
 #include "pssz_conformance_types.hpp"
 #include "pssz_evolution_goldens.hpp"
 
@@ -64,7 +65,10 @@ namespace
    {
       try
       {
-         out = psio::encode(F{}, value);
+         // The validated write: what a row "the encoder refuses" speaks of.
+         // (psio::encode is the fast write and holds nothing against what a
+         // type declares.)
+         out = psio_test::encode_validated(F{}, value);
          return true;
       }
       catch (const psio::codec_exception&)

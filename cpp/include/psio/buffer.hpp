@@ -265,16 +265,30 @@ namespace psio {
             return Fmt::template validate_strict<T>(self().bytes());
          }
 
-         // The encoding of `value`. Fails fast for a value with no
-         // encoding, like psio::encode.
+         // The encoding of `value`, by the VALIDATED write where the format
+         // has one of its own (`Fmt::encode_checked`: pssz, key, json): a
+         // buffer holds a valid T, so a value that violates what T declares
+         // is refused (codec_exception, or abort without exceptions).
          [[nodiscard]] static Derived from(const T& value)
             requires buffer_encodes<Fmt, T>
          {
-            auto encoded = Fmt::encode(value);
-            if constexpr (std::is_same_v<decltype(encoded), std::vector<char>>)
-               return Derived::unchecked(std::move(encoded));
+            if constexpr (requires(std::vector<char>& bytes) {
+                             { Fmt::encode_checked(value, bytes) } -> std::same_as<codec_status>;
+                          })
+            {
+               std::vector<char> bytes;
+               if (auto status = Fmt::encode_checked(value, bytes); !status.ok())
+                  ::psio::codec_abort(status.error());
+               return Derived::unchecked(std::move(bytes));
+            }
             else
-               return Derived::unchecked(std::vector<char>(encoded.begin(), encoded.end()));
+            {
+               auto encoded = Fmt::encode(value);
+               if constexpr (std::is_same_v<decltype(encoded), std::vector<char>>)
+                  return Derived::unchecked(std::move(encoded));
+               else
+                  return Derived::unchecked(std::vector<char>(encoded.begin(), encoded.end()));
+            }
          }
          // The encoding of `value`, or why it has none (`out` is unchanged).
          [[nodiscard]] static codec_status from_checked(const T& value, Derived& out)

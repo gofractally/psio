@@ -51,6 +51,7 @@
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 
 namespace psio
@@ -1262,8 +1263,11 @@ namespace psio
          try
          {
             std::size_t pos = 0;
-            (void)detail::msgpack_impl::decode_value<T>(bytes, pos);
-            return codec_ok();
+            // The structure is a T when it decodes; then what T declares
+            // about its values (value_contract.hpp), on that value.
+            const T value = detail::msgpack_impl::decode_value<T>(bytes, pos);
+            return ::psio::check_value_contract(value, "msgpack: member length_bound violated",
+                                                "msgpack");
          }
          catch (const detail::msgpack_impl::DecodeError& e)
          {
@@ -1276,6 +1280,10 @@ namespace psio
                                      msgpack, T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(msgpack{}, bytes); !st.ok())
+            return st;
          try
          {
             std::size_t pos = 0;

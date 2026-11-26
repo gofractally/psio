@@ -22,6 +22,7 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 #include <psio/varint/leb128.hpp>
 #include <psio/wrappers.hpp>
@@ -731,7 +732,11 @@ namespace psio {
          if (pos != bytes.size())
             return codec_fail("avro: trailing bytes",
                               static_cast<std::uint32_t>(pos), "avro");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { std::size_t p = 0; return detail::avro_impl::decode_value<T>(bytes, p); }, "avro: member length_bound violated",
+            "avro: decode failed during validate", "avro");
       }
 
       template <typename T>
@@ -739,6 +744,10 @@ namespace psio {
                                      avro, T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(avro{}, bytes); !st.ok())
+            return st;
          if (bytes.empty())
             return codec_fail("avro: empty buffer", 0, "avro");
          return codec_ok();

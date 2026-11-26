@@ -62,8 +62,8 @@ TEST_CASE("nested: the fail-fast paths raise what the checked ones report", "[ne
    // A member over its length_bound has no encoding.
    Capped capped;
    capped.note = psio::nested<std::string>::from("123456789");
-   CHECK_THROWS_AS(psio::encode(psio::pssz{}, capped), psio::codec_exception);
-   CHECK_THROWS_AS(psio::encode(psio::ijson{}, capped), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(capped), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_ijson_checked(capped), psio::codec_exception);
 }
 
 TEST_CASE("nested: key order is the order of the inner bytes", "[nested][key]")

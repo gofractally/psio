@@ -63,17 +63,15 @@
 // (fixed width, or self-terminating). This is a separate slot from
 // `binary_category`: wire and sort encodings usually differ.
 //
-// Bounds and UTF-8. A value outside a length bound or a UTF-8 constraint of
-// its type (psio::bounded, psio::utf8_string, a record member's annotations
-// at any depth) has no key, as it has no pssz encoding: `encode` / `to_key`
-// fail on it (codec_exception, or abort without exceptions),
-// `encode_key_checked` returns the status, and `validate` / `decode` reject
-// its bytes. A key type with no such constraint pays nothing for this.
-//
-// Invariants (invariant.hpp). A value that violates its type's invariant has
-// no key: `encode` / `to_key` fail on it (codec_exception, or
-// abort without exceptions) and `validate` / `decode` reject its bytes with
-// the invariant's own status. Nested values are checked where they occur,
+// Bounds, UTF-8, order, invariants: what a type declares about its values
+// (psio::bounded, psio::utf8_string, a record member's annotations at any
+// depth, an invariant). `validate` / `decode` reject the key of a value
+// outside them. Writing has two modes (docs/annotations.md): `encode` /
+// `to_key` / `key_prefix` are the FAST write and hold nothing against the
+// declaration — no declaration changes a key's bytes, so every value has a
+// key; `encode_key_checked` (status) and `to_key_checked` (codec_exception,
+// or abort without exceptions) are the VALIDATED write and refuse what
+// `validate` would reject, an invariant with its own status, nested values
 // innermost first.
 //
 // Reading is checked. `validate` accepts exactly the canonical encodings:
@@ -455,14 +453,15 @@ namespace psio {
       // (order_key_stream, detail/assoc_order.hpp) are not a write of the
       // value and check nothing. A sizing pass (size_stream) writes nothing
       // and checks nothing; the write that follows it does.
+      //
+      // The write is the FAST write: it holds nothing against what the type
+      // declares (bounds, utf8, order, invariants). No declaration changes a
+      // key's bytes, so every value has a key. The validated write
+      // (`encode_key_checked`, `to_key_checked`) runs `check_encode` first.
       template <typename T, typename S>
       void encode_value(const T& v, S& s)
       {
          encode_shape(v, s);
-         if constexpr (::psio::has_invariant_v<T> && !std::is_same_v<S, ::psio::size_stream> &&
-                       !std::is_same_v<S, ::psio::detail::order_key_stream>)
-            if (auto st = ::psio::check_invariant(v); !st.ok())
-               ::psio::codec_abort(st.error());
       }
 
       template <typename T, typename S>
@@ -780,11 +779,6 @@ namespace psio {
       template <typename T, typename S>
       void encode_root(const T& v, S& s)
       {
-         if constexpr (has_writer_checks<T, false>() &&
-                       !std::is_same_v<S, ::psio::size_stream> &&
-                       !std::is_same_v<S, ::psio::detail::order_key_stream>)
-            if (auto st = check_encode<false>(v); !st.ok())
-               ::psio::codec_abort(st.error());
          encode_value(v, s);
       }
 
@@ -1557,31 +1551,25 @@ namespace psio {
       {
          return detail::key_impl::read_document<T>(bytes, &out);
       }
+
+      // The validated write (psio/helpers.hpp: `psio::encode_checked`,
+      // `encode_key_checked`, `to_key_checked`): appends the key of `value`
+      // to `out`, or returns why `validate` would reject it — a bound, a
+      // UTF-8 constraint, an order spec, an invariant (its own status) —
+      // and leaves `out` unchanged. Never throws or aborts on a value.
+      template <typename T>
+      [[nodiscard]] static codec_status encode_checked(const T& value, std::vector<char>& out)
+      {
+         if (auto status = detail::key_impl::check_encode<true>(value); !status.ok())
+            return status;
+         ::psio::vector_stream s{out};
+         detail::key_impl::encode_value(value, s);
+         return codec_ok();
+      }
    };
 
    // psio::to_key(v), from_key<T>(bytes), validate_key<T>(bytes), key_size(v).
    PSIO_FORMAT_HELPERS(key)
-
-   // ── Checked encode ──────────────────────────────────────────────────────────
-   //
-   // Appends the key of `value` to `out`, or returns why the value has none
-   // and leaves `out` unchanged: a psio::utf8_string that is not UTF-8 or
-   // over its bound, a psio::bounded over its bound, a record member outside
-   // its annotations (length_bound / utf8 / sorted / unique, at any depth),
-   // a value that violates its type's invariant (reported with the
-   // invariant's own status). It never throws and never aborts on a value:
-   // usable with exceptions disabled. psio::encode(psio::key{}, ...) /
-   // psio::to_key refuse the same values through codec_abort.
-   template <typename T>
-   [[nodiscard]] codec_status encode_key_checked(const T& value, std::vector<char>& out)
-   {
-      if (auto status = detail::key_impl::check_encode<true>(value); !status.ok())
-         return status;
-      // (order_key_stream: the bytes, with the checks already done.)
-      detail::order_key_stream s{out};
-      detail::key_impl::encode_value(value, s);
-      return codec_ok();
-   }
 
    // ── Composite keys ──────────────────────────────────────────────────────────
    //

@@ -147,13 +147,13 @@ namespace
          threw         = false;
          try
          {
-            (void)psio::encode(psio::key{}, value);
+            (void)psio::to_key_checked(value);   // the validated write
          }
          catch (const psio::codec_exception& e)
          {
             threw = e.error().what == *row.reason;
          }
-         return threw ? "" : "key encode wrote the value";
+         return threw ? "" : "the validated key write wrote the value";
       }
       if (row.kind == "key-order")
       {

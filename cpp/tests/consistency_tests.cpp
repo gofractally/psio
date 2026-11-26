@@ -2,6 +2,8 @@
 // or the inconsistent side of. Each section names the rule it pins.
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include "evolves_parity.hpp"
 
 #include <psio/annotate.hpp>
@@ -389,12 +391,18 @@ TEST_CASE("key: the writer refuses a value outside a bound or not UTF-8", "[cons
       REQUIRE(!status.ok());
       CHECK(std::string_view{status.error().what} == message);
       CHECK(out == std::vector<char>{'x'});
-      CHECK_THROWS_AS(psio::encode(psio::key{}, value), psio::codec_exception);
-      CHECK_THROWS_AS(psio::encode(psio::key{}, value, out), psio::codec_exception);
-      CHECK_THROWS_AS(psio::to_key(value), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_key_checked(value), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_key_checked(value, out), psio::codec_exception);
+      CHECK(out == std::vector<char>{'x'});
+      // The fast writes hold nothing against the declaration: every value
+      // has a key, and it is the key the readers then refuse.
       std::vector<char>     buffer(256);
       psio::fast_buf_stream sink{buffer.data(), buffer.size()};
-      CHECK_THROWS_AS(psio::encode(psio::key{}, value, sink), psio::codec_exception);
+      CHECK_NOTHROW(psio::encode(psio::key{}, value, sink));
+      const auto fast = psio::to_key(value);
+      CHECK_FALSE(psio::validate_key<std::remove_cvref_t<decltype(value)>>(
+                     std::span<const char>{fast.data(), fast.size()})
+                     .ok());
       // The pssz writer refuses the same value.
       std::vector<char> frame;
       CHECK(!psio::encode_pssz_checked(psio::pssz{}, value, frame).ok());
@@ -443,7 +451,8 @@ TEST_CASE("key: the writer refuses a value outside a bound or not UTF-8", "[cons
    // A prefix element is checked as the element it is.
    using Key = std::tuple<psio::utf8_string<4>, std::uint32_t>;
    CHECK_NOTHROW(psio::key_prefix<Key>(psio::utf8_string<4>{"abcd"}));
-   CHECK_THROWS_AS(psio::key_prefix<Key>(psio::utf8_string<4>{"\xff"}), psio::codec_exception);
+   // (key_prefix is a fast write: it holds nothing against the declaration.)
+   CHECK_NOTHROW(psio::key_prefix<Key>(psio::utf8_string<4>{"\xff"}));
 
    // The sizing pass checks nothing (the write that follows does).
    CHECK(psio::key_size(Bounded{1, "abcde", {}}) == over.size());
@@ -763,12 +772,12 @@ TEST_CASE("sorted / unique / unique_keys: writers and checking readers", "[consi
       const auto        status = psio::encode_pssz_checked(psio::pssz{}, bad, out);
       REQUIRE(!status.ok());
       CHECK(std::string_view{status.error().what} == message);
-      CHECK_THROWS_AS(psio::to_pssz(bad), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_pssz_checked(bad), psio::codec_exception);
       std::string json;
       CHECK(!psio::encode_json_checked(psio::json{}, bad, json).ok());
       CHECK(!psio::encode_json_checked(psio::ijson{}, bad, json).ok());
       CHECK(!psio::encode_key_checked(bad, out).ok());
-      CHECK_THROWS_AS(psio::to_key(bad), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_key_checked(bad), psio::codec_exception);
       // Readers, on what an unchecked writer produces.
       const Loose raw      = loose(bad);
       const auto  frame    = psio::to_pssz(raw);
@@ -1143,11 +1152,11 @@ TEST_CASE("transparent: a bounded member makes the wrapper that bounded type",
       change(bad);
       std::vector<char> out;
       CHECK(!psio::encode_pssz_checked(psio::pssz{}, bad, out).ok());
-      CHECK_THROWS_AS(psio::to_pssz(bad), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_pssz_checked(bad), psio::codec_exception);
       std::string text;
       CHECK(!psio::encode_json_checked(psio::json{}, bad, text).ok());
       CHECK(!psio::encode_key_checked(bad, out).ok());
-      CHECK_THROWS_AS(psio::to_key(bad), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_key_checked(bad), psio::codec_exception);
       // What an unchecked writer produces: the same record over plain strings.
       Holder<Unbounded, std::vector<std::string>> raw;
       raw.id   = bad.id;

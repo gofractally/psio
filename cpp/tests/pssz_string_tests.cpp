@@ -15,6 +15,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <array>
 #include <optional>
 #include <string>
@@ -290,8 +292,15 @@ namespace
       {
          // The wrapper constructor does not check UTF-8; the encoder does.
          const S value{text};
-         REQUIRE_THROWS_AS(psio::encode(F{}, value), psio::codec_exception);
-         REQUIRE_THROWS_AS(psio::encode(F{}, std::optional<S>{value}), psio::codec_exception);
+         REQUIRE_THROWS_AS(psio_test::encode_validated(F{}, value), psio::codec_exception);
+         REQUIRE_THROWS_AS(psio_test::encode_validated(F{}, std::optional<S>{value}),
+                           psio::codec_exception);
+         // The fast write holds nothing against the wrapper: it writes the
+         // bytes, which every checking reader then refuses.
+         {
+            const auto fast = psio::encode(F{}, value);
+            CHECK_FALSE(psio::validate<S>(F{}, std::span<const char>{fast}).ok());
+         }
          rejected<F, S>(raw(text));
 
          std::vector<char> some{1};
@@ -309,7 +318,7 @@ namespace
             std::vector<char> in_array(W, 0);
             in_array[0] = static_cast<char>(W);
             in_array.insert(in_array.end(), text.begin(), text.end());
-            REQUIRE_THROWS_AS(psio::encode(F{}, A{value}), psio::codec_exception);
+            REQUIRE_THROWS_AS(psio_test::encode_validated(F{}, A{value}), psio::codec_exception);
             rejected<F, A>(in_array);
             std::vector<char> good(W, 0);
             good[0] = static_cast<char>(W);
@@ -323,7 +332,7 @@ namespace
             INFO("slot " << slot);
             auto bad = good_holder<S>();
             poison(bad, slot, text);
-            REQUIRE_THROWS_AS(psio::encode(F{}, bad), psio::codec_exception);
+            REQUIRE_THROWS_AS(psio_test::encode_validated(F{}, bad), psio::codec_exception);
             const auto frame = holder_frame<F, S>(slot, text);
             rejected<F, Holder<S>>(frame);
             // The same bytes are a valid record of raw strings.

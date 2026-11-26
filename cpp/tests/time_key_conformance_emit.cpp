@@ -1133,28 +1133,31 @@ namespace
       auto p = psio::validate<T>(psio::pssz{}, std::span<const char>{bytes});
       if (p.ok() || p.error().what != reason)
          die(r.name + ": pssz validate does not report '" + reason + "'");
-      // The trusted pssz decode yields the value; no key writer takes it.
+      // The trusted pssz decode yields the value; the validated key write
+      // refuses it with the invariant's reason. (The fast write, to_key,
+      // holds nothing against the declaration and writes the key above.)
       const T value = psio::decode<T>(psio::pssz{}, std::span<const char>{bytes});
-      threw         = false;
-      try
       {
-         (void)psio::encode(psio::key{}, value);
+         std::vector<char> none;
+         const auto        st = psio::encode_key_checked(value, none);
+         if (st.ok() || st.error().what != reason || !none.empty())
+            die(r.name + ": encode_key_checked writes a value that violates its invariant");
       }
-      catch (const psio::codec_exception& e)
-      {
-         threw = e.error().what == reason;
-      }
-      if (!threw) die(r.name + ": key encode writes a value that violates its invariant");
       threw = false;
       try
       {
-         (void)psio::to_key(value);
+         (void)psio::to_key_checked(value);
       }
       catch (const psio::codec_exception&)
       {
          threw = true;
       }
-      if (!threw) die(r.name + ": to_key writes a value that violates its invariant");
+      if (!threw) die(r.name + ": to_key_checked writes a value that violates its invariant");
+      {
+         const auto fast = psio::to_key(value);
+         if (std::vector<char>(fast.begin(), fast.end()) != key)
+            die(r.name + ": the fast write does not give the key of the value");
+      }
       r.key    = to_hex(key);
       r.pssz   = to_hex(bytes);
       r.reason = reason;
@@ -1175,13 +1178,13 @@ namespace
       bool threw = false;
       try
       {
-         (void)psio::to_key(value);
+         (void)psio::to_key_checked(value);
       }
       catch (const psio::codec_exception&)
       {
          threw = true;
       }
-      if (!threw) die("KBound/" + name + ": to_key takes the value");
+      if (!threw) die("KBound/" + name + ": to_key_checked takes the value");
       if (psio::encode_pssz_checked(psio::pssz{}, value, out).ok())
          die("KBound/" + name + ": the pssz writer takes the value");
       key_reject<KBound>(name, to_hex(psio::encode(psio::key{}, raw)));

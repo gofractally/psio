@@ -74,7 +74,7 @@ namespace
    {
       try
       {
-         (void)psio::to_pssz(value);
+         (void)psio::to_pssz_checked(value);   // the validated write
          return true;
       }
       catch (const psio::codec_exception&)
@@ -1195,15 +1195,15 @@ TEST_CASE("tutorial 2: a bounded record round-trips and refuses bound + 1", "[do
 
    Account long_owner = alice;
    long_owner.owner   = std::string(33, 'x');                // one byte past max<32>
-   CHECK_THROWS_AS(psio::to_pssz(long_owner), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(long_owner), psio::codec_exception);
 
    Account nine_tags = alice;
    nine_tags.tags    = std::vector<std::string>(9, "t");     // one element past max<8>
-   CHECK_THROWS_AS(psio::to_pssz(nine_tags), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(nine_tags), psio::codec_exception);
 
    Account not_text = alice;
    not_text.owner   = "\xff";                                // not UTF-8
-   CHECK_THROWS_AS(psio::to_pssz(not_text), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(not_text), psio::codec_exception);
    // ── /tut-2-run ──
 
    // The frame: 1-byte header and slots, and a 1-byte table in the list
@@ -1315,7 +1315,7 @@ TEST_CASE("tutorial 5: raw bytes and UTF-8 text", "[doc][tut-5]")
    const Note binary{"\xff\xfe", "caf\xc3\xa9"};
    CHECK(psio::from_pssz<Note>(psio::to_pssz(binary)) == binary);
    // A utf8 string does not.
-   CHECK_THROWS_AS(psio::to_pssz(Note{"", "\xff"}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Note{"", "\xff"}), psio::codec_exception);
    // JSON text is UTF-8: a raw string that is not UTF-8 has no JSON.
    CHECK_THROWS_AS(psio::to_json(binary), psio::codec_exception);
    CHECK(psio::to_json(Note{"bytes", "caf\xc3\xa9"}) == "{\"blob\":\"bytes\",\"text\":\"caf\xc3\xa9\"}");
@@ -1374,11 +1374,11 @@ TEST_CASE("tutorial 7: keys", "[doc][tut-7]")
    // The key writer checks what the pssz writer checks: a value outside a
    // bound, or a utf8 member that is not UTF-8, has no key.
    const OwnerKey too_long{std::string(33, 'x'), 7};                 // one byte past max<32>
-   CHECK_THROWS_AS(psio::to_key(too_long), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(too_long), psio::codec_exception);
    std::vector<char> out;
    CHECK_FALSE(psio::encode_key_checked(too_long, out).ok());        // the status form
    CHECK(out.empty());
-   CHECK_THROWS_AS(psio::to_key(OwnerKey{"\xff", 7}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(OwnerKey{"\xff", 7}), psio::codec_exception);
    // The readers refuse the key bytes a writer without the bound produces.
    const auto unbounded = psio::to_key(ByOwner{std::string(33, 'x'), 7});
    CHECK_FALSE(psio::validate_key<OwnerKey>(unbounded).ok());
@@ -1399,8 +1399,8 @@ TEST_CASE("tutorial 8: transparent wrappers and invariants", "[doc][tut-8]")
    CHECK(psio::to_json(AccountId{42}) == "42");
 
    // A value that violates its invariant has no encoding ...
-   CHECK_THROWS_AS(psio::to_pssz(Symbol{"usd"}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_json(Symbol{"usd"}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Symbol{"usd"}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_json_checked(Symbol{"usd"}), psio::codec_exception);
    // ... and bytes or text that hold one are refused, with the type's message.
    std::vector<char> bytes = psio::to_pssz(Symbol{"USD"});
    bytes.back() = 'd';                                             // "USd"
@@ -1422,10 +1422,10 @@ TEST_CASE("tutorial 8: a transparent type with a bounded member", "[doc][tut-8]"
    CHECK(psio::from_pssz<Memo>(psio::to_pssz(memo)) == memo);
 
    // Its bound and its UTF-8 rule hold wherever a Memo appears.
-   CHECK_THROWS_AS(psio::to_pssz(Memo{std::string(81, 'm')}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_pssz(Memo{"\xff"}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_key(Memo{std::string(81, 'm')}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_pssz(Receipt{1, Memo{std::string(81, 'm')}}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Memo{std::string(81, 'm')}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Memo{"\xff"}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(Memo{std::string(81, 'm')}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Receipt{1, Memo{std::string(81, 'm')}}), psio::codec_exception);
    CHECK_FALSE(psio::validate_pssz<Memo>(std::vector<char>(81, 'm')).ok());
    CHECK_FALSE(psio::validate_json<Memo>('"' + std::string(81, 'm') + '"').ok());
 
@@ -1457,7 +1457,7 @@ TEST_CASE("tutorial 9: method arguments", "[doc][tut-9]")
    CHECK(std::get<3>(back) == "rent");
 
    // A memo of 81 bytes has no encoding, and a frame holding one is refused.
-   CHECK_THROWS_AS(psio::to_pssz(TransferArgs{AccountId{1}, AccountId{2}, 500, std::string(81, 'm')}),
+   CHECK_THROWS_AS(psio::to_pssz_checked(TransferArgs{AccountId{1}, AccountId{2}, 500, std::string(81, 'm')}),
                    psio::codec_exception);
 
    // The return value is checked against returns(...).
@@ -1492,7 +1492,7 @@ TEST_CASE("tutorial 9: method arguments", "[doc][tut-9]")
    const PayArgs pay{AccountId{1}, AccountId{2}, 500, Memo{"rent"}};
    CHECK(psio::to_pssz(pay) == bytes);
    CHECK(psio::to_json(pay) == psio::to_json(args));
-   CHECK_THROWS_AS(psio::to_pssz(PayArgs{AccountId{1}, AccountId{2}, 500, Memo{std::string(81, 'm')}}),
+   CHECK_THROWS_AS(psio::to_pssz_checked(PayArgs{AccountId{1}, AccountId{2}, 500, Memo{std::string(81, 'm')}}),
                    psio::codec_exception);
    // ── /tut-9c-run ──
    {
@@ -1608,7 +1608,7 @@ TEST_CASE("reference: the three spellings are one type", "[doc][ref-spellings]")
    CHECK(psio::to_json(a) == psio::to_json(c));
    CHECK(psio::to_key(a) == psio::to_key(b));
    CHECK(psio::to_key(a) == psio::to_key(c));
-   CHECK_THROWS_AS(psio::to_pssz(Separate{std::string(33, 'x'), {}}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Separate{std::string(33, 'x'), {}}), psio::codec_exception);
    // The wrapper also refuses at construction.
    CHECK_THROWS_AS(psio::utf8_string<32>{std::string(33, 'x')}, std::length_error);
    // The Schema IR of the two members is the same node in all three.
@@ -1701,11 +1701,11 @@ TEST_CASE("reference: sorted / unique / unique_keys are enforced", "[doc][ref-so
 
    // A value out of order has no encoding, in pssz, JSON and key alike.
    const Ranked descending{{3, 1, 2}, {}, {}};
-   CHECK_THROWS_AS(psio::to_pssz(descending), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_json(descending), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_key(descending), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_pssz(Ranked{{}, {"a", "a"}, {}}), psio::codec_exception);            // a duplicate
-   CHECK_THROWS_AS(psio::to_pssz(Ranked{{}, {}, {{"a", 1}, {"a", 2}}}), psio::codec_exception);  // a key twice
+   CHECK_THROWS_AS(psio::to_pssz_checked(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_json_checked(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(descending), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(Ranked{{}, {"a", "a"}, {}}), psio::codec_exception);            // a duplicate
+   CHECK_THROWS_AS(psio::to_pssz_checked(Ranked{{}, {}, {{"a", 1}, {"a", 2}}}), psio::codec_exception);  // a key twice
 
    // Every checking reader rejects what a writer without the constraint produces.
    const auto bytes = psio::to_pssz(Unranked{{3, 1, 2}, {}, {}});
@@ -1810,7 +1810,7 @@ TEST_CASE("reference: arrays, optionals, maps, sets", "[doc][ref-containers]")
    CHECK(psio::from_pssz<Slots>(psio::to_pssz(s)) == s);
    CHECK_FALSE(encodes(Slots{{}, {"", std::string(17, 'n'), ""}}));
    // 1-byte header, 16 bytes, 1-byte slot; then the array's own 1-byte table.
-   CHECK(psio::to_pssz(s).size() == 1 + 16 + 1 + 3 + 17);
+   CHECK(psio::to_pssz_checked(s).size() == 1 + 16 + 1 + 3 + 17);
 
    // ── ref-optional-run ──
    const Profile none{7, std::nullopt, std::nullopt};

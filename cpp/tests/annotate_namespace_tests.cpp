@@ -366,7 +366,7 @@ namespace
          CHECK_FALSE(psio::encode_json_checked(psio::json{}, bad, text).ok());
          // No key writer takes the value; the key an unchecked writer would
          // produce is rejected by the readers.
-         CHECK_THROWS_AS(psio::encode(psio::key{}, bad), psio::codec_exception);
+         CHECK_THROWS_AS(psio::to_key_checked(bad), psio::codec_exception);
          Bytes refused;
          CHECK_FALSE(psio::encode_key_checked(bad, refused).ok());
          CHECK_FALSE(psio::encode_key_checked(*bad_ref, refused).ok());

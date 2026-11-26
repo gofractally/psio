@@ -11,6 +11,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -71,10 +73,22 @@ namespace
       else
       {
          CHECK(sink == std::vector<char>{'x'});
-         CHECK_THROWS_AS(psio::encode(Fmt{}, value), psio::codec_exception);
+         CHECK_THROWS_AS(psio_test::encode_validated(Fmt{}, value), psio::codec_exception);
          std::vector<char> appended{'x'};
-         CHECK_THROWS_AS(psio::encode(Fmt{}, value, appended), psio::codec_exception);
+         CHECK_THROWS_AS(psio_test::encode_validated(Fmt{}, value, appended), psio::codec_exception);
          CHECK(appended == std::vector<char>{'x'});
+         // The fast write holds nothing against the bound: it writes the
+         // frame the validator refuses, or fails because the frame cannot
+         // be written at all — never a frame that reads as another value.
+         try
+         {
+            const auto fast = psio::encode(Fmt{}, value);
+            CHECK(fast == bytes);
+            CHECK_FALSE(psio::validate<LbRec>(Fmt{}, fast).ok());
+         }
+         catch (const psio::codec_exception&)
+         {
+         }
       }
       // The fail-fast decode agrees too: it reads what validate accepts and
       // raises for a member outside its bound (max, exact or min, through

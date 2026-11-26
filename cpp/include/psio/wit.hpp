@@ -29,6 +29,7 @@
 #include <psio/format_tag_base.hpp>
 #include <psio/adapter.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/validate_strict_walker.hpp>
 
 #include <algorithm>
@@ -971,7 +972,18 @@ namespace psio {
             ok = validate_leaf<T>(bytes, 0);
          if (!ok)
             return codec_fail("wit: invalid buffer", 0, "wit");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] {
+               T out{};
+               if constexpr (detail::wit_impl::Record<T>)
+                  lift_record<T>(bytes, 0, out);
+               else
+                  lift_leaf<T>(bytes, 0, out);
+               return out;
+            },
+            "wit: member length_bound violated", "wit: decode failed during validate", "wit");
       }
 
       template <typename T>
@@ -980,6 +992,10 @@ namespace psio {
       tag_invoke(decltype(::psio::validate_strict<T>), wit, T*,
                  std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(wit{}, bytes); !st.ok())
+            return st;
          using namespace detail::wit_impl;
          bool ok;
          if constexpr (detail::wit_impl::Record<T>)

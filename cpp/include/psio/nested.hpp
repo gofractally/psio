@@ -99,9 +99,16 @@ namespace psio
       // The encoding of T{}. (Not a constraint: T may still be incomplete
       // where a recursive type declares its nested<T> member.)
       nested() : bytes_(::psio::encode(::psio::pssz{}, T{})) {}
-      // The encoding of `value`. Fails fast (codec_exception, or abort
-      // without exceptions) for a value with no encoding, like psio::encode.
-      explicit nested(const T& value) : bytes_(::psio::encode(::psio::pssz{}, value)) {}
+      // The encoding of `value`, by the VALIDATED write: a nested value
+      // holds a valid encoding of T, so a value that violates what T
+      // declares is refused here (codec_exception, or abort without
+      // exceptions), as psio::to_pssz_checked refuses it.
+      explicit nested(const T& value)
+      {
+         if (auto status = ::psio::encode_pssz_checked(::psio::pssz{}, value, bytes_);
+             !status.ok())
+            ::psio::codec_abort(status.error());
+      }
 
       static nested from(const T& value) { return nested(value); }
 

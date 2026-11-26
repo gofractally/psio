@@ -1045,15 +1045,32 @@ namespace psio {
       // What the preflight checks beyond depth, null Box and UTF-8. It is
       // passed down the walk unchanged (as `bounds`, and tested as one: it
       // converts to whether bounds are checked).
+      //
+      // The two write modes (docs/annotations.md "Reading and writing: the
+      // two modes"):
+      //   validated()  everything: what `encode_pssz_checked` /
+      //                `to_pssz_checked` run. A value that passes has a
+      //                frame every validating reader accepts.
+      //   fast()       what `psio::encode` / `to_pssz` run: only what leaves
+      //                a value without a frame — a null Box, the depth
+      //                limit, a nonempty vector of zero-size elements, a
+      //                text that does not exist. Nothing the type declares
+      //                is checked here; where a declaration decides the
+      //                layout (a bound or a cap sets an offset width) the
+      //                sizing pass that follows fails for a payload the
+      //                width cannot address, as it always did.
       struct encode_preflight
       {
          bool bounds     = true;  // member length_bound, bitlist capacity
          bool invariants = true;  // type invariants
-         constexpr encode_preflight(bool check_bounds = true,
-                                    bool check_invariants = true) noexcept
-            : bounds(check_bounds), invariants(check_invariants)
+         bool text       = true;  // psio::utf8_string: its bound and UTF-8
+         constexpr encode_preflight(bool check_bounds = true, bool check_invariants = true,
+                                    bool check_text = true) noexcept
+            : bounds(check_bounds), invariants(check_invariants), text(check_text)
          {
          }
+         static constexpr encode_preflight validated() noexcept { return {}; }
+         static constexpr encode_preflight fast() noexcept { return {false, false, false}; }
          constexpr explicit operator bool() const noexcept { return bounds; }
       };
 
@@ -1108,10 +1125,10 @@ namespace psio {
                if (depth + 1 > kMaxValidationDepth)
                   return codec_fail("pssz: max depth exceeded", 0, "pssz");
                return check_encode_as<typename S::psio_in_place_type>(value.source(), depth + 1,
-                                                                      {});
+                                                                      bounds);
             }
             else
-               return check_encode_as<typename S::psio_in_place_type>(value.source(), 0, {});
+               return check_encode_as<typename S::psio_in_place_type>(value.source(), 0, bounds);
          }
          else if constexpr (in_place_text<S>)
             // The text is made here, so the value is checked here: a value
@@ -1183,6 +1200,8 @@ namespace psio {
          {
             // The wrapper's constructor checks only the bound; the encoder
             // owns the UTF-8 check (and re-checks the bound defensively).
+            if (!bounds.text)
+               return codec_ok();
             if (value.size() > T::max_size_value)
                return codec_fail("pssz: utf8_string exceeds its bound", 0, "pssz");
             return ::psio::utf8_spec::validate(
@@ -1265,10 +1284,16 @@ namespace psio {
       }
       // Encoder preflight (see check_encode_depth). Runs before sizing so a
       // rejected value never resizes or appends to the destination.
+      //
+      // This is the preflight of the FAST write (psio::encode, to_pssz): it
+      // refuses a value that has no frame and holds nothing against what the
+      // type declares (encode_preflight::fast). The validated write is
+      // encode_checked below.
       template <typename T>
       void enforce_encodable(const T& value)
       {
-         if (auto status = check_encode_depth_impl(value, 0); !status.ok())
+         if (auto status = check_encode_depth_impl(value, 0, encode_preflight::fast());
+             !status.ok())
             status_failure(status);
       }
       // What the sizing pass does when a value has no encoding (a size that
@@ -4677,6 +4702,10 @@ namespace psio {
       static constexpr std::size_t offset_width = W;
       using preferred_presentation_category = ::psio::binary_category;
 
+      // The validated write (psio/helpers.hpp: psio::encode_checked).
+      template <typename T>
+      [[nodiscard]] static codec_status encode_checked(const T& value, std::vector<char>& out);
+
       template <typename T>
       friend void tag_invoke(decltype(::psio::encode), pssz_<W>,
                              const T& v, std::vector<char>& sink)
@@ -5073,6 +5102,12 @@ namespace psio {
    codec_status pssz::encode_checked(const T& value, std::vector<char>& out)
    {
       return encode_pssz_checked(pssz{}, value, out);
+   }
+   template <std::size_t W>
+   template <typename T>
+   codec_status pssz_<W>::encode_checked(const T& value, std::vector<char>& out)
+   {
+      return encode_pssz_checked(pssz_<W>{}, value, out);
    }
    template <typename T>
    codec_status pssz::decode_compatible(std::span<const char> bytes, T& out, bool& has_unknown)

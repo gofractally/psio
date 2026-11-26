@@ -27,6 +27,7 @@
 #include <psio/error.hpp>
 #include <psio/format_tag_base.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 
 #include <cstdint>
@@ -821,7 +822,11 @@ namespace psio {
          if (pos != bytes.size())
             return codec_fail("bson: trailing bytes after document",
                               static_cast<std::uint32_t>(pos), "bson");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { std::size_t p = 0; return detail::bson_impl::decode_value<T>(bytes, p); }, "bson: member length_bound violated",
+            "bson: decode failed during validate", "bson");
       }
 
       template <typename T>

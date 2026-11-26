@@ -437,7 +437,7 @@ namespace
       bool       plain   = true;
       try
       {
-         (void)psio::encode(psio::pssz{}, value);
+         (void)psio::to_pssz_checked(value);   // the validated write, raising
       }
       catch (const psio::codec_exception&)
       {
@@ -495,8 +495,8 @@ namespace
       // the JSON of one (written by a twin without the annotations: here the
       // schema-free text of the frame) is refused by the reader.
       CHECK(psio::decode<T>(psio::ijson{}, std::span<const char>{text}) == at_bound);
-      CHECK_THROWS_AS(psio::encode(psio::json{}, over), psio::codec_exception);
-      CHECK_THROWS_AS(psio::encode(psio::ijson{}, over), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_json_checked(over), psio::codec_exception);
+      CHECK_THROWS_AS(psio::to_ijson_checked(over), psio::codec_exception);
    }
    const std::string s16(16, 'a');
    const std::string s17(17, 'a');

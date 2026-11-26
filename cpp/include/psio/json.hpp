@@ -585,6 +585,11 @@ namespace psio {
       {
          std::string_view format;
          bool             fail_fast = true;
+         // The VALIDATED write: also hold the value against what its type
+         // declares (member bounds, order specs, invariants). The fast write
+         // (to_json / encode) refuses only what is not JSON: a string that
+         // is not UTF-8, a non-finite float, a null Box.
+         bool             check_values = false;
          std::string_view err{};
          // The status of a violated invariant, reported unchanged.
          ::psio::codec_error invariant{};
@@ -1407,10 +1412,11 @@ namespace psio {
             // / utf8, and those of its elements, keys, values and tuple
             // elements at any depth) has no text: the reader would reject it.
             if constexpr (::psio::detail::ann::has_value_checks_v<F, eff>)
-               if (auto st = ::psio::check_member_annotations(
-                      fref, eff_for::value, "json: member length_bound violated", "json");
-                   !st.ok())
-                  w.fail(st.error());
+               if (w.check_values)
+                  if (auto st = ::psio::check_member_annotations(
+                         fref, eff_for::value, "json: member length_bound violated", "json");
+                      !st.ok())
+                     w.fail(st.error());
             constexpr int_mode mode = field_mode<Fmt, eff>(eff_for::value);
             encode_value<Fmt, mode>(fref, w);
          }
@@ -1579,8 +1585,9 @@ namespace psio {
       {
          encode_shape<Fmt, IM>(v, w);
          if constexpr (::psio::has_invariant_v<T>)
-            if (auto st = ::psio::check_invariant(v); !st.ok())
-               w.fail(st.error());
+            if (w.check_values)
+               if (auto st = ::psio::check_invariant(v); !st.ok())
+                  w.fail(st.error());
       }
 
       template <typename Fmt, int_mode IM, typename T>
@@ -1626,10 +1633,11 @@ namespace psio {
          {
             // A member outside the bounds its type gives it has no text.
             if constexpr (::psio::transparent_member_checked_v<T>)
-               if (auto st = ::psio::check_transparent_member(
-                      v, "json: member length_bound violated", "json");
-                   !st.ok())
-                  w.fail(st.error());
+               if (w.check_values)
+                  if (auto st = ::psio::check_transparent_member(
+                         v, "json: member length_bound violated", "json");
+                      !st.ok())
+                     w.fail(st.error());
             encode_value<Fmt, IM>(::psio::transparent_inner(v), w);
          }
          else if constexpr (::psio::detail::is_nested_v<T>)
@@ -1741,7 +1749,7 @@ namespace psio {
          {
             // The wrapper's storage is reachable unchecked: never write a
             // list its own reader rejects.
-            if (v.size() > T::max_size_value)
+            if (w.check_values && v.size() > T::max_size_value)
                w.fail("json: array exceeds its bound");
             encode_value<Fmt, IM>(v.storage(), w);
          }
@@ -1827,10 +1835,12 @@ namespace psio {
             // A tuple carrying element annotations (wrappers.hpp: a
             // method's argument tuple): the tuple's text, for a value
             // inside its annotations.
-            if (auto st = ::psio::detail::ann::check_value(
-                   v.tuple(), T::psio_annotations, "json: member length_bound violated", "json");
-                !st.ok())
-               w.fail(st.error());
+            if (w.check_values)
+               if (auto st = ::psio::detail::ann::check_value(
+                      v.tuple(), T::psio_annotations, "json: member length_bound violated",
+                      "json");
+                   !st.ok())
+                  w.fail(st.error());
             // A method's arguments (docs/json.md "Method arguments"): an
             // object keyed by parameter name, in declaration order, when the
             // method names its parameters; the positional array otherwise.
@@ -1900,9 +1910,11 @@ namespace psio {
       // writer with nothing written, so every check runs and a value
       // without a text fails as it does when it is written.
       template <typename Fmt, typename T>
-      codec_status measure_document(const T& v, std::size_t& size, bool fail_fast)
+      codec_status measure_document(const T& v, std::size_t& size, bool fail_fast,
+                                    bool check_values = false)
       {
          writer w{writer::count_only{}, Fmt::name, fail_fast};
+         w.check_values = check_values;
          encode_document<Fmt>(v, w);
          size = w.size();
          return writer_status(w, 0);
@@ -1912,9 +1924,11 @@ namespace psio {
       // measure_document gave for the same value. Nothing is written
       // outside the span whatever the value is by now.
       template <typename Fmt, typename T>
-      codec_status write_document(const T& v, char* dst, std::size_t size, bool fail_fast)
+      codec_status write_document(const T& v, char* dst, std::size_t size, bool fail_fast,
+                                  bool check_values = false)
       {
          writer w{dst, size, Fmt::name, fail_fast};
+         w.check_values = check_values;
          encode_document<Fmt>(v, w);
          if (auto st = writer_status(w, 0); !st.ok())
             return st;
@@ -1941,7 +1955,8 @@ namespace psio {
       // Appends the text of `v` to `sink`. On failure (not fail-fast) the
       // sink is restored.
       template <typename Fmt, typename T, typename Sink>
-      codec_status append_document(const T& v, Sink& sink, ::psio::json_sizing how, bool fail_fast)
+      codec_status append_document(const T& v, Sink& sink, ::psio::json_sizing how, bool fail_fast,
+                                   bool check_values = false)
       {
          const std::size_t start = sink.size();
          if (how == ::psio::json_sizing::automatic)
@@ -1949,6 +1964,7 @@ namespace psio {
          if (how == ::psio::json_sizing::growth)
          {
             writer w{sink, Fmt::name, fail_fast};
+            w.check_values = check_values;
             encode_document<Fmt>(v, w);
             auto st = writer_status(w, start);
             if (!st.ok())
@@ -1956,12 +1972,12 @@ namespace psio {
             return st;
          }
          std::size_t size = 0;
-         if (auto st = measure_document<Fmt>(v, size, fail_fast); !st.ok())
+         if (auto st = measure_document<Fmt>(v, size, fail_fast, check_values); !st.ok())
             return st;
          if (sink.capacity() - start < size)
             sink.reserve(start + size);
          set_sink_size(sink, start + size, false);
-         auto st = write_document<Fmt>(v, sink.data() + start, size, fail_fast);
+         auto st = write_document<Fmt>(v, sink.data() + start, size, fail_fast, check_values);
          if (!st.ok())
             sink.resize(start);
          return st;
@@ -3273,6 +3289,17 @@ namespace psio {
             return read_document<Derived, T>(bytes, &out);
          }
 
+         // The validated write (psio/helpers.hpp: `psio::encode_checked`,
+         // `encode_json_checked`, `to_json_checked`): appends the text of
+         // `v`, or returns why a reader would refuse it — a member outside
+         // its bounds or order, a violated invariant — and restores `out`.
+         template <typename T, typename Sink>
+            requires(std::same_as<Sink, std::string> || std::same_as<Sink, std::vector<char>>)
+         [[nodiscard]] static codec_status encode_checked(const T& v, Sink& out)
+         {
+            return append_document<Derived>(v, out, ::psio::json_sizing::automatic, false, true);
+         }
+
          // ── size_of ─────────────────────────────────────────────────────
          //
          // The exact length of the text, measured: the writer's walk with
@@ -3515,7 +3542,7 @@ namespace psio {
    [[nodiscard]] codec_status encode_json_checked(Fmt, const T& value, Sink& out,
                                                   json_sizing how = json_sizing::automatic)
    {
-      return detail::json_impl::append_document<Fmt>(value, out, how, false);
+      return detail::json_impl::append_document<Fmt>(value, out, how, false, true);
    }
 
    // The length of the text of `value`, in `size`: what `json_size` /
@@ -3524,7 +3551,7 @@ namespace psio {
    template <detail::json_impl::json_family Fmt, typename T>
    [[nodiscard]] codec_status json_size_checked(Fmt, const T& value, std::size_t& size)
    {
-      return detail::json_impl::measure_document<Fmt>(value, size, false);
+      return detail::json_impl::measure_document<Fmt>(value, size, false, true);
    }
 
    // `to_json` / `to_ijson` with the sizing named (json_sizing above):

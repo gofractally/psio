@@ -50,7 +50,7 @@ namespace max_tests
    {
       try
       {
-         (void)psio::encode(psio::pssz{}, value);
+         (void)psio::to_pssz_checked(value);   // the validated write
          return false;
       }
       catch (const psio::codec_exception&)

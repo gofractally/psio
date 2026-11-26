@@ -1,5 +1,7 @@
 #include "pssz_optional_fixtures.hpp"
 #include <catch.hpp>
+
+#include "validated_write.hpp"
 using namespace optional_fixture;
 
 template<typename T,typename F> auto checked_view(F format,std::span<const char> bytes,bool& unknown) {
@@ -94,7 +96,7 @@ TEMPLATE_TEST_CASE("checked readers enforce node depth and malformed payloads co
  REQUIRE_FALSE(psio::validate<psio::utf8_string<8>>(F{},not_utf8).ok());
  REQUIRE_FALSE(psio::validate_strict<psio::utf8_string<8>>(F{},not_utf8).ok());
  REQUIRE_THROWS_AS(psio::decode<psio::utf8_string<8>>(F{},not_utf8),psio::codec_exception);
- REQUIRE_THROWS_AS(psio::encode(F{},psio::utf8_string<8>{std::string(not_utf8.begin(),not_utf8.end())}),psio::codec_exception);
+ REQUIRE_THROWS_AS(psio_test::encode_validated(F{}, psio::utf8_string<8>{std::string(not_utf8.begin(),not_utf8.end())}),psio::codec_exception);
  const auto good_utf8=psio::encode(F{},psio::utf8_string<8>{std::string("h\xc3\xa9")});
  REQUIRE(psio::validate<psio::utf8_string<8>>(F{},good_utf8).ok());
  REQUIRE(psio::validate_strict<psio::utf8_string<8>>(F{},good_utf8).ok());

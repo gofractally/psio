@@ -36,15 +36,15 @@ TEST_CASE("custom x map / set / nested: the fail-fast writers refuse a violated 
 {
    const Name  bad_name{std::uint64_t{1} << 60};
    const Range bad_range{5, 1};
-   CHECK_THROWS(psio::encode(psio::pssz{}, ByName{{bad_name, Range{0, 1}}}));
-   CHECK_THROWS(psio::encode(psio::pssz{}, ByName{{Name{1}, bad_range}}));
-   CHECK_THROWS(psio::encode(psio::pssz{}, Levels{static_cast<Level>(9)}));
-   CHECK_THROWS(psio::encode(psio::json{}, SlugMap{{Slug{"NO"}, 1}}));
-   CHECK_THROWS(psio::encode(psio::ijson{}, ByRef{{Ref{std::string{}}, 1}}));
-   CHECK_THROWS(psio::to_key(ByName{{Name{1}, bad_range}}));
-   CHECK_THROWS(psio::to_key(Members{{bad_name}}));
-   CHECK_THROWS(psio::to_key(Levels{static_cast<Level>(9)}));
-   CHECK_THROWS(psio::encode(psio::pssz{}, Budget{{{Tag{"a"}, 101}}}));
+   CHECK_THROWS(psio::to_pssz_checked(ByName{{bad_name, Range{0, 1}}}));
+   CHECK_THROWS(psio::to_pssz_checked(ByName{{Name{1}, bad_range}}));
+   CHECK_THROWS(psio::to_pssz_checked(Levels{static_cast<Level>(9)}));
+   CHECK_THROWS(psio::to_json_checked(SlugMap{{Slug{"NO"}, 1}}));
+   CHECK_THROWS(psio::to_ijson_checked(ByRef{{Ref{std::string{}}, 1}}));
+   CHECK_THROWS(psio::to_key_checked(ByName{{Name{1}, bad_range}}));
+   CHECK_THROWS(psio::to_key_checked(Members{{bad_name}}));
+   CHECK_THROWS(psio::to_key_checked(Levels{static_cast<Level>(9)}));
+   CHECK_THROWS(psio::to_pssz_checked(Budget{{{Tag{"a"}, 101}}}));
    // A nested value is built from a value that satisfies its invariants.
    CHECK_THROWS(Packed::from(bad_range));
    CHECK_THROWS(Packed{bad_range});

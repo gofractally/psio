@@ -16,6 +16,8 @@
 
 #include <catch.hpp>
 
+#include "validated_write.hpp"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -735,8 +737,8 @@ namespace
       CHECK(out == std::vector<char>{'x'});
       try
       {
-         (void)psio::encode(Fmt{}, value);
-         FAIL("encode wrote the value");
+         (void)psio_test::encode_validated(Fmt{}, value);
+         FAIL("the validated write wrote the value");
       }
       catch (const psio::codec_exception& e)
       {
@@ -744,8 +746,8 @@ namespace
       }
       try
       {
-         psio::encode(Fmt{}, value, out);
-         FAIL("sink encode wrote the value");
+         psio_test::encode_validated(Fmt{}, value, out);
+         FAIL("the validated sink write wrote the value");
       }
       catch (const psio::codec_exception&)
       {
@@ -840,8 +842,13 @@ TEST_CASE("invariant: innermost first, each value once", "[invariant][pssz]")
 {
    const Branch ok{Leaf{1}, Leaf{2}};
    log().clear();
-   const auto bytes = pssz_of(ok);
+   // (The validated write runs the invariants; pssz_of, the fast write,
+   // runs none.)
+   const auto bytes = psio::to_pssz_checked(ok);
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
+   log().clear();
+   CHECK(pssz_of(ok) == bytes);
+   CHECK(log().empty());
    log().clear();
    REQUIRE(psio::validate<Branch>(psio::pssz{}, sp(bytes)).ok());
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
@@ -859,17 +866,17 @@ TEST_CASE("invariant: innermost first, each value once", "[invariant][pssz]")
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
    // A transparent wrapper: its member's check, then its own.
    log().clear();
-   REQUIRE(psio::validate<Twig>(psio::pssz{}, sp(pssz_of(Twig{Leaf{4}}))).ok());
+   REQUIRE(psio::validate<Twig>(psio::pssz{}, sp(psio::to_pssz_checked(Twig{Leaf{4}}))).ok());
    CHECK(log() == std::vector<std::string>{"Leaf", "Twig", "Leaf", "Twig"});  // encode + validate
    log().clear();
    // The same order in text and in keys.
-   const std::string text = psio::encode(psio::json{}, ok);
+   const std::string text = psio::to_json_checked(ok);
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
    log().clear();
    REQUIRE(psio::validate<Branch>(psio::json{}, sp(text)).ok());
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
    log().clear();
-   const auto key = psio::encode(psio::key{}, ok);
+   const auto key = psio::to_key_checked(ok);
    CHECK(log() == std::vector<std::string>{"Leaf", "Leaf", "Branch"});
    log().clear();
    REQUIRE(psio::validate<Branch>(psio::key{}, sp(key)).ok());
@@ -905,24 +912,26 @@ TEST_CASE("invariant: key encode, validate and decode", "[invariant][key]")
            "Name: value is not a canonical name");
 
    const Name bad{~std::uint64_t{0}};
-   CHECK_THROWS_AS(psio::encode(psio::key{}, bad), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_key(bad), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_key_checked(bad), psio::codec_exception);
    std::vector<char> sink;
-   CHECK_THROWS_AS(psio::encode(psio::key{}, std::tuple<std::string, Name>{"k", bad}, sink),
+   CHECK_THROWS_AS(psio::to_key_checked(std::tuple<std::string, Name>{"k", bad}, sink),
                    psio::codec_exception);
+   CHECK(sink.empty());
+   // The fast write runs no invariant: every value has a key.
+   CHECK(psio::to_key(bad).size() == 8);
    try
    {
-      (void)psio::to_key(std::vector<Even>{Even{2}, Even{3}});
-      FAIL("to_key wrote the value");
+      (void)psio::to_key_checked(std::vector<Even>{Even{2}, Even{3}});
+      FAIL("to_key_checked wrote the value");
    }
    catch (const psio::codec_exception& e)
    {
       CHECK(e.error().what == "Even: odd");
       CHECK(e.error().format_name == "Even");
    }
-   // A prefix encodes elements: each is checked as the value it is.
+   // A prefix is a fast write of its elements: no invariant runs.
    using Key = std::tuple<Name, std::string>;
-   CHECK_THROWS_AS(psio::key_prefix<Key>(bad), psio::codec_exception);
+   CHECK(psio::key_prefix<Key>(bad).size() == 8);
    CHECK(psio::key_prefix<Key>(Name{1}).size() == 8);
    // Good keys are unaffected, and a structural error stays structural.
    const auto key = psio::to_key(Name{5});
@@ -987,13 +996,14 @@ namespace
          CHECK(out == "keep");
          if (ij)
          {
-            CHECK_THROWS_AS(psio::encode(psio::ijson{}, value), psio::codec_exception);
-            CHECK_THROWS_AS(psio::size_of(psio::ijson{}, value), psio::codec_exception);
+            CHECK_THROWS_AS(psio::to_ijson_checked(value), psio::codec_exception);
+            std::size_t size = 0;
+            CHECK_FALSE(psio::json_size_checked(psio::ijson{}, value, size).ok());
          }
          else
          {
-            CHECK_THROWS_AS(psio::encode(psio::json{}, value), psio::codec_exception);
-            CHECK_THROWS_AS(psio::encode(psio::json{}, value, out), psio::codec_exception);
+            CHECK_THROWS_AS(psio::to_json_checked(value), psio::codec_exception);
+            CHECK_THROWS_AS(psio::to_json_checked(value, out), psio::codec_exception);
          }
       }
    }

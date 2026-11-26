@@ -467,26 +467,26 @@ TEST_CASE("in place: the inner value is checked where it is encoded", "[pssz][in
    CHECK(psio::to_pssz(EnvelopeOf{1, psio::nested_of(ok)}) ==
          psio::to_pssz(Envelope{1, psio::nested<Small>::from(ok)}));
    // A value with no encoding fails the enclosing encode ...
-   CHECK_THROWS_AS(psio::to_pssz(EnvelopeOf{1, psio::nested_of(long_text)}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_pssz(EnvelopeOf{1, psio::nested_of(not_utf8)}), psio::codec_exception);
-   CHECK_THROWS_AS(psio::to_pssz(EnvelopeOf{1, psio::packed(long_text)}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(EnvelopeOf{1, psio::nested_of(long_text)}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(EnvelopeOf{1, psio::nested_of(not_utf8)}), psio::codec_exception);
+   CHECK_THROWS_AS(psio::to_pssz_checked(EnvelopeOf{1, psio::packed(long_text)}), psio::codec_exception);
    // ... and writes nothing.
    std::vector<char> out{'x'};
    CHECK_FALSE(
       psio::encode_pssz_checked(psio::pssz{}, EnvelopeOf{1, psio::nested_of(long_text)}, out).ok());
    CHECK(out == std::vector<char>{'x'});
-   CHECK_THROWS_AS(psio::to_pssz(EnvelopeOf{1, psio::nested_of(long_text)}, out),
+   CHECK_THROWS_AS(psio::to_pssz_checked(EnvelopeOf{1, psio::nested_of(long_text)}, out),
                    psio::codec_exception);
    CHECK(out == std::vector<char>{'x'});
    // Arguments outside the method's bounds or cap.
    CHECK_THROWS_AS(
-      psio::to_pssz(ActionOf{1, 2, 3, psio::method_args_packed<Transact, 1>(5, "123456789")}),
+      psio::to_pssz_checked(ActionOf{1, 2, 3, psio::method_args_packed<Transact, 1>(5, "123456789")}),
       psio::codec_exception);
 
    // A bound on the member counts the bytes written in place.
    const Inner three{{'a', 'b', 'c'}}, nine{std::vector<char>(9, 'z')};
    CHECK(psio::to_pssz(CappedOf<psio::packed_ref<Inner>>{1, psio::packed(three)}) ==
          psio::to_pssz(Capped{1, psio::to_pssz(three)}));
-   CHECK_THROWS_AS(psio::to_pssz(CappedOf<psio::packed_ref<Inner>>{1, psio::packed(nine)}),
+   CHECK_THROWS_AS(psio::to_pssz_checked(CappedOf<psio::packed_ref<Inner>>{1, psio::packed(nine)}),
                    psio::codec_exception);
 }

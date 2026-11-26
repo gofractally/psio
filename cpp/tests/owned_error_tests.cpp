@@ -21,8 +21,8 @@ TEST_CASE("owned error message: the exception carries it", "[error][invariant]")
    std::optional<psio::codec_exception> kept;
    try
    {
-      (void)psio::encode(psio::pssz{}, bad);
-      FAIL("encode accepted a value that violates its invariant");
+      (void)psio::to_pssz_checked(bad);
+      FAIL("the validated write accepted a value that violates its invariant");
    }
    catch (const psio::codec_exception& e)
    {

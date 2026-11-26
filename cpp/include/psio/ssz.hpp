@@ -36,6 +36,7 @@
 #include <psio/adapter.hpp>
 #include <psio/time.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 #include <psio/validate_strict_walker.hpp>
 #include <psio/wrappers.hpp>  // effective_annotations_for
@@ -2172,7 +2173,13 @@ namespace psio {
          if (auto st = ::psio::check_max_dynamic_cap<T>(bytes.size(), "ssz");
              !st.ok())
             return st;
-         return detail::ssz_impl::validate_value<T>(bytes, 0, bytes.size());
+         if (auto st = detail::ssz_impl::validate_value<T>(bytes, 0, bytes.size()); !st.ok())
+            return st;
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { return detail::ssz_impl::decode_value<T>(bytes, 0, bytes.size()); }, "ssz: member length_bound violated",
+            "ssz: decode failed during validate", "ssz");
       }
 
       // ── validate_or_throw (structural only, throwing) ──────────────────
@@ -2202,6 +2209,10 @@ namespace psio {
                                      T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(ssz{}, bytes); !st.ok())
+            return st;
          auto st =
             detail::ssz_impl::validate_value<T>(bytes, 0, bytes.size());
          if (!st.ok())

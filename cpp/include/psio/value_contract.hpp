@@ -34,14 +34,14 @@
 // of an invariant are passed through. Every status reports position 0: the
 // check is of the value, not of a place in the bytes.
 
+#include <psio/reflect.hpp>
+#include <psio/wrappers.hpp>   // (before the annotation tree, which names the wrapper types)
 #include <psio/detail/annotation_tree.hpp>
 #include <psio/detail/assoc.hpp>
 #include <psio/error.hpp>
 #include <psio/invariant.hpp>
 #include <psio/key.hpp>   // the order specs (sorted, unique, unique_keys) compare key bytes
-#include <psio/reflect.hpp>
 #include <psio/transparent.hpp>
-#include <psio/wrappers.hpp>
 
 #include <array>
 #include <cstddef>
@@ -82,6 +82,16 @@ namespace psio
       inline constexpr bool is_tuple_v<std::pair<A, B>> = true;
 
       template <typename T>
+      inline constexpr bool is_bounded_v = false;
+      template <typename T, std::size_t N>
+      inline constexpr bool is_bounded_v<::psio::bounded<T, N>> = true;
+
+      template <typename T>
+      inline constexpr bool is_utf8_string_v = false;
+      template <std::size_t N>
+      inline constexpr bool is_utf8_string_v<::psio::utf8_string<N>> = true;
+
+      template <typename T>
       concept record = ::psio::Reflected<T> && !std::is_enum_v<T> && !::psio::is_transparent_v<T>;
 
       // Whether a T, or anything nested in it, has something to check. A
@@ -98,6 +108,8 @@ namespace psio
             return true;
          else if constexpr (std::is_enum_v<U>)
             return false;
+         else if constexpr (is_bounded_v<U> || is_utf8_string_v<U>)
+            return true;  // the wrapper is its bound (and, for text, UTF-8)
          else if constexpr (::psio::is_transparent_v<U>)
             return ::psio::transparent_member_checked_v<U> ||
                    has_checks<::psio::transparent_inner_t<U>, Seen..., U>();
@@ -149,6 +161,21 @@ namespace psio
                   return st;
                if (auto st = ::psio::check_transparent_member(v, length_message, format); !st.ok())
                   return st;
+            }
+            else if constexpr (is_utf8_string_v<T>)
+            {
+               if (v.size() > T::max_size_value)
+                  return codec_fail(length_message, 0, format);
+               if (auto st = ::psio::utf8_spec::validate(std::span<const char>(v.data(), v.size()));
+                   !st.ok())
+                  return st;
+            }
+            else if constexpr (is_bounded_v<T>)
+            {
+               if (auto st = check(v.storage(), length_message, format); !st.ok())
+                  return st;
+               if (v.size() > T::max_size_value)
+                  return codec_fail(length_message, 0, format);
             }
             else if constexpr (::psio::detail::is_map_v<T>)
             {
@@ -236,6 +263,50 @@ namespace psio
                                                    std::string_view format) noexcept
    {
       return detail::contract::check(value, length_message, format);
+   }
+
+   // The same without a format: whether `value` is a value of its type, as
+   // every validating reader and every validated write (`to_F_checked`)
+   // understands it. A caller that writes one value to several formats
+   // validates it once with this and then uses the fast writes (`to_F`).
+   // (A format may refuse more than this for reasons of its own: pssz a
+   // total over a `maxDynamicData` cap, json a raw string that is not
+   // UTF-8.)
+   template <typename T>
+   [[nodiscard]] codec_status validate_value(const T& value) noexcept
+   {
+      return detail::contract::check(value, "psio: member length_bound violated", "psio");
+   }
+
+   // For a format's `validate`, after the structure of `bytes` has passed:
+   // the value they decode to against what T declares. A type that declares
+   // nothing is not decoded. `decode`: () -> T.
+   template <typename T, typename Decode>
+   [[nodiscard]] codec_status check_decoded_contract(Decode&&         decode,
+                                                     const char*      length_message,
+                                                     const char*      decode_failed,
+                                                     std::string_view format) noexcept
+   {
+      if constexpr (!has_value_contract_v<T>)
+         return codec_ok();
+      else
+      {
+#if defined(__cpp_exceptions)
+         try
+         {
+            const T value = decode();
+            return detail::contract::check(value, length_message, format);
+         }
+         catch (...)
+         {
+            return codec_fail(decode_failed, 0, format);
+         }
+#else
+         (void)decode_failed;
+         const T value = decode();
+         return detail::contract::check(value, length_message, format);
+#endif
+      }
    }
 
 }  // namespace psio

@@ -22,6 +22,7 @@
 #include <psio/adapter.hpp>
 #include <psio/time.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 #include <psio/validate_strict_walker.hpp>
 #include <psio/varint/leb128.hpp>
@@ -1506,7 +1507,11 @@ namespace psio {
          if (pos != bytes.size())
             return codec_fail("bin: trailing bytes",
                               static_cast<std::uint32_t>(pos), "bin");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { std::size_t p = 0; return detail::bin_impl::decode_value<T>(bytes, p); }, "bin: member length_bound violated",
+            "bin: decode failed during validate", "bin");
       }
 
       template <typename T>
@@ -1514,6 +1519,10 @@ namespace psio {
                                      bin, T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(bin{}, bytes); !st.ok())
+            return st;
          if (bytes.empty())
             return codec_fail("bin: empty buffer", 0, "bin");
 #if defined(__cpp_exceptions)

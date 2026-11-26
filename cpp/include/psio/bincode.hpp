@@ -19,6 +19,7 @@
 #include <psio/adapter.hpp>
 #include <psio/time.hpp>
 #include <psio/reflect.hpp>
+#include <psio/value_contract.hpp>
 #include <psio/stream.hpp>
 #include <psio/wrappers.hpp>
 
@@ -856,7 +857,11 @@ namespace psio {
          if (pos != bytes.size())
             return codec_fail("bincode: trailing bytes",
                               static_cast<std::uint32_t>(pos), "bincode");
-         return codec_ok();
+         // The structure is a T; now what T declares about its values
+         // (value_contract.hpp), on the decoded value.
+         return ::psio::check_decoded_contract<T>(
+            [&] { std::size_t p = 0; return detail::bincode_impl::decode_value<T>(bytes, p); }, "bincode: member length_bound violated",
+            "bincode: decode failed during validate", "bincode");
       }
 
       template <typename T>
@@ -864,6 +869,10 @@ namespace psio {
                                      bincode, T*,
                                      std::span<const char> bytes) noexcept
       {
+         // Everything `validate` refuses (the structure, and what T declares
+         // about its values: value_contract.hpp).
+         if (auto st = ::psio::validate<T>(bincode{}, bytes); !st.ok())
+            return st;
          if (bytes.empty())
             return codec_fail("bincode: empty buffer", 0, "bincode");
          return codec_ok();
