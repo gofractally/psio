@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Union
 from . import ir as _ir
 from ._core import (
     FUNC_FIELDS, FUNC_SIZE, MAX_TUPLE_ELEMENTS, MEMBER_BOUND, ROOT, Binding, Codec, Ctx, Handler, LengthBound, Node,
-    Order, Pos, _check_attributes, _parse_cap, _parse_length_bound, member_bound_admits, nested_member,
+    Order, Pos, _check_attributes, _parse_cap, _parse_length_bound, fast_write, member_bound_admits, nested_member,
     parse_max_fields, reserved_custom_id, strip,
 )
 from ._key import decode_key, encode_key, encode_key_prefix
@@ -175,8 +175,29 @@ class SchemaType:
 
     # ── PSSZ ────────────────────────────────────────────────────────────────
 
+    # The two write modes (docs/annotations.md 7.2): ``to_pssz`` / ``to_key`` / ``to_json`` /
+    # ``to_ijson`` are the FAST write — the value is not held against what its type declares
+    # (member bounds, order, handler checks) and only what the format cannot represent is an
+    # error; ``to_*_checked`` are the VALIDATED write, which refuses what the readers refuse.
+
     def to_pssz(self, value: Any) -> bytes:
-        """The canonical PSSZ bytes of ``value``."""
+        """The PSSZ bytes of ``value``: the fast write (``to_pssz_checked`` validates)."""
+        return fast_write(lambda: self.to_pssz_checked(value))
+
+    def to_key(self, value: Any) -> bytes:
+        """The ``key`` bytes of ``value``: the fast write (``to_key_checked`` validates)."""
+        return fast_write(lambda: self.to_key_checked(value))
+
+    def to_json(self, value: Any, format: str = "json") -> str:
+        """JSON text of ``value``: the fast write (``to_json_checked`` validates)."""
+        return fast_write(lambda: self.to_json_checked(value, format))
+
+    def to_ijson_checked(self, value: Any) -> str:
+        return self.to_json_checked(value, "ijson")
+
+    def to_pssz_checked(self, value: Any) -> bytes:
+        """The validated write: the canonical PSSZ bytes of ``value``, or an ``EncodeError`` for a
+        value ``validate_pssz`` would refuse the bytes of."""
         codec, node = self._codec, self._node
         if codec.W == 0 or node.cap is None:
             enc = self._enc
@@ -231,7 +252,7 @@ class SchemaType:
 
     # ── key ─────────────────────────────────────────────────────────────────
 
-    def to_key(self, value: Any) -> bytes:
+    def to_key_checked(self, value: Any) -> bytes:
         """The ``key`` bytes of ``value``: bytewise order is value order."""
         def run() -> bytes:
             self._codec.check_value(self._ref, value, "value")
@@ -251,15 +272,16 @@ class SchemaType:
         return Status(True)
 
     def key_prefix(self, elements: Any) -> bytes:
-        """The key of the leading ``elements`` of a tuple / record type: what every full key with them starts with."""
-        return _writing(lambda: encode_key_prefix(self._codec, self._ref, elements))
+        """The key of the leading ``elements`` of a tuple / record type: what every full key with them starts with.
+        A fast write, as ``to_key``."""
+        return fast_write(lambda: _writing(lambda: encode_key_prefix(self._codec, self._ref, elements)))
 
     def key_size(self, value: Any) -> int:
         return len(self.to_key(value))
 
     # ── JSON / I-JSON ───────────────────────────────────────────────────────
 
-    def to_json(self, value: Any, format: str = "json") -> str:
+    def to_json_checked(self, value: Any, format: str = "json") -> str:
         from ._json import value_to_json
         return _writing(lambda: value_to_json(self._codec, self._ref, format, value))
 
@@ -319,6 +341,11 @@ class ResultType(SchemaType):
     def _verify(self, value: Any, fail: Callable[[str], Any], message: str = MEMBER_BOUND) -> None:
         if self._bound is not None and not self._nested and not member_bound_admits(self._bound, self._node, value):
             fail(message)
+        # A nested root's bound counts the bytes of its encoding: the pssz paths have them
+        # (`_bytes_admit`); the key and JSON paths encode the value to count.
+        if self._nested and message is not MEMBER_BOUND and not self._codec.nested_value_admits(
+                self._bound, self._node, self._ref, value):
+            fail(message)
         if self._order is not None:
             self._codec._check_order(self._ref, value, self._order, fail)
 
@@ -327,11 +354,11 @@ class ResultType(SchemaType):
         if self._nested and not self._codec.nested_bound_admits(self._bound, self._node, data, 0, len(data)):
             fail(MEMBER_BOUND)
 
-    def to_pssz(self, value: Any) -> bytes:
+    def to_pssz_checked(self, value: Any) -> bytes:
         def fail(message: str) -> Any:
             raise EncodeError(message)
         _writing(lambda: self._verify(value, fail))
-        out: bytes = super().to_pssz(value)
+        out: bytes = super().to_pssz_checked(value)
         self._bytes_admit(out, fail)
         return out
 
@@ -343,11 +370,11 @@ class ResultType(SchemaType):
         self._bytes_admit(raw, fail)
         return value
 
-    def to_key(self, value: Any) -> bytes:
+    def to_key_checked(self, value: Any) -> bytes:
         def fail(message: str) -> Any:
             raise EncodeError(message)
         _writing(lambda: self._verify(value, fail, "key: member length bound violated"))
-        return super().to_key(value)
+        return super().to_key_checked(value)
 
     def from_key(self, data: Any) -> Any:
         def fail(message: str) -> Any:
@@ -357,11 +384,11 @@ class ResultType(SchemaType):
             self._verify(value, fail, "key: member length bound violated")
         return value
 
-    def to_json(self, value: Any, format: str = "json") -> str:
+    def to_json_checked(self, value: Any, format: str = "json") -> str:
         def fail(message: str) -> Any:
             raise EncodeError(message)
         _writing(lambda: self._verify(value, fail, "json: member length_bound violated"))
-        return super().to_json(value, format)
+        return super().to_json_checked(value, format)
 
     def from_json(self, text: Any, format: str = "json") -> Any:
         def fail(message: str) -> Any:
@@ -371,7 +398,7 @@ class ResultType(SchemaType):
         return value
 
     def json_to_pssz(self, text: Any, format: str = "ijson") -> bytes:
-        return self.to_pssz(self.from_json(text, format))
+        return self.to_pssz_checked(self.from_json(text, format))
 
 
 def _handler_map(handlers: Optional[Mapping[str, Any]]) -> Dict[str, Handler]:

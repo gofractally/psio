@@ -531,7 +531,7 @@ class Widths(unittest.TestCase):
             with self.assertRaises(psio.DecodeError):
                 run()
         with self.assertRaises(psio.EncodeError):
-            psio.to_pssz(CapTransfer(1, 2, 3, "\ud800"))
+            psio.to_pssz_checked(CapTransfer(1, 2, 3, "\ud800"))
 
     def test_trusted_skips_what_trust_makes_unnecessary(self) -> None:
         @psio.record(max_dynamic_data=16)

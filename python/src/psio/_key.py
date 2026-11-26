@@ -11,7 +11,7 @@ import struct
 from typing import NoReturn, Any, List, Optional, Sequence
 
 from ._core import (
-    MAX_DEPTH, QUIET_NAN_32, QUIET_NAN_64, Codec, Ctx, Node, member_bound_admits, packed_byte_count, strip,
+    MAX_DEPTH, QUIET_NAN_32, QUIET_NAN_64, WRITE_MODE, Codec, Ctx, Node, member_bound_admits, packed_byte_count, strip,
 )
 from .errors import DecodeError, EncodeError, PsioError, SchemaError
 from .values import Bits, NaN, Some, Variant
@@ -41,7 +41,7 @@ def octet_list(lst: Node) -> bool:
 def _container_admits(container: Node, n: int) -> bool:
     if container.kind == "array":
         return n == container.count
-    return not container.bounded or n <= container.count
+    return not container.bounded or n <= container.count or bool(WRITE_MODE.fast)
 
 
 def _escaped(b: bytes) -> bytes:
@@ -50,7 +50,7 @@ def _escaped(b: bytes) -> bytes:
 
 
 def _write_list(codec: Codec, node: Node, value: Sequence[Any], out: List[bytes], n: int) -> None:
-    if node.bounded and len(value) > node.count:
+    if node.bounded and len(value) > node.count and not WRITE_MODE.fast:
         _value("key: list exceeds its bound")
     element = node.text_child
     if octet_list(node):
@@ -210,7 +210,8 @@ def write_key(codec: Codec, node: Node, value: Any, out: List[bytes], n: int) ->
 
 
 def _write_member(codec: Codec, m: Any, value: Any, out: List[bytes], n: int) -> None:
-    if m.bound is not None and not member_bound_admits(m.bound, m.node, value):
+    if m.bound is not None and not (member_bound_admits(m.bound, m.node, value)
+                                    and codec.nested_value_admits(m.bound, m.node, m.text, value)):
         _value("key: member length bound violated")
     write_key(codec, m.text, value, out, n + 1)
 
@@ -472,7 +473,8 @@ def _read_key(codec: Codec, node: Node, src: _Source, n: int) -> Any:
         values = []
         for m in node.members:
             v = read_key(codec, m.text, src, n + 1)
-            if m.bound is not None and not member_bound_admits(m.bound, m.node, v):
+            if m.bound is not None and not (member_bound_admits(m.bound, m.node, v)
+                                            and codec.nested_value_admits(m.bound, m.node, m.text, v)):
                 _bytes("key: member length bound violated")
             values.append(v)
         codec.check_order(node, values, _bytes)

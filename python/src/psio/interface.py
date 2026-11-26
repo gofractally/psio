@@ -142,14 +142,24 @@ class Method:
     # has no result bytes: only ``b""`` is its result.
 
     def result_to_pssz(self, value: Any) -> bytes:
-        """The PSSZ bytes of a result (C++ ``method_result_to_pssz``); refuses a value outside the
-        return annotation.  ``b""`` for a method that returns nothing (``value`` is then ``None``)."""
+        """The PSSZ bytes of a result (C++ ``method_result_to_pssz``): the fast write, which does not
+        hold the value against the return annotation (``result_to_pssz_checked`` does).  ``b""`` for a method that returns nothing (``value`` is then ``None``)."""
         result = self.result
         if result is None:
             if value is not None:
                 raise EncodeError(f"psio: {self.name} returns nothing")
             return b""
         return result.to_pssz(value)
+
+    def result_to_pssz_checked(self, value: Any) -> bytes:
+        """The validated write of a result: refuses a value outside the return annotation
+        (``result_to_pssz`` is the fast write)."""
+        result = self.result
+        if result is None:
+            if value is not None:
+                raise EncodeError(f"psio: {self.name} returns nothing")
+            return b""
+        return result.to_pssz_checked(value)
 
     def result_from_pssz(self, data: Any) -> Any:
         """Validates and decodes an encoded result (C++ ``method_result_from_pssz``).
@@ -258,6 +268,10 @@ class Method:
         """The PSSZ bytes of the arguments of a call."""
         return self.args.to_pssz(self.arguments(*args, **kwargs))
 
+    def to_pssz_checked(self, *args: Any, **kwargs: Any) -> bytes:
+        """The validated write of the arguments of a call (``to_pssz`` is the fast write)."""
+        return self.args.to_pssz_checked(self.arguments(*args, **kwargs))
+
     def from_pssz(self, data: Any) -> tuple:
         """Validates and decodes encoded arguments."""
         return self.args.from_pssz(data)
@@ -308,7 +322,9 @@ class Interface:
             raise EncodeError(f"psio: interface {self.name} has no method {method!r}") from None
         args = m.args.from_pssz(data)
         out = getattr(implementation, m.attr)(*args)
-        return b"" if m.result is None else m.result_to_pssz(out)
+        # A result leaves the service: the validated write (an implementation that breaks the
+        # promise of its return annotation is refused here, not at the caller).
+        return b"" if m.result is None else m.result_to_pssz_checked(out)
 
     def function_types(self) -> "tuple[Schema, Dict[str, Dict[str, Any]]]":
         """Every method as a ``FunctionType``, and the schema of the types they use: what a schema that

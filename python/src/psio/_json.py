@@ -26,7 +26,7 @@ import re
 import struct
 from typing import NoReturn, Any, Callable, List, Optional, Tuple
 
-from ._core import MAX_DEPTH, NO_HANDLER, Codec, Ctx, Handler, Node, member_bound_admits, strip
+from ._core import MAX_DEPTH, NO_HANDLER, WRITE_MODE, Codec, Ctx, Handler, Node, member_bound_admits, strip
 from ._time import text_of, tick_type_admits, ticks_of
 from .errors import DecodeError, EncodeError, JsonError, PsioError, SchemaError
 from .values import JsonNumber, NaN, Some, Variant
@@ -681,7 +681,7 @@ def _parse_wide(text: str, signed: bool, bits: int) -> Optional[int]:
 def _bytes_admit(container: Node, n: int) -> bool:
     if container.kind == "array":
         return n == container.count
-    return not container.bounded or n <= container.count
+    return not container.bounded or n <= container.count or bool(WRITE_MODE.fast)
 
 
 class _KeyText:
@@ -969,7 +969,8 @@ class Reader:
         def item() -> None:
             m = members[len(values)]
             value = self.read(m.text, m.ijson_int if ijson else m.json_int, 0)
-            if m.bound is not None and not member_bound_admits(m.bound, m.node, value):
+            if m.bound is not None and not (member_bound_admits(m.bound, m.node, value)
+                                            and self.codec.nested_value_admits(m.bound, m.node, m.text, value)):
                 c.fail("json: member length_bound violated")
             values.append(value)
         self._array_items(len(members), True, item)
@@ -1008,9 +1009,8 @@ class Reader:
                 continue
             m = members[index]
             value = self.read(m.text, m.ijson_int if ijson else m.json_int, 0)
-            # (A nested member's bound counts encoded bytes: checked by the
-            # encoder, where they exist.)
-            if m.bound is not None and not member_bound_admits(m.bound, m.node, value):
+            if m.bound is not None and not (member_bound_admits(m.bound, m.node, value)
+                                            and self.codec.nested_value_admits(m.bound, m.node, m.text, value)):
                 c.fail("json: member length_bound violated")
             slots[index] = value
         for i, v in enumerate(slots):
@@ -1296,7 +1296,7 @@ class Writer:
         is_map = node.assoc == "map"
         codec = self.codec
         items = codec.assoc_sorted(node, value, _fail, "json")
-        if node.bounded and len(items) > node.count:
+        if node.bounded and len(items) > node.count and not WRITE_MODE.fast:
             _fail("json: array exceeds its bound")
         key = _key_text_of(codec, node.key_ref) if is_map else _PAIRS
         if key.missing:
@@ -1414,7 +1414,8 @@ class Writer:
             first = True
             ijson = self.ijson
             for m, field in zip(node.members, values):
-                if m.bound is not None and not member_bound_admits(m.bound, m.node, field):
+                if m.bound is not None and not (member_bound_admits(m.bound, m.node, field)
+                                                and self.codec.nested_value_admits(m.bound, m.node, m.text, field)):
                     _fail("json: member length_bound violated")
                 out.append(("" if first else ",") + (quote(m.name, False) + ":" if named else ""))
                 first = False
@@ -1426,7 +1427,8 @@ class Writer:
                 return self._assoc(node, value, form, n)
             if not isinstance(value, (list, tuple)):
                 return _fail("pssz IR: sequence value required")
-            if node.bounded and (len(value) != node.count if node.exact else len(value) > node.count):
+            if node.bounded and (len(value) != node.count if node.exact
+                                 else len(value) > node.count and not WRITE_MODE.fast):
                 _fail("json: array exceeds its bound")
             out.append("[")
             child = node.text_child

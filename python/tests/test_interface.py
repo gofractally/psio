@@ -68,11 +68,11 @@ class Interfaces(unittest.TestCase):
         self.assertEqual(token["transfer"].to_pssz("bob", 5, memo="hi"), token["transfer"].to_pssz("bob", 5, "hi"))
         self.assertEqual(token["transfer"].args.to_json(("bob", 5, "hi")), '{"to":"bob","amount":5,"memo":"hi"}')
         self.assertEqual(token["transfer"].args.from_json('{"to":"bob","amount":5,"memo":"hi"}'), ("bob", 5, "hi"))
-        for bad in (lambda: token["transfer"].to_pssz("x" * 17, 1, ""),
-                    lambda: token["batch"].to_pssz(["a"] * 5),
-                    lambda: token["batch"].to_pssz(["x" * 9]),
-                    lambda: token["transfer"].to_pssz("bob", 5, "hi", "extra"),
-                    lambda: token["transfer"].to_pssz("bob", 5, nope=1)):
+        for bad in (lambda: token["transfer"].to_pssz_checked("x" * 17, 1, ""),
+                    lambda: token["batch"].to_pssz_checked(["a"] * 5),
+                    lambda: token["batch"].to_pssz_checked(["x" * 9]),
+                    lambda: token["transfer"].to_pssz_checked("bob", 5, "hi", "extra"),
+                    lambda: token["transfer"].to_pssz_checked("bob", 5, nope=1)):
             with self.assertRaises(psio.EncodeError):
                 bad()
         # Arguments over the cap are refused by the reader too.

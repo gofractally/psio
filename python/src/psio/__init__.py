@@ -32,7 +32,8 @@ from .annotations import (  # noqa: F401
 )
 from .api import (  # noqa: F401
     from_ijson, from_json, from_key, from_pssz, from_pssz_trusted, json_to_pssz, key_prefix, key_size,
-    pssz_size, pssz_to_json, pssz_view, to_ijson, to_json, to_key, to_pssz, validate_ijson, validate_json,
+    pssz_size, pssz_to_json, pssz_view, to_ijson, to_ijson_checked, to_json, to_json_checked, to_key,
+    to_key_checked, to_pssz, to_pssz_checked, validate_ijson, validate_json,
     validate_key, validate_pssz,
 )
 from .evolution import Compatibility, equivalent, evolves_from  # noqa: F401
@@ -62,7 +63,8 @@ __all__ = [
     "ijson_string", "interface_of", "invariant", "json_number", "json_string", "json_to_pssz", "key_prefix",
     "key_prefix_upper_bound", "key_size", "keys", "length", "max", "method", "min", "monotonic", "name", "nested", "number",
     "pssz_size", "pssz_to_json", "pssz_view", "record", "schema_of", "time_point", "time_point_from_iso",
-    "time_point_to_iso", "to_ijson", "to_json", "to_key", "to_pssz", "to_text", "transparent", "trusted", "u128",
+    "time_point_to_iso", "to_ijson", "to_ijson_checked", "to_json", "to_json_checked", "to_key",
+    "to_key_checked", "to_pssz", "to_pssz_checked", "to_text", "transparent", "trusted", "u128",
     "u16", "u256", "u32", "u64", "u8", "utf8", "validate_ijson", "validate_json", "validate_key", "validate_pssz",
     "sorted", "unique", "unique_keys", "is_hash_name", "method_to_number", "name_to_number", "number_to_method",
     "number_to_name", "untagged", "SchemaBuilder", "JsonValue", "JsonNumber", "evolves_from", "equivalent", "Compatibility", "SchemaInterface",

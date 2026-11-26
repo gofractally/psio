@@ -41,8 +41,19 @@ def _of(value: Any, T: Any) -> SchemaType:
 
 
 def to_pssz(value: Any, T: Any = None) -> bytes:
-    """The canonical PSSZ bytes of ``value`` (of type ``T``; default ``type(value)``)."""
+    """The PSSZ bytes of ``value`` (of type ``T``; default ``type(value)``): the FAST write.
+
+    The value is not held against what its type declares (bounds, order, invariants); an
+    ``EncodeError`` is a value the format cannot represent (an offset that does not fit its width, a
+    ``max_dynamic_data`` cap, a wrong Python type).  ``to_pssz_checked`` is the validated write: use
+    it where the bytes leave the program (C++ ``to_pssz`` / ``to_pssz_checked``)."""
     return _of(value, T).to_pssz(value)
+
+
+def to_pssz_checked(value: Any, T: Any = None) -> bytes:
+    """The VALIDATED write: the canonical PSSZ bytes of ``value``, or an ``EncodeError`` for a value
+    ``validate_pssz`` would refuse the bytes of."""
+    return _of(value, T).to_pssz_checked(value)
 
 
 @overload
@@ -94,6 +105,11 @@ def to_key(value: Any, T: Any = None) -> bytes:
     return _of(value, T).to_key(value)
 
 
+def to_key_checked(value: Any, T: Any = None) -> bytes:
+    """The validated key write (``to_key`` is the fast write: every value has a key)."""
+    return _of(value, T).to_key_checked(value)
+
+
 @overload
 def from_key(T: Type[_T], data: Any) -> _T: ...
 @overload
@@ -125,6 +141,16 @@ def to_ijson(value: Any, T: Any = None) -> str:
     """I-JSON text: 64-bit integers beyond +-(2^53 - 1) are decimal strings, bytes are hex,
     a variant is ``{"Name": value}``."""
     return _of(value, T).to_json(value, "ijson")
+
+
+def to_json_checked(value: Any, T: Any = None) -> str:
+    """The validated JSON write (``to_json`` is the fast write)."""
+    return _of(value, T).to_json_checked(value, "json")
+
+
+def to_ijson_checked(value: Any, T: Any = None) -> str:
+    """The validated I-JSON write (``to_ijson`` is the fast write)."""
+    return _of(value, T).to_json_checked(value, "ijson")
 
 
 @overload

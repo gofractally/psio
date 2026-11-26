@@ -151,7 +151,7 @@ class OrderConstraints(unittest.TestCase):
         for what, change, message in cases:
             bad = dataclasses.replace(good(), **change)
             # Writers.
-            for write in (psio.to_pssz, psio.to_json, psio.to_ijson, psio.to_key, psio.pssz_size, psio.key_size):
+            for write in (psio.to_pssz_checked, psio.to_json_checked, psio.to_ijson_checked, psio.to_key_checked):
                 e = refused(self, lambda: write(bad), psio.EncodeError)
                 self.assertEqual(e.reason, message, f"{what}: {write.__name__}")
             # Readers, on what an unchecked writer produces.
@@ -192,7 +192,7 @@ class OrderConstraints(unittest.TestCase):
                          [-2, -1, 0, 7])
         for change in ({"maybe": [0, -1]}, {"maybe": [3, 3]}, {"by_id": {1: [1, 2], 2: [2, 2]}},
                        {"pairs": ([2, 1], 0)}, {"words": ["b", "a"]}):
-            refused(self, lambda: psio.to_pssz(dataclasses.replace(ok, **change)), psio.EncodeError)
+            refused(self, lambda: psio.to_pssz_checked(dataclasses.replace(ok, **change)), psio.EncodeError)
 
     def test_method_parameters_and_results(self) -> None:
         @psio.interface
@@ -202,16 +202,16 @@ class OrderConstraints(unittest.TestCase):
 
         put = psio.interface_of(Api)["put"]
         self.assertEqual(put.from_pssz(put.to_pssz([1, 2])), ([1, 2],))
-        self.assertEqual(refused(self, lambda: put.to_pssz([2, 2]), psio.EncodeError).reason, STRICT)
+        self.assertEqual(refused(self, lambda: put.to_pssz_checked([2, 2]), psio.EncodeError).reason, STRICT)
         self.assertEqual(refused(self, lambda: put.args.from_json('{"ids":[2,1]}'), psio.JsonError).reason, STRICT)
         self.assertEqual(refused(self, lambda: put.args.from_json('[[2,1]]'), psio.JsonError).reason, STRICT)
         frame = psio.to_pssz(([2, 1],), Tuple[Annotated[List[u32], psio.bounded(4)]])
         self.assertEqual(put.args.validate_pssz(frame).reason, STRICT)
         self.assertEqual(put.result_to_pssz([1, 2]), psio.to_pssz([1, 2], List[u32]))
-        self.assertEqual(refused(self, lambda: put.result_to_pssz([2, 1]), psio.EncodeError).reason, ORDER)
+        self.assertEqual(refused(self, lambda: put.result_to_pssz_checked([2, 1]), psio.EncodeError).reason, ORDER)
         self.assertEqual(put.validate_result(psio.to_pssz([2, 1], List[u32])).reason, ORDER)
         # dispatch encodes the result as its type: an implementation that breaks the promise is refused.
-        refused(self, lambda: psio.interface_of(Api).dispatch(Api(), "put", put.to_pssz([1, 2])), psio.EncodeError)
+        refused(self, lambda: psio.interface_of(Api).dispatch(Api(), "put", put.to_pssz_checked([1, 2])), psio.EncodeError)
 
     def test_where_it_may_be_written(self) -> None:
         for hint in (Annotated[str, psio.sorted], Annotated[Dict[u8, u8], psio.unique],
@@ -743,7 +743,7 @@ class TransparentBounds(unittest.TestCase):
                 if row["reason"] in BOUND_REASONS:
                     # The value the frame holds: no writer writes it, in any format.
                     outside = t.from_pssz(psio.trusted(data))
-                    for write in (t.to_pssz, t.to_key, t.to_json, t.to_ijson):
+                    for write in (t.to_pssz_checked, t.to_key_checked, t.to_json_checked, t.to_ijson_checked):
                         refused(self, lambda: write(outside), psio.EncodeError)
                     counts["writer refused"] += 1
                 continue
@@ -770,7 +770,7 @@ class TransparentBounds(unittest.TestCase):
             self.assertEqual(t.to_pssz(cls("hi")), b"hi")
             self.assertEqual(t.to_json(cls("hi")), '"hi"')
             self.assertEqual(t.to_key(cls("hi")), bounded.to_key("hi"))
-            for write in (t.to_pssz, t.to_key, t.to_json):
+            for write in (t.to_pssz_checked, t.to_key_checked, t.to_json_checked):
                 refused(self, lambda: write(cls("m" * 81)), psio.EncodeError)
             refused(self, lambda: t.from_json('"' + "m" * 81 + '"'), psio.JsonError)
             self.assertFalse(t.validate_pssz(b"m" * 81).ok)
@@ -793,8 +793,8 @@ class TransparentBounds(unittest.TestCase):
         t = psio.codec(Tags)
         self.assertEqual(t.inferred_bound, 4 * 1 + 4 * 8)
         self.assertEqual(t.to_pssz(Tags(["a", "bc"])).hex(), "020361" + "6263")
-        refused(self, lambda: t.to_pssz(Tags(["a"] * 5)), psio.EncodeError)
-        refused(self, lambda: t.to_pssz(Tags(["x" * 9])), psio.EncodeError)
+        refused(self, lambda: t.to_pssz_checked(Tags(["a"] * 5)), psio.EncodeError)
+        refused(self, lambda: t.to_pssz_checked(Tags(["x" * 9])), psio.EncodeError)
         self.assertEqual(t.from_pssz(t.to_pssz(Tags(["a", "bc"]))), Tags(["a", "bc"]))
 
     def test_what_a_type_cannot_say(self) -> None:
@@ -856,12 +856,11 @@ class KeyWriter(unittest.TestCase):
         for change in ({"name": "abcde"}, {"name": "héé"}, {"tags": [b"a", b"b", b"c"]}, {"tags": [b"abcd"]},
                        {"tags": [b"a", b"abcd"]}, {"name": "\ud800"}):
             bad = dataclasses.replace(ok, **change)
-            e = refused(self, lambda: psio.to_key(bad), psio.EncodeError)
+            e = refused(self, lambda: psio.to_key_checked(bad), psio.EncodeError)
             self.assertEqual(e.kind, "value")
-            refused(self, lambda: psio.to_pssz(bad), psio.EncodeError)
-            refused(self, lambda: psio.key_size(bad), psio.EncodeError)
-        # A prefix element is checked as the value it is.
-        refused(self, lambda: psio.key_prefix(KBound, [7, "abcde"]), psio.EncodeError)
+            refused(self, lambda: psio.to_pssz_checked(bad), psio.EncodeError)
+        # A prefix is a fast write of its elements (C++ ``key_prefix``): no bound is held.
+        self.assertEqual(psio.key_prefix(KBound, [7, "abcde"]).hex(), "0000000761626364650000")
         self.assertEqual(psio.key_prefix(KBound, [7, "abcd"]).hex(), "00000007616263640000")
         # Wrapper types, an optional, a nested record: the same checks at every depth.
 
@@ -876,7 +875,7 @@ class KeyWriter(unittest.TestCase):
         self.assertEqual(psio.from_key(Wrapped, psio.to_key(fine)), fine)
         for change in ({"name": "abcde"}, {"codes": [1, 2, 3]}, {"alias": "abcde"},
                        {"rows": [(1, dataclasses.replace(ok, name="abcde"))]}):
-            refused(self, lambda: psio.to_key(dataclasses.replace(fine, **change)), psio.EncodeError)
+            refused(self, lambda: psio.to_key_checked(dataclasses.replace(fine, **change)), psio.EncodeError)
 
 
 # ── Reserved ids, enums, text and caps, missing members, raw strings ─────────
@@ -1034,7 +1033,7 @@ class Verified(unittest.TestCase):
         self.assertEqual(psio.from_pssz(Raw, frame, reject_unknown=True).blob, b"\xff\xfe")
         self.assertEqual(psio.from_key(Raw, psio.to_key(Raw(b"\xff\xfe", "ok"))).blob, b"\xff\xfe")
         # (it has no text: a JSON string is UTF-8)
-        refused(self, lambda: psio.to_json(Raw(b"\xff", "ok")), psio.EncodeError)
+        refused(self, lambda: psio.to_json_checked(Raw(b"\xff", "ok")), psio.EncodeError)
         # The schema-driven strict reader: every such row of the fixture.
         fx = fixture("pssz-vectors.json")
         schema = psio.Schema.from_pssz(bytes.fromhex(fx["schema_ir"]))

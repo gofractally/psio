@@ -77,7 +77,7 @@ class TimeKeyFixture(unittest.TestCase):
                 for fmt in FORMATS:
                     want = row.get(fmt)
                     if want is None:
-                        self.rejects(lambda: t.to_json(value, fmt), f"{name}: {fmt} text of a value without text")
+                        self.rejects(lambda: t.to_json_checked(value, fmt), f"{name}: {fmt} text of a value without text")
                         self.rejects(lambda: t.pssz_to_json(data, fmt), f"{name}: {fmt} pssz_to_json")
                         continue
                     self.assertEqual(t.to_json(value, fmt), want, f"{name}: {fmt}")
@@ -141,7 +141,7 @@ class TimeKeyFixture(unittest.TestCase):
                 self.assertEqual(plain.to_pssz(value).hex(), row["pssz"], f"{name}: wire type value")
                 self.assertEqual(plain.to_key(plain.from_pssz(data)).hex(), row["key"], f"{name}: wire type key")
                 unchecked = t.from_pssz(psio.trusted(data))
-                written = self.rejects(lambda: t.to_key(unchecked), f"{name}: to_key")
+                written = self.rejects(lambda: t.to_key_checked(unchecked), f"{name}: to_key")
                 self.assertEqual((written.reason, written.kind), (row["reason"], "value"), name)
                 # A prefix element is checked as the value it is.
                 if composite[row["type"]]:

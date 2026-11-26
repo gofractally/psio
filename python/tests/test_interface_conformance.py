@@ -275,9 +275,9 @@ class InterfaceFixture(unittest.TestCase):
             with self.assertRaises(psio.JsonError):
                 add.args.from_json(text)
         with self.assertRaises(psio.EncodeError):
-            add.to_pssz(a=1, b=2)
+            add.to_pssz_checked(a=1, b=2)
         with self.assertRaises(psio.EncodeError):
-            add.args.to_pssz({"0": 1, "1": 2})
+            add.args.to_pssz_checked({"0": 1, "1": 2})
         # Schema-driven, a positional list is a tuple in the dynamic model; a named one a dict.
         recorded = psio.Schema.from_pssz(token.schema().to_pssz())
         dynamic = recorded.method("token", "add").args
@@ -292,12 +292,12 @@ class InterfaceFixture(unittest.TestCase):
         self.assertEqual(psio.to_pssz(["alice", "bob"], List[str]).hex(), "080000000d000000616c696365626f62")
         for bad in (["a"] * 5, ["x" * 17]):
             with self.assertRaises(psio.EncodeError):
-                names.result_to_pssz(bad)
+                names.result_to_pssz_checked(bad)
         # A method that returns nothing has no result bytes.
         ping = token["ping"]
         self.assertEqual(ping.result_to_pssz(None), b"")
         with self.assertRaises(psio.EncodeError):
-            ping.result_to_pssz(1)
+            ping.result_to_pssz_checked(1)
         with self.assertRaises(psio.SchemaError):
             ping.result_view(b"")
         # An empty optional result is zero bytes when its payload cannot be empty (a record) ...
@@ -312,7 +312,7 @@ class InterfaceFixture(unittest.TestCase):
         self.assertEqual(label.result_to_pssz(""), b"\x01")
         self.assertFalse(label.validate_result(b"").ok)
         with self.assertRaises(psio.EncodeError):
-            label.result_to_pssz("123456789")
+            label.result_to_pssz_checked("123456789")
         # The view reads the result's own (1-byte) offset table.
         view = names.result_view(bytes.fromhex("0207616c696365626f62"))
         self.assertEqual((len(view), view[1]), (2, "bob"))

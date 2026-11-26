@@ -143,7 +143,7 @@ class Typed(unittest.TestCase):
         self.assertIs(psio.from_json(Level, "1"), Level.HIGH)
         # Without `other` an undeclared value is not a value of the Python type.
         self.assertIn("not a declared enumerator", self.rejects(lambda: psio.from_pssz(Level, b"\x09")).reason)
-        self.rejects(lambda: psio.to_pssz(3, Level), psio.EncodeError)
+        self.rejects(lambda: psio.to_pssz_checked(3, Level), psio.EncodeError)
         # With it the value is carried as an int, and a declared value has one representation.
         self.assertIs(psio.from_pssz(Code, (-2).to_bytes(4, "little", signed=True)), Code.NEG)
         self.assertEqual(psio.from_pssz(Code, (9).to_bytes(4, "little")), 9)
@@ -167,7 +167,7 @@ class Typed(unittest.TestCase):
         self.assertEqual(psio.from_json(T, '"2026-11-22T11:15:30.123+01:00"'), when)
         # A naive datetime is UTC; a value the unit cannot hold exactly is refused, never rounded.
         self.assertEqual(psio.to_pssz(when.replace(tzinfo=None), T), data)
-        self.rejects(lambda: psio.to_pssz(when.replace(microsecond=123456), T), psio.EncodeError)
+        self.rejects(lambda: psio.to_pssz_checked(when.replace(microsecond=123456), T), psio.EncodeError)
         self.assertEqual(psio.to_pssz(timedelta(milliseconds=1500), psio.DurationMs), (1500).to_bytes(8, "little"))
         self.assertEqual(psio.to_json(timedelta(seconds=2), psio.DurationSec), "2")
         # Nanoseconds are int ticks (datetime holds microseconds).
@@ -198,14 +198,14 @@ class Typed(unittest.TestCase):
         both = Union[u32, u64]
         self.assertEqual(psio.to_pssz(psio.Variant("uint64", 1), both).hex(), "010100000000000000")
         self.assertEqual(psio.from_pssz(both, bytes.fromhex("0001000000")), psio.Variant("uint32", 1))
-        self.rejects(lambda: psio.to_pssz(1, both), psio.EncodeError)
+        self.rejects(lambda: psio.to_pssz_checked(1, both), psio.EncodeError)
         self.rejects(lambda: psio.codec(typing.Any), psio.SchemaError)
-        self.rejects(lambda: psio.to_pssz(object()), psio.SchemaError)
+        self.rejects(lambda: psio.to_pssz_checked(object()), psio.SchemaError)
 
     def test_wrong_values_are_encode_errors(self) -> None:
         for value in (Tree("x"), Tree(-1), Tree(1, [5]), Tree(1 << 32), "tree", None):  # type: ignore[arg-type, list-item]
-            self.rejects(lambda: psio.to_pssz(value, Tree), psio.EncodeError)
-        self.rejects(lambda: psio.to_pssz("\ud800", str), psio.EncodeError)
+            self.rejects(lambda: psio.to_pssz_checked(value, Tree), psio.EncodeError)
+        self.rejects(lambda: psio.to_pssz_checked("\ud800", str), psio.EncodeError)
 
     def test_bounds_at_every_depth(self) -> None:
         @dataclass
@@ -228,7 +228,7 @@ class Typed(unittest.TestCase):
                     dataclasses.replace(ok, names={"a", "b", "c"}),
                     dataclasses.replace(ok, names={"abcd"})):
             # Every writer refuses the value ...
-            for write in (psio.to_pssz, psio.to_json, psio.to_ijson, psio.to_key):
+            for write in (psio.to_pssz_checked, psio.to_json_checked, psio.to_ijson_checked, psio.to_key_checked):
                 self.assertEqual(self.rejects(lambda: write(bad)).kind, "value", f"{write.__name__}: {bad}")
             # ... and every reader a frame / text / key that holds it.
             frame = loose.to_pssz(bad)
@@ -249,12 +249,12 @@ class Typed(unittest.TestCase):
         self.assertEqual(psio.to_json(Row(1, ["a"], 2)), '{"class":1,"tags":["a"],"odd name":2}')
         self.assertEqual(psio.from_json(Row, '{"class":1,"tags":["a"],"odd name":2}'), Row(1, ["a"], 2))
         self.assertIsNotNone(psio.codec(Row).inferred_bound)
-        self.rejects(lambda: psio.to_pssz(Row(1, ["a", "b", "c"])), psio.EncodeError)
+        self.rejects(lambda: psio.to_pssz_checked(Row(1, ["a", "b", "c"])), psio.EncodeError)
 
     def test_custom_by_annotation(self) -> None:
         Even = Annotated[u32, psio.custom("Even", check=lambda v: None if v % 2 == 0 else "Even: odd")]
         self.assertEqual(psio.to_pssz(4, Even), psio.to_pssz(4, u32))
-        self.assertEqual(self.rejects(lambda: psio.to_pssz(3, Even)).reason, "Even: odd")
+        self.assertEqual(self.rejects(lambda: psio.to_pssz_checked(3, Even)).reason, "Even: odd")
         st = psio.validate_pssz(Even, psio.to_pssz(3, u32))
         self.assertTrue(not st.ok and st.error.invariant and st.reason == "Even: odd")
         self.assertEqual(psio.from_pssz(Even, psio.trusted(psio.to_pssz(3, u32))), 3)

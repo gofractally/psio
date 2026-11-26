@@ -147,9 +147,9 @@ def refused(run):
 
 assert psio.from_pssz(Account2, data) == alice                       # validate, then decode
 long_owner = dataclasses.replace(alice, owner="x" * 33)              # one byte past max(32)
-assert refused(lambda: psio.to_pssz(long_owner)).kind == "value"
+assert refused(lambda: psio.to_pssz_checked(long_owner)).kind == "value"
 nine_tags = dataclasses.replace(alice, tags=["t"] * 9)               # one element past max(8)
-assert isinstance(refused(lambda: psio.to_pssz(nine_tags)), psio.EncodeError)
+assert isinstance(refused(lambda: psio.to_pssz_checked(nine_tags)), psio.EncodeError)
 ```
 
 The positions below a member:
@@ -219,7 +219,7 @@ class Capped:
     text: str
 
 assert len(psio.to_pssz(Capped("x" * 14))) == 16                    # 1 + 1 + 14
-refused(lambda: psio.to_pssz(Capped("x" * 15)))
+refused(lambda: psio.to_pssz_checked(Capped("x" * 15)))
 assert not psio.validate_pssz(Capped, psio.to_pssz(Capped("x" * 14)) + b"x")
 ```
 
@@ -288,7 +288,7 @@ status = psio.validate_pssz(AccountV1, psio.to_pssz(v2_some))
 assert status.ok and status.has_unknown
 # The exact-schema check refuses unknown fields.
 assert not psio.validate_pssz(AccountV1, psio.to_pssz(v2_some), strict=True)
-refused(lambda: psio.from_pssz(AccountV1, psio.to_pssz(v2_some), reject_unknown=True))
+refused(lambda: psio.from_pssz(AccountV1, psio.to_pssz_checked(v2_some), reject_unknown=True))
 ```
 
 Never insert, remove, reorder or retype a member, and treat bounds as frozen.
@@ -316,7 +316,7 @@ assert psio.from_pssz(Note, psio.to_pssz(binary)) == binary
 bad = psio.to_pssz(Note(b"", "x", bytes(4)))[:-1] + b"\xff"
 assert psio.validate_pssz(Note, bad).reason == "utf8_spec: invalid leading byte"
 # JSON text is UTF-8: a raw string that is not UTF-8 has no JSON.
-assert refused(lambda: psio.to_json(binary)).reason == "json: string is not valid UTF-8"
+assert refused(lambda: psio.to_json_checked(binary)).reason == "json: string is not valid UTF-8"
 ok = Note(b"bytes", "café", bytes.fromhex("deadbeef"))
 assert psio.to_json(ok) == '{"blob":"bytes","text":"café","digest":[222,173,190,239]}'
 assert psio.to_ijson(ok) == '{"blob":"bytes","text":"café","digest":"DEADBEEF"}'
@@ -470,7 +470,7 @@ assert psio.from_key(ByOwner, psio.to_key(("bob", 7), ByOwner)) == ("bob", 7)
 # A record is the key of its fields in order, with the same bytes as the tuple.
 assert psio.to_key(OwnerKey("bob", 7)) == psio.to_key(("bob", 7), ByOwner)
 # The key writer checks member bounds and UTF-8 too, as the pssz writer does (in every language).
-refused(lambda: psio.to_key(OwnerKey("x" * 33, 7)))
+refused(lambda: psio.to_key_checked(OwnerKey("x" * 33, 7)))
 too_long = psio.to_key(("x" * 33, 7), ByOwner)
 assert not psio.validate_key(OwnerKey, too_long)
 ```
@@ -512,7 +512,7 @@ class Memo:                                       # is BoundedString(80)
 memo = psio.codec(Memo)
 assert memo.inferred_bound == 80 and memo.to_pssz(Memo("hi")) == b"hi"
 assert psio.to_json(Memo("hi")) == '"hi"'
-for write in (psio.to_pssz, psio.to_key, psio.to_json):
+for write in (psio.to_pssz_checked, psio.to_key_checked, psio.to_json_checked):
     refused(lambda: write(Memo("m" * 81)))        # every writer
 assert not psio.validate_pssz(Memo, b"m" * 81)    # every reader
 assert not psio.validate_pssz(Memo, b"\xff")      # ... and it is UTF-8
@@ -552,8 +552,8 @@ assert psio.to_json(Money(42)) == "42"
 assert psio.from_pssz(Money, psio.to_pssz(42, u64)) == Money(42)
 
 # A value that violates its invariant has no encoding ...
-assert refused(lambda: psio.to_pssz(Symbol("usd"))).invariant
-refused(lambda: psio.to_json(Symbol("usd")))
+assert refused(lambda: psio.to_pssz_checked(Symbol("usd"))).invariant
+refused(lambda: psio.to_json_checked(Symbol("usd")))
 # ... and bytes or text that hold one are refused, with the type's message.
 frame = psio.to_pssz(Symbol("USD"))[:-1] + b"d"                     # "USd"
 status = psio.validate_pssz(Symbol, frame)
@@ -629,7 +629,7 @@ args = bank["transfer"].to_pssz(AccountId(1), AccountId(2), 500, memo="rent")
 assert len(args) == 2 + 8 + 8 + 8 + 2 + 4                           # 16-bit header and slot
 assert bank["transfer"].from_pssz(args) == (1, 2, 500, "rent")      # validated: use for untrusted calls
 # A memo of 81 bytes has no encoding.
-refused(lambda: bank["transfer"].to_pssz(1, 2, 500, "m" * 81))
+refused(lambda: bank["transfer"].to_pssz_checked(1, 2, 500, "m" * 81))
 ```
 
 In **text** an argument list has two forms (`docs/json.md`, "Method
@@ -687,7 +687,7 @@ no result bytes: `validate_result` accepts only `b""`.
 
 ```python
 assert bank["symbol"].result_to_pssz("USD") == b"USD"
-refused(lambda: bank["symbol"].result_to_pssz("X" * 9))
+refused(lambda: bank["symbol"].result_to_pssz_checked("X" * 9))
 # A bounded list of bounded strings has a 1-byte offset table, not the 4-byte one of list[str].
 names = calc["names"]
 assert names.result_to_pssz(["alice", "bob"]).hex(" ") == "02 07 61 6c 69 63 65 62 6f 62"
@@ -801,7 +801,7 @@ class Ranked:
 ok = Ranked([1, 1, 2], ["a", "ab"], [("x", 1), ("a", 1)], [[1, 2], []])
 assert psio.from_pssz(Ranked, psio.to_pssz(ok)) == ok
 bad = dataclasses.replace(ok, scores=[2, 1])
-for write in (psio.to_pssz, psio.to_json, psio.to_key):                    # every writer refuses
+for write in (psio.to_pssz_checked, psio.to_json_checked, psio.to_key_checked):                    # every writer refuses
     assert refused(lambda: write(bad)).reason == "sorted: elements are not in order"
 # ... and every checking reader: the frame of the same members without the constraint.
 frame = psio.to_pssz(([2, 1], [], [], []), tuple[Annotated[list[u32], psio.bounded(8)], list[str],
@@ -1051,7 +1051,8 @@ For a format `F` in `pssz`, `key`, `json`, `ijson` (the names of
 
 | | |
 |---|---|
-| `psio.to_F(value[, T])` | encode; `T` defaults to `type(value)` |
+| `psio.to_F(value[, T])` | encode: the **fast write**. `T` defaults to `type(value)`. The value is not held against what its type declares (bounds, order, invariants); an `EncodeError` is a value the format cannot represent (an offset that does not fit its width, a `max_dynamic_data` cap, a wrong Python type) |
+| `psio.to_F_checked(value[, T])` | the **validated write** (`to_pssz_checked`, `to_key_checked`, `to_json_checked`, `to_ijson_checked`; on a codec and a method likewise, and `result_to_pssz_checked`): refuses what `validate_F` would refuse. Use it where the bytes leave the program; `dispatch` writes results with it |
 | `psio.from_F(T, data)` | validate, then decode |
 | `psio.from_F(T, psio.trusted(data))` | decode without what trust makes unnecessary (`from_pssz_trusted`) |
 | `psio.validate_F(T, data)` | a `Status` (`ok`, `reason`, `has_unknown`); never raises |

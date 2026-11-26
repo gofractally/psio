@@ -109,7 +109,7 @@ class JsonFixture(unittest.TestCase):
                         # (The bytes are refused first; then the value's text.)
                         self.assertEqual(self.rejects(lambda: required.pssz_to_json(data, fmt), name).reason,
                                          NO_HANDLER, name)
-                        write = self.rejects(lambda: required.to_json(plain.from_pssz(data), fmt), name)
+                        write = self.rejects(lambda: required.to_json_checked(plain.from_pssz(data), fmt), name)
                         self.assertEqual((write.kind, write.reason), ("value", NO_HANDLER), name)
                         read = self.rejects(lambda: required.json_to_pssz(row[fmt], fmt), name)
                         self.assertEqual((read.kind, read.reason), ("json", NO_HANDLER), name)
@@ -122,7 +122,7 @@ class JsonFixture(unittest.TestCase):
                     else:
                         self.assertEqual((refused.error.kind, refused.reason), ("bytes", NO_HANDLER), name)
                         self.assertEqual(self.rejects(lambda: required.from_pssz(data), name).kind, "bytes", name)
-                        unwritten = self.rejects(lambda: required.to_pssz(plain.from_pssz(data)), name)
+                        unwritten = self.rejects(lambda: required.to_pssz_checked(plain.from_pssz(data)), name)
                         self.assertEqual((unwritten.kind, unwritten.reason), ("value", NO_HANDLER), name)
                         count["strictBinaryRefused"] += 1
                     count["strictRefused"] += 1
@@ -162,10 +162,10 @@ class JsonFixture(unittest.TestCase):
                 # Writers refuse the value too: binary and text.  (The value
                 # exists only unchecked: the trusted decode gives it.)
                 value = t.from_pssz(psio.trusted(data))
-                written = self.rejects(lambda: t.to_pssz(value), f"{name}: to_pssz")
+                written = self.rejects(lambda: t.to_pssz_checked(value), f"{name}: to_pssz")
                 self.assertEqual((written.reason, written.kind), (row["reason"], "value"), name)
                 for f in ("json", "ijson"):
-                    text = self.rejects(lambda: t.to_json(value, f), f"{name}: value to {f}")
+                    text = self.rejects(lambda: t.to_json_checked(value, f), f"{name}: value to {f}")
                     self.assertEqual((text.reason, text.kind), (row["reason"], "value"), name)
                 required = strict.type(row["type"]).validate_pssz(data)
                 self.assertTrue(not required.ok and required.reason == NO_HANDLER, name)

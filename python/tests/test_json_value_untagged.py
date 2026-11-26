@@ -141,19 +141,19 @@ class JsonValues(unittest.TestCase):
         self.assertEqual(psio.to_ijson(18446744073709551615, JsonValue), "18446744073709551615")
         self.assertEqual(psio.to_json((1, 2.5, JsonNumber("1.50")), JsonValue), "[1,2.5,1.50]")
         # A value with no JSON text is an error, not output.
-        e = refused(self, lambda: psio.to_ijson(JsonNumber("0x10"), JsonValue), psio.EncodeError)
+        e = refused(self, lambda: psio.to_ijson_checked(JsonNumber("0x10"), JsonValue), psio.EncodeError)
         self.assertEqual(e.reason, "json: a json_value number is not a JSON number")
         for bad in (float("inf"), float("nan"), "\udcff", {1: 2}, b"bytes", {"a": object()}):
-            refused(self, lambda: psio.to_json(bad, JsonValue), psio.EncodeError)
-            refused(self, lambda: psio.to_pssz(bad, JsonValue), psio.EncodeError)
+            refused(self, lambda: psio.to_json_checked(bad, JsonValue), psio.EncodeError)
+            refused(self, lambda: psio.to_pssz_checked(bad, JsonValue), psio.EncodeError)
         deep: Any = []
         for _ in range(64):
             deep = [deep]
-        refused(self, lambda: psio.to_json(deep, JsonValue), psio.EncodeError)
+        refused(self, lambda: psio.to_json_checked(deep, JsonValue), psio.EncodeError)
         # The I-JSON string rule is the only difference between the formats.
         nonchar = "￿"
         self.assertEqual(psio.to_json(nonchar, JsonValue), '"￿"')
-        refused(self, lambda: psio.to_ijson(nonchar, JsonValue), psio.EncodeError)
+        refused(self, lambda: psio.to_ijson_checked(nonchar, JsonValue), psio.EncodeError)
         refused(self, lambda: psio.from_ijson(JsonValue, '"￿"'), psio.JsonError)
         self.assertEqual(psio.from_json(JsonValue, '"￿"'), nonchar)
 
@@ -357,7 +357,7 @@ class SpecFixes(unittest.TestCase):
             refused(self, lambda: psio.from_pssz(List[bool], bytes([1, byte])), psio.DecodeError)
         # A value that is not a bool is not written as one.
         for value in (1, 0, 2, "true", None):
-            refused(self, lambda: psio.to_pssz(value, bool), psio.EncodeError)
+            refused(self, lambda: psio.to_pssz_checked(value, bool), psio.EncodeError)
 
     def test_only_optional_fields_may_be_appended(self) -> None:
         """docs/pssz-spec.md 7.1: a field an old writer did not write is an absent optional."""

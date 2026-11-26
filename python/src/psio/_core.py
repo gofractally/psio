@@ -517,8 +517,50 @@ def unwrap_option(node: Node, value: Any, fail: Callable[[str], Any]) -> Tuple[b
     return True, value.value
 
 
+class _WriteMode:
+    """The two write modes (docs/annotations.md 7.2; gofractally/psio#14).
+
+    While ``fast`` is non-zero the writers hold nothing against what a type declares: no member
+    bound, no bound of a bounded container, no order constraint, no handler ``check``.  What a format
+    needs stays checked (an offset that does not fit its width, a ``max_dynamic_data`` cap, the
+    length of a fixed array, UTF-8, the Python type of a value).  ``psio.to_pssz`` / ``to_key`` /
+    ``to_json`` are fast writes; ``to_pssz_checked`` / ``to_key_checked`` / ``to_json_checked`` are the
+    validated ones.  (A counter per thread: a write does not yield.)
+    """
+
+    __slots__ = ("_local",)
+
+    def __init__(self) -> None:
+        import threading
+        self._local = threading.local()
+
+    @property
+    def fast(self) -> int:
+        return getattr(self._local, "fast", 0)
+
+    def enter(self) -> None:
+        self._local.fast = getattr(self._local, "fast", 0) + 1
+
+    def leave(self) -> None:
+        self._local.fast -= 1
+
+
+WRITE_MODE = _WriteMode()
+
+
+def fast_write(run: Callable[[], Any]) -> Any:
+    """``run()`` as a fast write."""
+    WRITE_MODE.enter()
+    try:
+        return run()
+    finally:
+        WRITE_MODE.leave()
+
+
 def member_bound_admits(bound: LengthBound, node: Node, value: Any) -> bool:
     """The length a member ``lengthBound`` constrains, looking through Option."""
+    if WRITE_MODE.fast:
+        return True
     while node.kind == "option":
         if value is None:
             return True
@@ -1352,7 +1394,7 @@ class Codec:
 
     def check_custom(self, node: Node, value: Any, kind: str) -> None:
         """Runs the handler of a custom node on a value of it; raises an error of ``kind``."""
-        if node.boxed or self.state.quiet > 0:
+        if node.boxed or self.state.quiet > 0 or WRITE_MODE.fast:
             return
         handler = node.handler
         if handler is None:
@@ -1396,7 +1438,7 @@ class Codec:
     def check_order(self, node: Node, values: Sequence[Any], fail: Callable[[str], Any]) -> None:
         """``psio.sorted`` / ``unique`` / ``unique_keys`` of a record's members against its member values."""
         bind = node.bind
-        if bind is None or bind.order is None:
+        if bind is None or bind.order is None or WRITE_MODE.fast:
             return
         for index, order in bind.order:
             self._check_order(node.members[index].text, values[index], order, fail)
@@ -1426,6 +1468,8 @@ class Codec:
         return node, value, True
 
     def _check_order(self, ref: Node, value: Any, order: Order, fail: Callable[[str], Any]) -> None:
+        if WRITE_MODE.fast:
+            return
         from ._key import encode_key
         node, value, present = self._plain(ref, value)
         if not present:
@@ -1544,8 +1588,25 @@ class Codec:
                    else "pssz: set container merged distinct elements")
         return out
 
+    def nested_value_admits(self, bound: Optional[LengthBound], node: Node, text: Node, value: Any) -> bool:
+        """The same for a member's VALUE, where no encoding is at hand (the key and JSON codecs): the
+        member is encoded to count its bytes.  Only a nested member has such a bound; a value that has
+        no encoding for another reason is not this check's to report."""
+        if bound is None or WRITE_MODE.fast or not nested_member(node):
+            return True
+        self.state.quiet += 1
+        try:
+            data = self.encoder(text)(value, 1)
+        except PsioError:
+            return True
+        finally:
+            self.state.quiet -= 1
+        return self.nested_bound_admits(bound, node, data, 0, len(data))
+
     def nested_bound_admits(self, bound: LengthBound, node: Node, data: bytes, start: int, end: int) -> bool:
         """A nested member's ``lengthBound`` (through Option) against its encoded form."""
+        if WRITE_MODE.fast:
+            return True
         while node.kind == "option":
             node = node.child
             selector = self.can_be_empty(node)
@@ -1680,7 +1741,7 @@ class Codec:
             message = STRING_BOUND if text else LIST_BOUND
 
             def bounded(n: int, fail: Callable[[str], Any]) -> None:
-                if n > limit:
+                if n > limit and not WRITE_MODE.fast:
                     fail(message)
             return bounded
         return lambda n, fail: None
@@ -1948,7 +2009,9 @@ class Codec:
 
         def write(items: Sequence[Any], n: int) -> bytes:
             count = len(items)
-            if bounded and (count != limit if exact else count > limit):
+            # (A fixed array's length is its layout; a bound is a declaration, which the fast
+            # write does not hold a value against.)
+            if bounded and (count != limit if exact else count > limit and not WRITE_MODE.fast):
                 _value("pssz: array length does not match the schema" if exact else LIST_BOUND)
             n1 = n + 1
             if fixed:

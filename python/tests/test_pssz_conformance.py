@@ -221,7 +221,7 @@ class PsszFixture(unittest.TestCase):
                 if isinstance(view, psio.View):
                     self.assertEqual(self.rejects(view.to_value, name).reason, row["reason"], f"{name}: view")
                 # No writer writes the value back: binary, key and text.
-                written = self.rejects(lambda: checked.to_pssz(trusted_value), f"{name}: to_pssz")
+                written = self.rejects(lambda: checked.to_pssz_checked(trusted_value), f"{name}: to_pssz")
                 self.assertEqual(written.reason, row["reason"], name)
                 self.assertEqual(written.kind, "value", name)
                 self.assertTrue(written.invariant, name)
@@ -229,7 +229,7 @@ class PsszFixture(unittest.TestCase):
                     for fmt in ("json", "ijson"):
                         self.assertEqual(self.rejects(lambda: checked.pssz_to_json(data, fmt), name).reason,
                                          row["reason"], f"{name}: {fmt}")
-                        self.assertEqual(self.rejects(lambda: checked.to_json(trusted_value, fmt), name).reason,
+                        self.assertEqual(self.rejects(lambda: checked.to_json_checked(trusted_value, fmt), name).reason,
                                          row["reason"], f"{name}: {fmt} value")
                         # The wire type's text reads back to the frame.
                         text = plain.pssz_to_json(data, fmt)
@@ -376,16 +376,16 @@ class PsszFixture(unittest.TestCase):
                                 # of a UTF-8 position that is not UTF-8 to write.
                                 continue
                             self.assertIn(key.reason, KEY_BOUND, name)
-                            written = self.rejects(lambda: reader.to_pssz(outside), f"{name}: to_pssz")
+                            written = self.rejects(lambda: reader.to_pssz_checked(outside), f"{name}: to_pssz")
                             self.assertEqual(written.kind, "value", name)
                             self.assertIn(written.reason, BOUND_REASONS | set(KEY_BOUND), name)
-                            kw = self.rejects(lambda: reader.to_key(outside), f"{name}: to_key")
+                            kw = self.rejects(lambda: reader.to_key_checked(outside), f"{name}: to_key")
                             self.assertEqual(kw.kind, "value", name)
                             self.assertIn(kw.reason, BOUND_REASONS | set(KEY_BOUND) | {"key: member length bound violated"},
                                           name)
                             for fmt in ("json", "ijson"):
                                 text = loose.to_json(outside, fmt)
-                                for run in (lambda: reader.to_json(outside, fmt), lambda: reader.from_json(text, fmt),
+                                for run in (lambda: reader.to_json_checked(outside, fmt), lambda: reader.from_json(text, fmt),
                                             lambda: reader.json_to_pssz(text, fmt)):
                                     e = self.rejects(run, f"{name}: {fmt}")
                                     self.assertIn(e.kind, ("value", "json"), name)
