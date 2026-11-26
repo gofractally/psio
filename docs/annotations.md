@@ -2968,8 +2968,8 @@ encoder makes anyway while it sizes the value:
 | pssz `to_pssz` / `encode` (fast) | — | only where the offsets cannot express the value | yes | **no** |
 | pssz `to_pssz_checked`, `encode_pssz_checked` (validated) | — | yes | yes | yes |
 | pssz `validate_pssz`, `from_pssz`, `validate_strict`, `decode_pssz_checked` | yes | yes | yes | yes |
-| pssz `from_pssz(psio::trusted{…})` / `psio::decode` / `unpack()` (trusted) | only the span arithmetic of its own walk: not a validation | **no** | the cap of a record, a comparison on its span | **no** |
-| `pssz_view` | **no** | **no** | **no** | **no** |
+| pssz `from_pssz(psio::trusted{…})` / `psio::decode` / `unpack()` (trusted) | every span it follows lies in the bytes ([on bytes that are not a frame](#on-bytes-that-are-not-a-frame)); not the canonical form | **no** | the cap of a record, a comparison on its span | **no** |
+| `pssz_view`, `pssz_trusted_view` | every member it reads is placed inside the bytes, or the read fails; not the canonical form | **no** | **no** | **no** |
 | key `to_key`, `key_prefix` (fast) | — | **no** | — | **no** |
 | key `to_key_checked`, `encode_key_checked` (validated) | — | yes | — | yes |
 | key `validate_key`, `from_key` | yes | yes | — | yes |
@@ -2987,12 +2987,66 @@ trusted read as the value that was written, whether or not it is inside
 its bounds (`psio::bounded` and `psio::utf8_string` are filled as written).
 What a trusted read still does is find its way through the bytes: the pssz
 decode keeps the span comparisons of its own walk (a value span inside the
-buffer, an element size that divides a list's span, an optional selector
-that is 0 or 1, a record's cap) — which is not a validation: a trusted read
-of bytes that are not a valid frame stays undefined for the binary
-formats — and the key, json and protobuf readers parse as they always do,
-because that is how they find their values. Read your own tables trusted;
+buffer, an offset table inside its list, an element size that divides a
+list's span, an optional selector that is 0 or 1, a record's cap) — which
+is not a validation of what the type declares, but is enough that bytes
+which are not a frame fail instead of being read outside
+([below](#on-bytes-that-are-not-a-frame)) — and the key, json and protobuf
+readers parse as they always do, because that is how they find their
+values. Read your own tables trusted;
 validate what comes from an action's caller or another service.
+
+#### On bytes that are not a frame
+
+A trusted read holds nothing against what a type *declares*. It is still
+handed bytes that may not be a frame of the type at all: a row cut short, a
+row an incompatible version of the type wrote. What every trusted read and
+every view does then:
+
+1. **No read outside the bytes, no undefined behaviour, bounded work.**
+   Nothing is sized, and no loop is run, by a number the bytes do not back.
+2. **A member that cannot be placed is a failure**, the one a decode gives:
+   `psio::codec_abort` in C++ (a `psio::codec_exception` where exceptions
+   are enabled; the abort handler and `std::abort` in a guest), a panic
+   with a PSIO message in Rust (`from_F_trusted` returns `T`; that is its
+   contract), a `PsszError` / `DecodeError` in TypeScript / Python. It is
+   never an empty string or a zero in the member's place.
+3. **Bytes that place every member read as some value of the type**, which
+   is unspecified: another type's row whose offsets happen to fit, a
+   corrupted number, text that is not UTF-8 in a C++ `std::string_view`, a
+   `bool` byte other than 0 / 1 (true), members that overlap, a
+   non-canonical form, trailing bytes. Only a validating read refuses
+   those.
+
+A view of nothing is not a member that could not be placed: a
+default-constructed view, `list.at(i)` past the end and a trailing optional
+the writer did not write read as zero / empty / absent.
+
+Where that contract holds, and where a trusted read is still for validated
+bytes only:
+
+| | On bytes that are not a frame |
+|---|---|
+| C++ pssz: `psio::pssz_view<T>`, `psio::pssz_trusted_view<T>`, `buffer.view()`, `shared_pssz<T>` | 1, 2, 3. Fails with `view: the bytes are not a frame of the type: …`. A record's header is compared when the view is constructed, an offset when it is read |
+| C++ pssz: `from_pssz<T>(psio::trusted{…})`, `psio::decode`, `view.unpack()`, every `pssz_<W>` profile | 1, 2, 3. Fails with the decoder's message (`pssz: record fixed region truncated`, `pssz: required record field missing`, …) |
+| C++ ssz, wit (canonical ABI): `F_view<T>`, `F_trusted_view<T>` | 1, 2, 3, as the pssz views (the same frame) |
+| C++ ssz, wit: `from_F<T>(psio::trusted{…})` | **validated bytes only**: the decoder compares nothing; on other bytes it reads outside them |
+| C++ flatbuf: `psio::flatbuf_view<T>` (safe) | 1 and 3; what does not fit reads as *absent* (in FlatBuffers an absent field is its default) rather than failing |
+| C++ flatbuf: `psio::flatbuf_trusted_view<T>`, `from_flatbuf<T>(psio::trusted{…})` | **validated bytes only** (one pointer, no bounds) |
+| C++ capnp: `psio::capnp_view<T>`, `from_capnp<T>(psio::trusted{…})` | **validated bytes only** |
+| C++ key, json / ijson, protobuf: `from_F<T>(psio::trusted{…})` | 1, 2, 3: they parse to find their values, as the validating read does |
+| C++ msgpack: `from_msgpack<T>(psio::trusted{…})` | 1, 2, 3; the failure is a `std::runtime_error` of the parser, not a `psio::codec_exception` |
+| C++ bin, borsh, bincode, avro, bson: `from_F<T>(psio::trusted{…})` | **validated bytes only**: on other bytes they read outside them |
+| Rust `from_pssz_trusted`, `PsszView` | 1, 2, 3. `from_pssz_trusted: the bytes are not a frame of app::Row: the offset of a member needs bytes 8..12 of 10`; `try_from_pssz_trusted` returns the failure as an error. No `unsafe` on the read path |
+| Rust `from_key_trusted`, `from_json_trusted`, `from_flatbuf_trusted`, `from_wit_trusted`, `from_ssz_trusted` | 1, 2, 3: a panic with the reader's own message |
+| Rust `from_capnp_trusted` (and `from_capnp`) | safe (no `unsafe` on the path), but **open**: the typed read can panic with a slice message, or walk a count the message does not back |
+| TypeScript `T.view(bytes)` (lazy), Python `psio.pssz_view`, `psio.from_pssz(T, psio.trusted(data))` | 1, 2, 3: `PsszError` of kind `bytes` / `DecodeError`, when the member is read |
+
+`cpp/tests/trusted_structure_tests.cpp` (also built with AddressSanitizer
+and UndefinedBehaviorSanitizer), `rust/psio/tests/trusted_structure.rs`,
+`js/src/test/view-structure.test.ts` and
+`python/tests/test_view_structure.py` pin the rows marked 1, 2, 3 over every
+truncation and single-byte corruption of valid frames and random edits.
 
 ```cpp
 // A view checks nothing. Over bytes that were not validated it reads
