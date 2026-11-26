@@ -188,6 +188,9 @@ const char*           g_type = "";
 std::span<const char> g_frame;
 void                  on_death()
 {
+   // (A report outside a walk — not about a frame — has none to print.)
+   if (g_frame.data() == nullptr)
+      return;
    std::fprintf(stderr, "\n*** SANITIZER REPORT on a validator-accepted frame of %s (%zu bytes):\n", g_type, g_frame.size());
    for (const char c : g_frame) std::fprintf(stderr, "%02x", static_cast<unsigned char>(c));
    std::fprintf(stderr, "\n");
@@ -237,6 +240,7 @@ void probe(const char* name, Fmt fmt, std::span<const char> bytes, counts& c, bo
       }
    }
    catch (const std::exception& e) { std::fprintf(stderr, "%s\n", e.what()); finding("the trusted decode FAILED"); }
+   g_frame = {};
 }
 
 std::mt19937_64 rng{20261126};
