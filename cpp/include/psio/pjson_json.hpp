@@ -25,6 +25,10 @@
 
 #include <simdjson.h>
 
+#include <charconv>
+#include <cmath>
+#include <cstring>
+
 #include <stdexcept>
 #include <string_view>
 
@@ -204,6 +208,96 @@ namespace psio {
          out[count_pos + 1] = static_cast<std::uint8_t>((N >> 8) & 0xFF);
       }
 
+      // A JSON number token → the pjson form that holds its VALUE exactly
+      // (docs/pjson-spec.md §7.2, §15.2; gofractally/psio#17):
+      //   * minus zero: the float that has one, at the smallest width;
+      //   * an integer of up to 128 bits of magnitude: the integer forms;
+      //   * anything else: a decimal, or a binary64 when that is shorter
+      //     AND holds the value exactly (its shortest round-trip decimal is
+      //     the number);
+      //   * a number none of these can hold exactly is an error
+      //     (parse_json_number, and the mantissa check below): never zero,
+      //     never a rounded double, never infinity.
+      inline void od_encode_number(pjson_out_buffer& out, std::string_view token)
+      {
+         json_number num = parse_json_number(token);
+         // A mantissa of more than 127 bits is only an integer's: if it has
+         // an exponent, its trailing zeros belong there.
+         while ((num.mag >> 127) && num.scale != 0 && num.mag % 10 == 0)
+         {
+            num.mag /= 10;
+            ++num.scale;
+         }
+         if (num.mag == 0 && num.neg)
+         {
+            // -0: binary16 negative zero (§15.2.1: the smallest width).
+            const std::size_t tp = reserve_bytes(out, 3);
+            out.data()[tp]     = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f16);
+            out.data()[tp + 1] = 0x00;
+            out.data()[tp + 2] = 0x80;
+            return;
+         }
+         if (num.mag >> 127)
+         {
+            // 2^127 .. 2^128 - 1: the magnitude is 16 raw bytes, with no
+            // room for a sign bit; only an integer has that much.
+            if (num.scale != 0)
+               throw std::runtime_error(
+                   "pjson: a number with more than 127 bits of significant digits and an exponent has no pjson form");
+            const std::size_t tp = reserve_bytes(out, 17);
+            out.data()[tp] = static_cast<std::uint8_t>(((num.neg ? t_negint : t_uint) << 4) | 15u);
+            unsigned __int128 mag = num.mag;
+            std::memcpy(out.data() + tp + 1, &mag, 16);
+            return;
+         }
+         const __int128     mant = static_cast<__int128>(num.mag);
+         const pjson_number n{num.neg ? -mant : mant, num.scale};
+         // int tag for scale = 0, decimal for scale != 0 unless the
+         // binary64 form is shorter and exact.
+         const std::size_t dec = number_size(n);
+         if (n.scale != 0 && dec >= 9)
+         {
+            double d = 0;
+            const auto r = std::from_chars(token.data(), token.data() + token.size(), d);
+            if (r.ec == std::errc{} && std::isfinite(d))
+            {
+               char        text[40];
+               const auto  w = std::to_chars(text, text + sizeof(text), d);
+               json_number back;
+               bool        parsed = true;
+               try { back = parse_json_number(std::string_view{text, static_cast<std::size_t>(w.ptr - text)}); }
+               catch (const std::exception&) { parsed = false; }
+               if (parsed && back.neg == num.neg && back.mag == num.mag && back.scale == num.scale)
+               {
+                  const std::size_t tp = reserve_bytes(out, 9);
+                  encode_double_raw_at(out.data(), tp, d);
+                  return;
+               }
+            }
+         }
+         const std::size_t tp = reserve_bytes(out, dec);
+         encode_number_at(out.data(), tp, n);
+      }
+
+      // The bytes between the quotes of a JSON string token, kept in
+      // their JSON-escape form.
+      inline void od_encode_string(pjson_out_buffer& out, std::string_view raw)
+      {
+         std::size_t end = raw.size();
+         while (end > 0 &&
+                (raw[end - 1] == ' ' || raw[end - 1] == '\t' ||
+                 raw[end - 1] == '\n' || raw[end - 1] == '\r'))
+            --end;
+         if (end < 2 || raw[0] != '"' || raw[end - 1] != '"')
+            throw std::runtime_error("pjson_json: malformed string token");
+         std::string_view content = raw.substr(1, end - 2);
+         std::size_t tp = reserve_bytes(out, 1u + content.size());
+         out.data()[tp] = static_cast<std::uint8_t>(
+             (t_string << 4) | string_flag_escape_form);
+         if (!content.empty())
+            std::memcpy(out.data() + tp + 1, content.data(), content.size());
+      }
+
       inline void od_encode_value(pjson_out_buffer& out,
                                   simdjson::ondemand::value  v)
       {
@@ -242,32 +336,7 @@ namespace psio {
                        raw[end] == 'E' ||
                        (raw[end] >= '0' && raw[end] <= '9')))
                   ++end;
-               pjson_number n =
-                   pjson_number::from_string(raw.substr(0, end));
-
-               // Smart picker: int tag for scale=0, decimal for scale!=0
-               // unless the IEEE-float form is shorter. Same logic as
-               // pjson.hpp encode_double_at, but driven by the parsed
-               // n directly (we know scale and mantissa magnitude).
-               std::size_t dec = number_size(n);
-               bool prefer_ieee =
-                   (n.scale != 0) && dec >= 9;  // only relevant for fractions
-               if (prefer_ieee)
-               {
-                  // Recover IEEE bits from raw text via from_chars.
-                  double d;
-                  auto   r = std::from_chars(raw.data(),
-                                             raw.data() + end, d);
-                  if (r.ec != std::errc{})
-                     throw std::runtime_error("pjson_json: from_chars");
-                  std::size_t tp = reserve_bytes(out, 9);
-                  encode_double_raw_at(out.data(), tp, d);
-               }
-               else
-               {
-                  std::size_t tp = reserve_bytes(out, dec);
-                  encode_number_at(out.data(), tp, n);
-               }
+               od_encode_number(out, raw.substr(0, end));
                return;
             }
             case JT::string:
@@ -358,15 +427,58 @@ namespace psio {
                od_encode_object(out, o);
                return;
             }
-            default:
+            // A document may be a single scalar (§6: a pjson document is
+            // one value, any value). simdjson gives a root scalar through
+            // the document, not through a value.
+            case JT::null:
             {
-               // Wrap leaf as a value via a fresh root iterator.
-               simdjson::ondemand::value v;
-               if (doc.get_value().get(v) != simdjson::SUCCESS)
-                  throw std::runtime_error("pjson_json: doc.value");
-               od_encode_value(out, v);
+               bool is_null = false;
+               if (doc.is_null().get(is_null) != simdjson::SUCCESS || !is_null)
+                  throw std::runtime_error("pjson_json: bad null");
+               out.push_back(static_cast<std::uint8_t>(t_null << 4));
                return;
             }
+            case JT::boolean:
+            {
+               bool b;
+               if (doc.get_bool().get(b) != simdjson::SUCCESS)
+                  throw std::runtime_error("pjson_json: bad bool");
+               out.push_back(static_cast<std::uint8_t>((t_bool << 4) | (b ? 1u : 0u)));
+               return;
+            }
+            case JT::number:
+            {
+               std::string_view raw;
+               if (doc.raw_json_token().get(raw) != simdjson::SUCCESS)
+                  throw std::runtime_error("pjson_json: bad number");
+               std::size_t end = 0;
+               while (end < raw.size() &&
+                      (raw[end] == '-' || raw[end] == '+' || raw[end] == '.' || raw[end] == 'e' ||
+                       raw[end] == 'E' || (raw[end] >= '0' && raw[end] <= '9')))
+                  ++end;
+               // (The whole document is this token: anything after it is
+               // not JSON. simdjson's own number check runs in get_number.)
+               simdjson::ondemand::number ignored;
+               const auto err = doc.get_number().get(ignored);
+               if (err != simdjson::SUCCESS && err != simdjson::BIGINT_ERROR &&
+                   err != simdjson::NUMBER_ERROR)
+                  throw std::runtime_error("pjson_json: bad number");
+               od_encode_number(out, raw.substr(0, end));
+               return;
+            }
+            case JT::string:
+            {
+               std::string_view raw;
+               if (doc.raw_json_token().get(raw) != simdjson::SUCCESS)
+                  throw std::runtime_error("pjson_json: bad string");
+               std::string_view checked;
+               if (doc.get_string().get(checked) != simdjson::SUCCESS)
+                  throw std::runtime_error("pjson_json: bad string");
+               od_encode_string(out, raw);
+               return;
+            }
+            default:
+               throw std::runtime_error("pjson_json: unknown type");
          }
       }
 

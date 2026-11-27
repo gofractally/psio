@@ -776,6 +776,7 @@ namespace psio {
                 else if constexpr (std::is_same_v<T, double>)
                 {
                    if (!std::isfinite(x)) return 9;
+                   if (x == 0 && std::signbit(x)) return 3;  // -0.0: binary16
                    pjson_number n   = pjson_number::from_double(x);
                    std::size_t  dec = number_size(n);
                    return dec < 9 ? dec : 9;
@@ -924,6 +925,16 @@ namespace psio {
                                           double        d)
       {
          if (!std::isfinite(d)) return encode_double_raw_at(dst, pos, d);
+         if (d == 0 && std::signbit(d))
+         {
+            // Minus zero keeps its sign: there is no negative-zero integer
+            // (§4.4) or decimal, and binary16 is the smallest float that has
+            // one (§15.2.1).
+            dst[pos]     = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f16);
+            dst[pos + 1] = 0x00;
+            dst[pos + 2] = 0x80;
+            return 3;
+         }
          pjson_number n   = pjson_number::from_double(d);
          std::size_t  dec = number_size(n);
          if (dec < 9) return encode_number_at(dst, pos, n);
@@ -1556,7 +1567,7 @@ namespace psio {
 
          switch (type)
          {
-            case t_null: return size == 1;
+            case t_null: return size == 1 && low == 0;  // (§3: reserved, must be 0)
             case t_bool:
                return size == 1 && low <= 1;
             case t_uint_inline:
@@ -1893,6 +1904,12 @@ namespace psio {
                {
                   __uint128_t mag = 0;
                   std::memcpy(&mag, p + 1, bc);
+                  // pjson_number's mantissa is a signed 128-bit integer: a
+                  // magnitude of 2^127 or more is a valid pjson value that
+                  // this dynamic value type cannot hold. Refused here (never
+                  // wrapped to another number); pjson_view::as_uint128 and
+                  // pjson_to_json read it exactly.
+                  if (mag >> 127) return false;
                   out = pjson_value{
                       pjson_number{static_cast<__int128>(mag), 0}};
                }
@@ -1935,6 +1952,8 @@ namespace psio {
                   __uint128_t mag = 0;
                   std::memcpy(&mag, p + 1, bc);
                   if (mag == 0) return false;
+                  // (-2^127 is the least a signed 128-bit mantissa holds.)
+                  if (mag > (static_cast<__uint128_t>(1) << 127)) return false;
                   out = pjson_value{
                       pjson_number{static_cast<__int128>(__uint128_t{0} - mag), 0}};
                }
@@ -2190,71 +2209,119 @@ namespace psio {
       return pjson_number{mant, scale};
    }
 
+   namespace pjson_detail
+   {
+      // A JSON number token, exactly: (-1)^neg × mag × 10^scale, with the
+      // trailing zeros of the digits moved into the scale. `mag` is the
+      // digits as an unsigned 128-bit integer; a number whose digits (after
+      // the trailing zeros) do not fit 128 bits has no pjson form and is an
+      // error — never a wrapped or truncated value.
+      struct json_number
+      {
+         bool              neg   = false;
+         unsigned __int128 mag   = 0;
+         std::int32_t      scale = 0;
+      };
+      inline json_number parse_json_number(std::string_view s)
+      {
+         constexpr unsigned __int128 max128 = ~static_cast<unsigned __int128>(0);
+         std::size_t i = 0, n = s.size();
+         json_number out;
+         if (i < n && s[i] == '-') { out.neg = true; ++i; }
+         if (i >= n || s[i] < '0' || s[i] > '9')
+            throw std::invalid_argument("pjson: expected digit");
+         std::int64_t scale    = 0;
+         std::int64_t exponent = 0;
+         std::int64_t zeros    = 0;  // zeros seen since the last nonzero digit
+         bool         seen_dot = false;
+         const auto   times10  = [&] {
+            if (out.mag > max128 / 10)
+               throw std::runtime_error(
+                   "pjson: a number with more than 128 bits of significant digits has no pjson form");
+            out.mag *= 10;
+         };
+         while (i < n)
+         {
+            const char c = s[i];
+            if (c == '.')
+            {
+               if (seen_dot) throw std::invalid_argument("pjson: stray '.'");
+               seen_dot = true;
+               ++i;
+               continue;
+            }
+            if (c == 'e' || c == 'E')
+            {
+               ++i;
+               int sign = 1;
+               if (i < n && (s[i] == '+' || s[i] == '-'))
+               {
+                  if (s[i] == '-') sign = -1;
+                  ++i;
+               }
+               if (i >= n || s[i] < '0' || s[i] > '9')
+                  throw std::invalid_argument("pjson: bad exponent");
+               std::int64_t exp = 0;
+               while (i < n && s[i] >= '0' && s[i] <= '9')
+               {
+                  if (exp < 4'000'000'000ll) exp = exp * 10 + (s[i] - '0');
+                  ++i;
+               }
+               exponent = sign * exp;
+               break;
+            }
+            if (c < '0' || c > '9') break;
+            if (seen_dot) --scale;
+            if (c == '0')
+               ++zeros;
+            else
+            {
+               for (; zeros > 0; --zeros) times10();
+               times10();
+               if (out.mag > max128 - static_cast<unsigned>(c - '0'))
+                  throw std::runtime_error(
+                      "pjson: a number with more than 128 bits of significant digits has no pjson form");
+               out.mag += static_cast<unsigned>(c - '0');
+            }
+            ++i;
+         }
+         if (i != n) throw std::invalid_argument("pjson: trailing garbage");
+         // The digits as written give mag × 10^zeros × 10^(scale + exponent).
+         // As before: trailing zeros of a fraction are dropped (`1.50` is
+         // 15 × 10^-1), those of an integer are kept in the mantissa (`100`
+         // is 100 × 10^0, `1e2` is 1 × 10^2) — unless the mantissa cannot
+         // take them, and then they stay a power of ten, which is exact.
+         const std::int64_t written = scale + exponent;
+         const std::int64_t wanted  = written < 0 ? std::min<std::int64_t>(0, written + zeros) : written;
+         scale = written + zeros;
+         while (scale > wanted && out.mag <= max128 / 10)
+         {
+            out.mag *= 10;
+            --scale;
+         }
+         if (out.mag == 0)
+            scale = 0;
+         // (§8: the scale of a decimal is a 4-byte varscale.)
+         if (scale > 536'870'911ll || scale < -536'870'912ll)
+            throw std::runtime_error("pjson: a number's exponent is outside the range of a decimal");
+         out.scale = static_cast<std::int32_t>(scale);
+         return out;
+      }
+   }  // namespace pjson_detail
+
    inline pjson_number pjson_number::from_string(std::string_view s)
    {
-      std::size_t i = 0, n = s.size();
-      auto skip_ws = [&] {
-         while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' ||
-                          s[i] == '\r'))
-            ++i;
-      };
-      skip_ws();
-      bool neg = false;
-      if (i < n && s[i] == '-') { neg = true; ++i; }
-      if (i >= n || s[i] < '0' || s[i] > '9')
-         throw std::invalid_argument("pjson: expected digit");
-      __int128     mant     = 0;
-      std::int32_t scale    = 0;
-      bool         seen_dot = false;
-      while (i < n)
-      {
-         char c = s[i];
-         if (c == '.')
-         {
-            if (seen_dot)
-               throw std::invalid_argument("pjson: stray '.'");
-            seen_dot = true;
-            ++i;
-            continue;
-         }
-         if (c == 'e' || c == 'E')
-         {
-            ++i;
-            int sign = 1;
-            if (i < n && (s[i] == '+' || s[i] == '-'))
-            {
-               if (s[i] == '-') sign = -1;
-               ++i;
-            }
-            std::int32_t exp = 0;
-            if (i >= n || s[i] < '0' || s[i] > '9')
-               throw std::invalid_argument("pjson: bad exponent");
-            while (i < n && s[i] >= '0' && s[i] <= '9')
-            {
-               exp = exp * 10 + (s[i] - '0');
-               ++i;
-            }
-            scale += sign * exp;
-            break;
-         }
-         if (c < '0' || c > '9') break;
-         mant = mant * 10 + (c - '0');
-         if (seen_dot) --scale;
-         ++i;
-      }
-      skip_ws();
-      if (i != n)
-         throw std::invalid_argument("pjson: trailing garbage");
-      if (mant != 0)
-      {
-         while (scale < 0 && (mant % 10) == 0)
-         {
-            mant /= 10;
-            ++scale;
-         }
-      }
-      if (neg) mant = -mant;
-      return pjson_number{mant, scale};
+      std::size_t b = 0, e = s.size();
+      const auto  ws = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; };
+      while (b < e && ws(s[b])) ++b;
+      while (e > b && ws(s[e - 1])) --e;
+      const pjson_detail::json_number n = pjson_detail::parse_json_number(s.substr(b, e - b));
+      // The mantissa of a pjson_number is signed 128-bit.
+      if (n.mag >> 127)
+         throw std::runtime_error(
+             "pjson: a number with more than 127 bits of significant digits does not fit pjson_number");
+      const __int128 mant = static_cast<__int128>(n.mag);
+      return pjson_number{n.neg ? -mant : mant, n.scale};
    }
 
    // ── public façade ────────────────────────────────────────────────────

@@ -14,6 +14,7 @@
 // We vendor only this one function rather than depend on ucc as a
 // whole — it's the only ucc symbol psio uses.
 
+#include <cstring>
 #include <cstdint>
 #include <cstddef>
 
@@ -39,7 +40,9 @@ namespace psio::detail {
 
       while (p <= last_pos)
       {
-         const std::uint64_t data            = *(const std::uint64_t*)p;
+         // (memcpy: the bytes of a wire buffer are not aligned for a u64.)
+         std::uint64_t data;
+         std::memcpy(&data, p, 8);
          const std::uint64_t data_xor_target = data ^ target;
          std::uint64_t       mask =
             (data_xor_target - 0x0101010101010101ULL) & ~data_xor_target;
@@ -56,8 +59,9 @@ namespace psio::detail {
       const auto remaining = end - p;
       if (remaining >= 4)
       {
-         const std::uint32_t data_xor_target =
-            *(const std::uint32_t*)p ^ static_cast<std::uint32_t>(target);
+         std::uint32_t word;
+         std::memcpy(&word, p, 4);
+         const std::uint32_t data_xor_target = word ^ static_cast<std::uint32_t>(target);
          std::uint32_t mask =
             (data_xor_target - 0x01010101u) & ~data_xor_target;
          mask &= 0x80808080u;

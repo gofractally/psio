@@ -22,6 +22,8 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace psio {
 
@@ -211,6 +213,7 @@ namespace psio {
                      "pjson_view::as_int64: float element");
             }
          }
+         scalar_ok_();
          std::uint8_t t = data_[0] >> 4;
          if (t == t_nint_inline) {
             if (size_ != 1 || !(data_[0] & 15)) throw std::runtime_error("pjson_view: invalid inline negative integer");
@@ -265,6 +268,18 @@ namespace psio {
       __int128 as_int128() const
       {
          using namespace pjson_detail;
+         // An element of a typed array is its raw bytes, not a tagged value.
+         if (form_ == form_typed_array_element)
+         {
+            if (synth_param_ == tac_u64)
+            {
+               std::uint64_t v;
+               std::memcpy(&v, data_, 8);
+               return static_cast<__int128>(v);
+            }
+            return as_int64();  // (throws for a float element)
+         }
+         scalar_ok_();
          std::uint8_t t = data_[0] >> 4;
          if (t == t_nint_inline) return as_int64();
          if (t == t_uint_inline)
@@ -275,6 +290,9 @@ namespace psio {
                 static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
             __uint128_t mag = 0;
             std::memcpy(&mag, data_ + 1, bc);
+            if (mag >> 127)
+               throw std::out_of_range(
+                   "pjson_view::as_int128: exceeds int128 (as_uint128 reads a uint of 128 bits)");
             return static_cast<__int128>(mag);
          }
          if (t == t_negint)
@@ -283,9 +301,40 @@ namespace psio {
                 static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
             __uint128_t mag = 0;
             std::memcpy(&mag, data_ + 1, bc);
-            return -static_cast<__int128>(mag);
+            if (mag > (static_cast<__uint128_t>(1) << 127))
+               throw std::out_of_range("pjson_view::as_int128: exceeds int128");
+            return static_cast<__int128>(__uint128_t{0} - mag);
          }
-         return as_number().mantissa;  // best-effort
+         // Not an integer tag: a decimal's mantissa (best effort), a
+         // float's integer part. (Never back through as_number() for an
+         // integer: that is this function.)
+         if (t == t_decimal || t == t_ieee_float)
+            return as_number().mantissa;
+         throw std::runtime_error("pjson_view::as_int128: not a number");
+      }
+
+      // The magnitude of an integer (`uint` and the inline forms: the
+      // value; `negint`: its absolute value), all 128 bits of it.
+      unsigned __int128 as_uint128() const
+      {
+         using namespace pjson_detail;
+         if (form_ == form_typed_array_element)
+         {
+            const __int128 v = as_int128();
+            if (v < 0) throw std::out_of_range("pjson_view::as_uint128: negative");
+            return static_cast<unsigned __int128>(v);
+         }
+         scalar_ok_();
+         const std::uint8_t t = data_[0] >> 4;
+         if (t == t_uint)
+         {
+            __uint128_t mag = 0;
+            std::memcpy(&mag, data_ + 1, (data_[0] & 0x0F) + 1u);
+            return mag;
+         }
+         const __int128 v = as_int128();
+         if (v < 0) throw std::out_of_range("pjson_view::as_uint128: negative");
+         return static_cast<unsigned __int128>(v);
       }
 
       double as_double() const
@@ -303,6 +352,7 @@ namespace psio {
                   return static_cast<double>(as_int64());
             }
          }
+         scalar_ok_();
          std::uint8_t t = data_[0] >> 4;
          if (t == t_ieee_float)
          {
@@ -340,6 +390,7 @@ namespace psio {
          if (k == kind::integer) return pjson_number{as_int128(), 0};
          if (k == kind::decimal)
          {
+            scalar_ok_();
             std::uint8_t bc =
                 static_cast<std::uint8_t>((data_[0] & 0x0F) + 1);
             __uint128_t zz = 0;
@@ -377,7 +428,7 @@ namespace psio {
       // this on a non-string value is undefined.
       std::uint8_t string_flag() const noexcept
       {
-         return data_[0] & 0x0F;
+         return size_ ? data_[0] & 0x0F : 0;
       }
 
       // ── container access ────────────────────────────────────────────
@@ -389,23 +440,21 @@ namespace psio {
          {
             // Field count K lives at parent's varuint after the width
             // byte; same value for every record in the row_array.
-            std::uint64_t K_u64;
-            std::size_t   nb = read_varuint62(parent_ + 2,
-                                              parent_size_ - 2, K_u64);
-            if (nb == 0)
-               throw std::runtime_error("pjson_view::count: bad K");
-            return static_cast<std::size_t>(K_u64);
+            return read_row_meta_(parent_, parent_size_).K;
          }
          if (form_ == form_typed_array_element)
             throw std::runtime_error(
                "pjson_view::count: not a container");
+         if (!data_ || size_ < 3)
+            throw std::runtime_error("pjson_view::count: not a container");
          std::uint8_t t = data_[0] >> 4;
          if (t != t_array && t != t_object)
             throw std::runtime_error("pjson_view::count: not a container");
-         if (size_ < 3)
-            throw std::runtime_error("pjson_view: bad count");
-         return static_cast<std::size_t>(data_[size_ - 2]) |
-                (static_cast<std::size_t>(data_[size_ - 1]) << 8);
+         // The count is compared with the bytes before anything is sized
+         // or walked by it (each layout has its own arithmetic).
+         if (is_typed_array()) return typed_count_();
+         if (is_row_array()) return read_row_meta_(data_, size_).N;
+         return layout_(t == t_object).N;
       }
 
       // Element access: index into an array. Three cases:
@@ -427,7 +476,7 @@ namespace psio {
          using namespace pjson_detail;
          if (is_typed_array())
          {
-            std::size_t N = count();
+            std::size_t N = typed_count_();
             if (i >= N)
                throw std::out_of_range("pjson_view::at: typed_array index");
             std::uint8_t code = typed_array_elem_code();
@@ -444,22 +493,11 @@ namespace psio {
             return row_array_record_view_(i);
          }
          require_(kind::array);
-         std::size_t   N           = count();
-         if (i >= N)
+         const layout_t L = layout_(false);
+         if (i >= L.N)
             throw std::out_of_range("pjson_view::at: array index");
-         std::uint8_t  slot_w_code = data_[1] & 0x03;
-         std::size_t   slot_w      = width_bytes(slot_w_code);
-         std::size_t   slot_table_pos   = size_ - 2 - slot_w * N;
-         std::size_t   value_data_start = 2;
-         std::size_t   value_data_size  = slot_table_pos - value_data_start;
-         std::uint32_t off_i =
-             read_width(data_ + slot_table_pos + i * slot_w, slot_w_code);
-         std::uint32_t off_next =
-             i + 1 < N
-                 ? read_width(data_ + slot_table_pos + (i + 1) * slot_w,
-                              slot_w_code)
-                 : static_cast<std::uint32_t>(value_data_size);
-         return dynamic_view{data_ + value_data_start + off_i,
+         const auto [off_i, off_next] = child_range_(L, i);
+         return dynamic_view{data_ + 2 + off_i,
                              static_cast<std::size_t>(off_next - off_i)};
       }
 
@@ -472,7 +510,7 @@ namespace psio {
          if (!is_typed_array())
             throw std::runtime_error(
                 "pjson_view::typed_int64_at: not a typed array");
-         std::size_t N  = count();
+         std::size_t N  = typed_count_();
          if (i >= N)
             throw std::out_of_range("pjson_view::typed_int64_at");
          std::uint8_t       code = typed_array_elem_code();
@@ -515,7 +553,7 @@ namespace psio {
          if (!is_typed_array())
             throw std::runtime_error(
                 "pjson_view::typed_uint64_at: not a typed array");
-         std::size_t N  = count();
+         std::size_t N  = typed_count_();
          if (i >= N)
             throw std::out_of_range("pjson_view::typed_uint64_at");
          std::uint8_t       code = typed_array_elem_code();
@@ -570,7 +608,7 @@ namespace psio {
          if (!is_typed_array())
             throw std::runtime_error(
                 "pjson_view::typed_double_at: not a typed array");
-         std::size_t N  = count();
+         std::size_t N  = typed_count_();
          if (i >= N)
             throw std::out_of_range("pjson_view::typed_double_at");
          std::uint8_t       code = typed_array_elem_code();
@@ -617,7 +655,13 @@ namespace psio {
          if (typed_array_elem_code() != pjson_detail::tac_for<T>())
             throw std::runtime_error(
                 "pjson_view::typed_array_span: element-type mismatch");
-         std::size_t N = count();
+         std::size_t N = typed_count_();
+         // A span of T is read as T: the element bytes must be aligned for
+         // it, which a wire buffer does not promise. (typed_int64_at /
+         // typed_uint64_at / typed_double_at read byte-wise and always work.)
+         if (reinterpret_cast<std::uintptr_t>(data_ + 1) % alignof(T) != 0)
+            throw std::runtime_error(
+                "pjson_view::typed_array_span: the elements are not aligned for the type");
          return std::span<const T>{
              reinterpret_cast<const T*>(data_ + 1), N};
       }
@@ -636,20 +680,35 @@ namespace psio {
       // than libc memchr's general-purpose alignment + fallback
       // machinery. The tradeoff would flip around N=64+ where
       // memchr's larger-size optimizations pay off.
+      // The elements of a typed array as values, copied byte-wise: works
+      // wherever the bytes lie (typed_array_span needs them aligned).
+      template <typename T>
+      std::vector<T> typed_array_values() const
+      {
+         if (!is_typed_array())
+            throw std::runtime_error("pjson_view::typed_array_values: not a typed array");
+         if (typed_array_elem_code() != pjson_detail::tac_for<T>())
+            throw std::runtime_error("pjson_view::typed_array_values: element-type mismatch");
+         std::vector<T> out(typed_count_());
+         if (!out.empty())
+            std::memcpy(out.data(), data_ + 1, out.size() * sizeof(T));
+         return out;
+      }
+
       std::optional<dynamic_view> find(std::string_view key) const
       {
          using namespace pjson_detail;
          if (form_ == form_row_array_record)
             return row_record_find_(key);
          if (type() != kind::object) return std::nullopt;
-         std::size_t  N = count();
-         std::uint8_t slot_w_code = data_[1] & 0x03;
-         std::size_t  slot_w      = width_bytes(slot_w_code);
-         std::size_t  slot_stride = slot_w + 1;
-         std::size_t  slot_table_pos   = size_ - 2 - slot_stride * N;
-         std::size_t  hash_table_pos   = slot_table_pos - N;
-         std::size_t  value_data_start = 2;
-         std::size_t  value_data_size  = hash_table_pos - value_data_start;
+         const layout_t L = layout_(true);
+         const std::size_t  N = L.N;
+         const std::uint8_t slot_w_code = L.slot_w_code;
+         const std::size_t  slot_w      = L.slot_w;
+         const std::size_t  slot_stride = L.stride;
+         const std::size_t  slot_table_pos   = L.slot_table_pos;
+         const std::size_t  hash_table_pos   = L.hash_table_pos;
+         const std::size_t  value_data_start = 2;
          std::uint8_t want = key_hash8(key);
 
          const std::uint8_t* hashes    = data_ + hash_table_pos;
@@ -662,29 +721,12 @@ namespace psio {
             std::size_t i = base + static_cast<std::size_t>(hit);
             const std::uint8_t* slot =
                 data_ + slot_table_pos + i * slot_stride;
-            std::uint32_t off_i = read_width(slot, slot_w_code);
             std::uint8_t  ks    = slot[slot_w];
-            std::uint32_t off_next =
-                i + 1 < N
-                    ? read_width(data_ + slot_table_pos +
-                                     (i + 1) * slot_stride,
-                                 slot_w_code)
-                    : static_cast<std::uint32_t>(value_data_size);
+            const auto [off_i, off_next] = child_range_(L, i);
             const std::uint8_t* entry = data_ + value_data_start + off_i;
             std::size_t         entry_size = off_next - off_i;
-            std::size_t         klen, klen_bytes;
-            if (ks != 0xFF)
-            {
-               klen       = ks;
-               klen_bytes = 0;
-            }
-            else
-            {
-               std::uint64_t excess;
-               klen_bytes = read_varuint62(entry, entry_size, excess);
-               if (klen_bytes == 0) return std::nullopt;
-               klen = 0xFFu + static_cast<std::size_t>(excess);
-            }
+            const auto [klen, klen_bytes] = entry_key_(entry, entry_size, ks);
+            (void)slot_w_code;
             if (klen == key.size() &&
                 std::memcmp(entry + klen_bytes, key.data(), klen) == 0)
             {
@@ -718,37 +760,18 @@ namespace psio {
             return;
          }
          require_(kind::object);
-         std::size_t  N = count();
-         std::uint8_t slot_w_code = data_[1] & 0x03;
-         std::size_t  slot_w      = width_bytes(slot_w_code);
-         std::size_t  slot_stride = slot_w + 1;
-         std::size_t  slot_table_pos   = size_ - 2 - slot_stride * N;
-         std::size_t  hash_table_pos   = slot_table_pos - N;
-         std::size_t  value_data_start = 2;
-         std::size_t  value_data_size  = hash_table_pos - value_data_start;
-         (void)hash_table_pos;
+         const layout_t L = layout_(true);
+         const std::size_t N = L.N;
+         const std::size_t value_data_start = 2;
          for (std::size_t i = 0; i < N; ++i)
          {
             const std::uint8_t* slot =
-                data_ + slot_table_pos + i * slot_stride;
-            std::uint32_t off_i = read_width(slot, slot_w_code);
-            std::uint8_t  ks    = slot[slot_w];
-            std::uint32_t off_next =
-                i + 1 < N
-                    ? read_width(data_ + slot_table_pos +
-                                     (i + 1) * slot_stride,
-                                 slot_w_code)
-                    : static_cast<std::uint32_t>(value_data_size);
+                data_ + L.slot_table_pos + i * L.stride;
+            std::uint8_t  ks    = slot[L.slot_w];
+            const auto [off_i, off_next] = child_range_(L, i);
             const std::uint8_t* entry = data_ + value_data_start + off_i;
             std::size_t         entry_size = off_next - off_i;
-            std::size_t         klen, klen_bytes;
-            if (ks != 0xFF) { klen = ks; klen_bytes = 0; }
-            else
-            {
-               std::uint64_t excess;
-               klen_bytes = read_varuint62(entry, entry_size, excess);
-               klen = 0xFFu + static_cast<std::size_t>(excess);
-            }
+            const auto [klen, klen_bytes] = entry_key_(entry, entry_size, ks);
             std::string_view k(
                 reinterpret_cast<const char*>(entry + klen_bytes), klen);
             std::size_t value_off = klen_bytes + klen;
@@ -771,24 +794,11 @@ namespace psio {
                fn(at(i));
             return;
          }
-         std::size_t  N = count();
-         std::uint8_t slot_w_code = data_[1] & 0x03;
-         std::size_t  slot_w      = width_bytes(slot_w_code);
-         std::size_t  slot_table_pos   = size_ - 2 - slot_w * N;
-         std::size_t  value_data_start = 2;
-         std::size_t  value_data_size  = slot_table_pos - value_data_start;
-         for (std::size_t i = 0; i < N; ++i)
+         const layout_t L = layout_(false);
+         for (std::size_t i = 0; i < L.N; ++i)
          {
-            std::uint32_t off_i =
-                read_width(data_ + slot_table_pos + i * slot_w,
-                           slot_w_code);
-            std::uint32_t off_next =
-                i + 1 < N
-                    ? read_width(data_ + slot_table_pos +
-                                     (i + 1) * slot_w,
-                                 slot_w_code)
-                    : static_cast<std::uint32_t>(value_data_size);
-            fn(dynamic_view{data_ + value_data_start + off_i,
+            const auto [off_i, off_next] = child_range_(L, i);
+            fn(dynamic_view{data_ + 2 + off_i,
                             static_cast<std::size_t>(off_next - off_i)});
          }
       }
@@ -806,6 +816,125 @@ namespace psio {
       // call from the parent buffer (data_ in array view, parent_ in
       // record view). All offsets are relative to the row_array buffer
       // start.
+      // ── Placing what is read (gofractally/psio#15, #17) ────────────────
+      //
+      // A view may be handed any bytes. Every accessor places what it
+      // reads inside them before reading it, and a member that cannot be
+      // placed is a failure (std::runtime_error, as the pjson decoder
+      // gives), never a read outside the bytes. A count is compared with
+      // the bytes before anything is sized or walked by it.
+      [[noreturn]] static void bad_(const char* what)
+      {
+         throw std::runtime_error(what);
+      }
+      // A number's tag says how many bytes follow it.
+      void scalar_ok_() const
+      {
+         using namespace pjson_detail;
+         if (!data_ || size_ == 0)
+            bad_("pjson_view: not a pjson value: no bytes");
+         const std::uint8_t t   = data_[0] >> 4;
+         const std::uint8_t low = data_[0] & 0x0F;
+         if (t == t_uint || t == t_negint)
+         {
+            if (size_ != 2u + low)
+               bad_("pjson_view: not a pjson value: an integer is cut short");
+         }
+         else if (t == t_decimal)
+         {
+            if (size_ < 3u + low)
+               bad_("pjson_view: not a pjson value: a decimal is cut short");
+         }
+         else if (t == t_ieee_float)
+         {
+            const std::uint8_t w = low & ieee_width_mask;
+            const std::size_t  n = w == ieee_width_f64   ? 8
+                                   : w == ieee_width_f32 ? 4
+                                   : w == ieee_width_f16 ? 2
+                                                         : 0;
+            if (n == 0 || size_ != 1 + n)
+               bad_("pjson_view: not a pjson value: a float is cut short");
+         }
+      }
+      // The index of a generic array or a single object, at its tail.
+      struct layout_t
+      {
+         std::size_t  N;
+         std::uint8_t slot_w_code;
+         std::size_t  slot_w;
+         std::size_t  stride;           // bytes per slot (object: + key size)
+         std::size_t  slot_table_pos;
+         std::size_t  hash_table_pos;   // object only; == slot_table_pos for an array
+         std::size_t  value_data_size;
+      };
+      layout_t layout_(bool object) const
+      {
+         using namespace pjson_detail;
+         if (!data_ || size_ < 4)
+            bad_("pjson_view: not a pjson value: a container is cut short");
+         if (data_[1] & 0xFCu)
+            bad_("pjson_view: not a pjson value: reserved bits in a container's width byte");
+         layout_t L;
+         L.N = static_cast<std::size_t>(data_[size_ - 2]) |
+               (static_cast<std::size_t>(data_[size_ - 1]) << 8);
+         L.slot_w_code = data_[1] & 0x03;
+         L.slot_w      = width_bytes(L.slot_w_code);
+         L.stride      = L.slot_w + (object ? 1 : 0);
+         const std::size_t per = L.stride + (object ? 1 : 0);  // + hash byte
+         if (L.N > (size_ - 4) / per)
+            bad_("pjson_view: not a pjson value: a container's count exceeds its bytes");
+         L.slot_table_pos  = size_ - 2 - L.stride * L.N;
+         L.hash_table_pos  = L.slot_table_pos - (object ? L.N : 0);
+         L.value_data_size = L.hash_table_pos - 2;
+         return L;
+      }
+      // Where child i lies in the value data: [first, second).
+      std::pair<std::uint32_t, std::uint32_t> child_range_(const layout_t& L,
+                                                           std::size_t     i) const
+      {
+         using namespace pjson_detail;
+         const std::uint32_t off_i =
+            read_width(data_ + L.slot_table_pos + i * L.stride, L.slot_w_code);
+         const std::uint32_t off_next =
+            i + 1 < L.N
+               ? read_width(data_ + L.slot_table_pos + (i + 1) * L.stride, L.slot_w_code)
+               : static_cast<std::uint32_t>(L.value_data_size);
+         if (off_i > off_next || off_next > L.value_data_size)
+            bad_("pjson_view: not a pjson value: a child's offsets are out of order or out of range");
+         return {off_i, off_next};
+      }
+      // The key of an object entry: {length, bytes of the long-key prefix}.
+      static std::pair<std::size_t, std::size_t> entry_key_(const std::uint8_t* entry,
+                                                            std::size_t         entry_size,
+                                                            std::uint8_t        ks)
+      {
+         using namespace pjson_detail;
+         std::size_t klen = ks, klen_bytes = 0;
+         if (ks == 0xFF)
+         {
+            std::uint64_t excess;
+            klen_bytes = read_varuint62(entry, entry_size, excess);
+            if (klen_bytes == 0 || excess > entry_size)
+               bad_("pjson_view: not a pjson value: a long key's length is cut short");
+            klen = 0xFFu + static_cast<std::size_t>(excess);
+         }
+         if (klen_bytes + klen > entry_size)
+            bad_("pjson_view: not a pjson value: a key lies outside its entry");
+         return {klen, klen_bytes};
+      }
+      // The count of a typed array, which its span must hold exactly.
+      std::size_t typed_count_() const
+      {
+         if (size_ < 3)
+            bad_("pjson_view: not a pjson value: a typed array is cut short");
+         const std::size_t N = static_cast<std::size_t>(data_[size_ - 2]) |
+                               (static_cast<std::size_t>(data_[size_ - 1]) << 8);
+         const std::size_t es = pjson_detail::typed_array_elem_size(typed_array_elem_code());
+         if (es == 0 || size_ != 3 + N * es)
+            bad_("pjson_view: not a pjson value: a typed array's count does not match its bytes");
+         return N;
+      }
+
       struct row_array_meta_
       {
          std::size_t   K;
@@ -818,6 +947,7 @@ namespace psio {
          std::size_t   keys_pos;
          std::size_t   records_body_start;
          std::size_t   record_offsets_pos;
+         std::size_t   keys_area_size;
          std::size_t   N;
          const std::uint8_t* base;
          std::size_t         base_size;
@@ -830,7 +960,11 @@ namespace psio {
          row_array_meta_ m;
          m.base          = base;
          m.base_size     = bsize;
+         if (!base || bsize < 4)
+            bad_("pjson_view: not a pjson value: a row array is cut short");
          std::uint8_t wb = base[1];
+         if (wb & 0xF0u)
+            bad_("pjson_view: not a pjson value: reserved bits in a row array's width byte");
          m.slot_w_code   = wb & 0x03;
          m.recoff_w_code = (wb >> 2) & 0x03;
          m.slot_w        = width_bytes(m.slot_w_code);
@@ -839,17 +973,26 @@ namespace psio {
          std::size_t   nb = read_varuint62(base + 2, bsize - 2, K_u64);
          if (nb == 0)
             throw std::runtime_error("pjson_view: bad row_array K");
-         m.K              = static_cast<std::size_t>(K_u64);
          m.key_slots_pos  = 2 + nb;
+         // K keys take at least five bytes each (slot + hash) in the header.
+         if (K_u64 == 0 || m.key_slots_pos > bsize - 2 ||
+             K_u64 > (bsize - 2 - m.key_slots_pos) / 5)
+            bad_("pjson_view: not a pjson value: a row array's key count exceeds its bytes");
+         m.K              = static_cast<std::size_t>(K_u64);
          m.hash_pos       = m.key_slots_pos + 4 * m.K;
          m.keys_pos       = m.hash_pos + m.K;
          std::uint32_t last_slot = read_u32_le(
              base + m.key_slots_pos + (m.K - 1) * 4);
-         std::uint32_t keys_area_size =
-             slot_offset(last_slot) + slot_key_size(last_slot);
+         std::size_t keys_area_size =
+             static_cast<std::size_t>(slot_offset(last_slot)) + slot_key_size(last_slot);
+         if (keys_area_size > bsize - 2 - m.keys_pos)
+            bad_("pjson_view: not a pjson value: a row array's keys lie outside it");
+         m.keys_area_size     = keys_area_size;
          m.records_body_start = m.keys_pos + keys_area_size;
          m.N = static_cast<std::size_t>(base[bsize - 2]) |
                (static_cast<std::size_t>(base[bsize - 1]) << 8);
+         if (m.N > (bsize - 2 - m.records_body_start) / m.recoff_w)
+            bad_("pjson_view: not a pjson value: a row array's count exceeds its bytes");
          m.record_offsets_pos = bsize - 2 - m.N * m.recoff_w;
          return m;
       }
@@ -874,6 +1017,10 @@ namespace psio {
                        m.recoff_w_code)
                  : static_cast<std::uint32_t>(
                        m.record_offsets_pos - m.records_body_start);
+         if (roff_i > roff_next ||
+             roff_next > m.record_offsets_pos - m.records_body_start ||
+             roff_next - roff_i < m.K * m.slot_w)
+            bad_("pjson_view: not a pjson value: a row's offsets are out of order or out of range");
          dynamic_view v;
          v.data_        = data_ + m.records_body_start + roff_i;
          v.size_        = roff_next - roff_i;
@@ -892,6 +1039,8 @@ namespace psio {
       {
          using namespace pjson_detail;
          auto m = read_row_meta_(parent_, parent_size_);
+         if (size_ < m.K * m.slot_w)
+            bad_("pjson_view: not a pjson value: a row is shorter than its slots");
          std::size_t  rec_slot_pos = size_ - m.K * m.slot_w;
          std::uint8_t want         = key_hash8(key);
          const std::uint8_t* hashes = parent_ + m.hash_pos;
@@ -906,6 +1055,8 @@ namespace psio {
                 parent_ + m.key_slots_pos + j * 4);
             std::uint32_t koff  = slot_offset(kslot);
             std::uint8_t  ksize = slot_key_size(kslot);
+            if (static_cast<std::size_t>(koff) + ksize > m.keys_area_size)
+               bad_("pjson_view: not a pjson value: a row array key lies outside the keys");
             const std::uint8_t* kp = parent_ + m.keys_pos + koff;
             if (ksize == key.size() &&
                 std::memcmp(kp, key.data(), ksize) == 0)
@@ -918,6 +1069,8 @@ namespace psio {
                              data_ + rec_slot_pos + (j + 1) * m.slot_w,
                              m.slot_w_code)
                        : static_cast<std::uint32_t>(rec_slot_pos);
+               if (voff > vend || vend > rec_slot_pos)
+                  bad_("pjson_view: not a pjson value: a row field's offsets are out of order or out of range");
                return dynamic_view{data_ + voff, vend - voff};
             }
             base      = j + 1;
@@ -931,6 +1084,8 @@ namespace psio {
       {
          using namespace pjson_detail;
          auto m = read_row_meta_(parent_, parent_size_);
+         if (size_ < m.K * m.slot_w)
+            bad_("pjson_view: not a pjson value: a row is shorter than its slots");
          std::size_t rec_slot_pos = size_ - m.K * m.slot_w;
          for (std::size_t j = 0; j < m.K; ++j)
          {
@@ -938,6 +1093,8 @@ namespace psio {
                 parent_ + m.key_slots_pos + j * 4);
             std::uint32_t koff  = slot_offset(kslot);
             std::uint8_t  ksize = slot_key_size(kslot);
+            if (static_cast<std::size_t>(koff) + ksize > m.keys_area_size)
+               bad_("pjson_view: not a pjson value: a row array key lies outside the keys");
             std::string_view k(
                 reinterpret_cast<const char*>(parent_ + m.keys_pos + koff),
                 ksize);
@@ -949,6 +1106,8 @@ namespace psio {
                           data_ + rec_slot_pos + (j + 1) * m.slot_w,
                           m.slot_w_code)
                     : static_cast<std::uint32_t>(rec_slot_pos);
+            if (voff > vend || vend > rec_slot_pos)
+               bad_("pjson_view: not a pjson value: a row field's offsets are out of order or out of range");
             fn(k, dynamic_view{data_ + voff, vend - voff});
          }
       }

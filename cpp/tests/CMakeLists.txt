@@ -792,6 +792,11 @@ psio_add_test(psio_bin_tests bin_tests.cpp)
 # pjson: schemaless self-describing format. Spec in
 # .issues/psio3-schemaless-jsonb.md.
 psio_add_test(psio_pjson_tests pjson_tests.cpp)
+# pjson on any bytes (gofractally/psio#17): a view never reads outside them
+# and fails on a member it cannot place; validate, decode and pjson_to_json
+# agree on every mutated frame; a JSON number keeps its value or is an error.
+# Again with the sanitizers.
+psio_add_test(psio_pjson_contract_tests pjson_contract_tests.cpp)
 
 # §4.4 format-neutral conformance harness — one fixture, all formats.
 psio_add_test(psio_conformance_tests conformance_tests.cpp)
@@ -1013,6 +1018,13 @@ if(PSIO_HAVE_ASAN_UBSAN)
    target_link_options(psio_accepted_frames_probe_sanitized PRIVATE -fsanitize=address,undefined)
    add_test(NAME psio_accepted_frames_probe_sanitized
             COMMAND psio_accepted_frames_probe_sanitized 3 300)
+endif()
+
+if(PSIO_HAVE_ASAN_UBSAN)
+   psio_add_test(psio_pjson_contract_tests_sanitized pjson_contract_tests.cpp)
+   target_compile_options(psio_pjson_contract_tests_sanitized PRIVATE
+      -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer)
+   target_link_options(psio_pjson_contract_tests_sanitized PRIVATE -fsanitize=address,undefined)
 endif()
 
 # The schema-text parsers (fbs_parser.hpp, capnp_parser.hpp) on arbitrary

@@ -807,10 +807,18 @@ TEST_CASE("pjson typed_array: view accessors", "[pjson][typed_array][view]")
    CHECK(v.typed_int64_at(3) == 100000);
    CHECK(v.typed_double_at(2) == 42.0);
 
-   // typed_array_span<T> with matching element type.
-   auto span = v.typed_array_span<std::int32_t>();
-   REQUIRE(span.size() == 4);
-   CHECK(span[2] == 42);
+   // The elements as values (copied byte-wise: the element bytes follow a
+   // one-byte tag and are not aligned for an int32_t).
+   const auto values = v.typed_array_values<std::int32_t>();
+   REQUIRE(values.size() == 4);
+   CHECK(values[2] == 42);
+   // typed_array_span<T> is the zero-copy form for bytes that are aligned
+   // for T; it refuses the others instead of reading through a misaligned
+   // pointer.
+   if (reinterpret_cast<std::uintptr_t>(v.data() + 1) % alignof(std::int32_t) == 0)
+      CHECK(v.typed_array_span<std::int32_t>()[2] == 42);
+   else
+      CHECK_THROWS(v.typed_array_span<std::int32_t>());
 
    // Mismatched element type rejects.
    CHECK_THROWS(v.typed_array_span<std::int64_t>());

@@ -25,8 +25,11 @@
 //   * `bytes` emit as quoted hex (pending base64 wiring).
 
 #include <psio/pjson.hpp>
+#include <psio/pjson_view.hpp>
 
+#include <algorithm>
 #include <charconv>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -36,6 +39,103 @@
 namespace psio {
 
    namespace pjson_detail {
+
+      // mantissa × 10^scale as JSON number text, exactly. Plain notation
+      // while that stays short; an exponent otherwise (`1e400`).
+      inline void emit_decimal(std::string& out, __int128 m, std::int32_t scale)
+      {
+         if (m == 0)
+         {
+            out.push_back('0');
+            return;
+         }
+         char              digits[40];
+         std::size_t       nd  = 0;
+         unsigned __int128 mag = m < 0 ? static_cast<unsigned __int128>(-(m + 1)) + 1
+                                       : static_cast<unsigned __int128>(m);
+         while (mag != 0)
+         {
+            digits[nd++] = static_cast<char>('0' + static_cast<int>(mag % 10));
+            mag /= 10;
+         }
+         std::reverse(digits, digits + nd);
+         if (m < 0) out.push_back('-');
+         const std::int64_t point = static_cast<std::int64_t>(nd) + scale;  // digits before the point
+         if (scale >= 0 && scale <= 20)
+         {
+            out.append(digits, nd);
+            out.append(static_cast<std::size_t>(scale), '0');
+         }
+         else if (scale < 0 && point > 0)
+         {
+            out.append(digits, static_cast<std::size_t>(point));
+            out.push_back('.');
+            out.append(digits + point, nd - static_cast<std::size_t>(point));
+         }
+         else if (scale < 0 && point > -7)
+         {
+            out.append("0.");
+            out.append(static_cast<std::size_t>(-point), '0');
+            out.append(digits, nd);
+         }
+         else
+         {
+            // d.ddde±x
+            out.push_back(digits[0]);
+            if (nd > 1)
+            {
+               out.push_back('.');
+               out.append(digits + 1, nd - 1);
+            }
+            out.push_back('e');
+            char       tmp[16];
+            const auto r = std::to_chars(tmp, tmp + sizeof(tmp), point - 1);
+            out.append(tmp, r.ptr);
+         }
+      }
+
+      inline void emit_u128(std::string& out, unsigned __int128 mag)
+      {
+         char        digits[40];
+         std::size_t nd = 0;
+         do
+         {
+            digits[nd++] = static_cast<char>('0' + static_cast<int>(mag % 10));
+            mag /= 10;
+         } while (mag != 0);
+         std::reverse(digits, digits + nd);
+         out.append(digits, nd);
+      }
+
+      inline void emit_base64(std::string& out, const std::uint8_t* p, std::size_t n)
+      {
+         static constexpr char alphabet[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+         std::size_t i = 0;
+         for (; i + 2 < n; i += 3)
+         {
+            const std::uint32_t v = (std::uint32_t{p[i]} << 16) | (std::uint32_t{p[i + 1]} << 8) | p[i + 2];
+            out.push_back(alphabet[v >> 18]);
+            out.push_back(alphabet[(v >> 12) & 63]);
+            out.push_back(alphabet[(v >> 6) & 63]);
+            out.push_back(alphabet[v & 63]);
+         }
+         if (i + 1 == n)
+         {
+            const std::uint32_t v = std::uint32_t{p[i]} << 16;
+            out.push_back(alphabet[v >> 18]);
+            out.push_back(alphabet[(v >> 12) & 63]);
+            out.append("==");
+         }
+         else if (i + 2 == n)
+         {
+            const std::uint32_t v = (std::uint32_t{p[i]} << 16) | (std::uint32_t{p[i + 1]} << 8);
+            out.push_back(alphabet[v >> 18]);
+            out.push_back(alphabet[(v >> 12) & 63]);
+            out.push_back(alphabet[(v >> 6) & 63]);
+            out.push_back('=');
+         }
+      }
 
       // Cold path for raw_text: per-character JSON escape pass. Out
       // of line so the hot path (escape_form / binary memcpy) stays
@@ -142,11 +242,7 @@ namespace psio {
                   // via the i128 helper (cast through __int128).
                   __uint128_t mag = 0;
                   std::memcpy(&mag, p + 1, bc);
-                  char tmp[40];
-                  std::size_t n =
-                      i128_to_chars(tmp, sizeof(tmp),
-                                    static_cast<__int128>(mag));
-                  out.append(tmp, n);
+                  emit_u128(out, mag);
                }
                return;
             }
@@ -168,11 +264,9 @@ namespace psio {
                {
                   __uint128_t mag = 0;
                   std::memcpy(&mag, p + 1, bc);
-                  char tmp[40];
-                  std::size_t n =
-                      i128_to_chars(tmp, sizeof(tmp),
-                                    -static_cast<__int128>(mag));
-                  out.append(tmp, n);
+                  // (The magnitude is unsigned: 128 bits of it.)
+                  out.push_back('-');
+                  emit_u128(out, mag);
                }
                return;
             }
@@ -186,13 +280,9 @@ namespace psio {
                std::size_t  n =
                    read_varint62(p + 1 + bc, size - 1 - bc, scale);
                (void)n;
-               // Render as double via mantissa × 10^scale.
-               // For exact-decimal-preservation cases this loses
-               // formatting fidelity; same tradeoff as view_to_json.
-               double d = pjson_number{m, scale}.to_double();
-               char   tmp[32];
-               auto   r = std::to_chars(tmp, tmp + sizeof(tmp), d);
-               out.append(tmp, r.ptr);
+               // The exact decimal: a decimal holds what a double cannot
+               // (more than 17 digits, exponents beyond ±308).
+               emit_decimal(out, m, scale);
                return;
             }
             case t_ieee_float:
@@ -223,6 +313,10 @@ namespace psio {
                   throw std::runtime_error(
                       "pjson_to_json: ieee_float width not supported");
                }
+               // §7.3: JSON has no NaN or infinity. An error, never `inf`
+               // or `null` in their place.
+               if (!std::isfinite(d))
+                  throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
                char tmp[32];
                auto r = std::to_chars(tmp, tmp + sizeof(tmp), d);
                out.append(tmp, r.ptr);
@@ -245,9 +339,10 @@ namespace psio {
             }
             case t_bytes:
             {
-               // TODO: proper base64. Stub: emit as quoted bytes.
+               // §4.10 hint 0: standard base64, padded. (Raw octets are
+               // not JSON text.)
                out.push_back('"');
-               out.append(reinterpret_cast<const char*>(p + 1), size - 1);
+               emit_base64(out, p + 1, size - 1);
                out.push_back('"');
                return;
             }
@@ -378,6 +473,8 @@ namespace psio {
                      case tac_f32:
                      {
                         float v; std::memcpy(&v, eb, 4);
+                        if (!std::isfinite(v))
+                           throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
                         char tmp[32];
                         auto r =
                             std::to_chars(tmp, tmp + sizeof(tmp), v);
@@ -387,6 +484,8 @@ namespace psio {
                      case tac_f64:
                      {
                         double v; std::memcpy(&v, eb, 8);
+                        if (!std::isfinite(v))
+                           throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
                         char tmp[32];
                         auto r =
                             std::to_chars(tmp, tmp + sizeof(tmp), v);
@@ -406,9 +505,34 @@ namespace psio {
                // low_nibble = 0: single object (handled below)
                // low_nibble = 1: row_array — not handled by direct walker yet,
                // fall through to error.
+               if (low == object_form_row_array)
+               {
+                  // §5.2.1: an array of objects that share their keys. Read
+                  // through the view, which places every record and field.
+                  const pjson_view rows{p, size};
+                  const std::size_t n = rows.count();
+                  out.push_back('[');
+                  for (std::size_t i = 0; i < n; ++i)
+                  {
+                     if (i) out.push_back(',');
+                     out.push_back('{');
+                     bool first = true;
+                     rows.at(i).for_each_field([&](std::string_view k, pjson_view field) {
+                        if (!first) out.push_back(',');
+                        first = false;
+                        out.push_back('"');
+                        out.append(k);
+                        out.push_back('"');
+                        out.push_back(':');
+                        direct_pjson_to_json(out, field.data(), field.size());
+                     });
+                     out.push_back('}');
+                  }
+                  out.push_back(']');
+                  return;
+               }
                if (low != 0)
-                  throw std::runtime_error(
-                     "pjson_to_json: row_array direct walker NYI");
+                  throw std::runtime_error("pjson_to_json: invalid object form");
                std::uint8_t  slot_w_code = p[1] & 0x03;
                std::size_t   slot_w      = width_bytes(slot_w_code);
                std::size_t   slot_stride = slot_w + 1;
@@ -477,6 +601,11 @@ namespace psio {
    // similar for large.
    inline std::string pjson_to_json(std::span<const std::uint8_t> bytes)
    {
+      // The walker reads a frame without comparing anything: the bytes are
+      // validated first, so it is never handed anything else. What the
+      // validator accepts, this converts (gofractally/psio#17).
+      if (!pjson::validate(bytes))
+         throw std::runtime_error("pjson_to_json: the bytes are not a pjson value");
       std::string out;
       out.reserve(bytes.size());
       pjson_detail::direct_pjson_to_json(out, bytes.data(), bytes.size());
@@ -487,6 +616,8 @@ namespace psio {
    inline void pjson_to_json(std::span<const std::uint8_t> bytes,
                              std::string&                  out)
    {
+      if (!pjson::validate(bytes))
+         throw std::runtime_error("pjson_to_json: the bytes are not a pjson value");
       out.clear();
       pjson_detail::direct_pjson_to_json(out, bytes.data(), bytes.size());
    }

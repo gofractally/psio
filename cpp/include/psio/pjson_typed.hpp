@@ -19,6 +19,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -200,7 +201,16 @@ namespace psio {
       {
          if constexpr (std::is_same_v<F, bool>) return v.as_bool();
          else if constexpr (std::is_integral_v<F>)
-            return static_cast<F>(v.as_int64());
+         {
+            // The wire integer is up to 128 bits; the member is F. A value
+            // F cannot hold is an error, not a wrapped one (and a uint64_t
+            // above 2^63 is read as what it is).
+            const __int128 x = v.is_integer() ? v.as_int128() : static_cast<__int128>(v.as_int64());
+            if (x < static_cast<__int128>(std::numeric_limits<F>::min()) ||
+                x > static_cast<__int128>(std::numeric_limits<F>::max()))
+               throw std::out_of_range("pjson: an integer does not fit the member's type");
+            return static_cast<F>(x);
+         }
          else if constexpr (std::is_floating_point_v<F>)
             return static_cast<F>(v.as_double());
          else if constexpr (std::is_same_v<F, std::string>)
@@ -405,6 +415,7 @@ namespace psio {
          else if constexpr (std::is_floating_point_v<F>)
          {
             if (!std::isfinite(v)) return 9;
+            if (v == 0 && std::signbit(v)) return 3;  // -0.0: binary16
             pjson_number n   = pjson_number::from_double(static_cast<double>(v));
             std::size_t  dec = number_size(n);
             return dec < 9 ? dec : 9;
