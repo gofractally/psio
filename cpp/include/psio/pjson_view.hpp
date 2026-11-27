@@ -351,7 +351,7 @@ namespace psio {
             switch (synth_param_)
             {
                case tac_f32:   // through the number it stands for (pjson_number_model.hpp)
-               { float f;  std::memcpy(&f, data_, 4); return to_double(float_reads_as(f)); }
+               { float f;  std::memcpy(&f, data_, 4); return binary32_as_double(f); }
                case tac_f64:
                { double d; std::memcpy(&d, data_, 8); return d; }
                default:
@@ -376,7 +376,7 @@ namespace psio {
                // number the float stands for: not a widening cast.
                float f;
                std::memcpy(&f, data_ + 1, 4);
-               return to_double(float_reads_as(f));
+               return binary32_as_double(f);
             }
             if (width_bits == ieee_width_f16)
             {
@@ -679,7 +679,7 @@ namespace psio {
          {
             case pjson_detail::tac_f32:
             { float v;  std::memcpy(&v, eb, 4);
-              return pjson_detail::to_double(pjson_detail::float_reads_as(v)); }
+              return pjson_detail::binary32_as_double(v); }
             case pjson_detail::tac_f64:
             { double v; std::memcpy(&v, eb, 8); return v; }
             // Integer fall-throughs: explicit conversion to double.

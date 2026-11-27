@@ -21,6 +21,7 @@
 #include <cstring>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <span>
 #include <string>
 #include <string_view>
@@ -280,6 +281,76 @@ namespace psio {
                   return out;
                }
             }
+            // A typed integer array of another width: a list's form is its
+            // values', so a list of u32 holding small numbers arrives as u8.
+            // One plain loop per stored width; an element E cannot hold is
+            // an error.
+            if constexpr (std::is_floating_point_v<E>)
+            {
+               // A list of floats holding integers arrives as an integer
+               // array.
+               using namespace pjson_detail;
+               if (v.is_typed_array() && !typed_array_is_float(v.typed_array_elem_code()))
+               {
+                  const std::size_t   n    = v.count();
+                  const std::uint8_t* from = v.data() + 1;
+                  out.resize(n);
+                  const auto widen = [&]<typename W>(W) {
+                     for (std::size_t i = 0; i < n; ++i)
+                     {
+                        W x;
+                        std::memcpy(&x, from + i * sizeof(W), sizeof(W));
+                        out[i] = static_cast<E>(x);
+                     }
+                  };
+                  switch (v.typed_array_elem_code())
+                  {
+                     case tac_i8:  widen(std::int8_t{}); break;
+                     case tac_i16: widen(std::int16_t{}); break;
+                     case tac_i32: widen(std::int32_t{}); break;
+                     case tac_i64: widen(std::int64_t{}); break;
+                     case tac_u8:  widen(std::uint8_t{}); break;
+                     case tac_u16: widen(std::uint16_t{}); break;
+                     case tac_u32: widen(std::uint32_t{}); break;
+                     default:      widen(std::uint64_t{}); break;
+                  }
+                  return out;
+               }
+            }
+            if constexpr (std::is_integral_v<E> && !std::is_same_v<E, bool>)
+            {
+               using namespace pjson_detail;
+               if (v.is_typed_array() && !typed_array_is_float(v.typed_array_elem_code()))
+               {
+                  const std::size_t   n    = v.count();
+                  const std::uint8_t* from = v.data() + 1;
+                  out.resize(n);
+                  bool       fits = true;
+                  const auto widen = [&]<typename W>(W) {
+                     for (std::size_t i = 0; i < n; ++i)
+                     {
+                        W x;
+                        std::memcpy(&x, from + i * sizeof(W), sizeof(W));
+                        fits   = fits && std::in_range<E>(x);
+                        out[i] = static_cast<E>(x);
+                     }
+                  };
+                  switch (v.typed_array_elem_code())
+                  {
+                     case tac_i8:  widen(std::int8_t{}); break;
+                     case tac_i16: widen(std::int16_t{}); break;
+                     case tac_i32: widen(std::int32_t{}); break;
+                     case tac_i64: widen(std::int64_t{}); break;
+                     case tac_u8:  widen(std::uint8_t{}); break;
+                     case tac_u16: widen(std::uint16_t{}); break;
+                     case tac_u32: widen(std::uint32_t{}); break;
+                     default:      widen(std::uint64_t{}); break;
+                  }
+                  if (!fits)
+                     throw std::out_of_range("pjson: an integer does not fit the member's type");
+                  return out;
+               }
+            }
             //  Fallback: walk a generic array, one element at a time.
             std::size_t n = v.count();
             out.reserve(n);
@@ -425,7 +496,7 @@ namespace psio {
             // The number the float stands for, in its one canonical form
             // (psio/pjson_number_model.hpp).
             std::uint8_t buf[max_number_size + 8];
-            return canonical_number_bytes(native_number(v), buf);
+            return canonical_native_bytes(v, buf);
          }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
@@ -514,7 +585,7 @@ namespace psio {
          else if constexpr (std::is_floating_point_v<F>)
          {
             std::uint8_t buf[max_number_size + 8];
-            const auto   n = canonical_number_bytes(native_number(v), buf);
+            const auto   n = canonical_native_bytes(v, buf);
             std::memcpy(dst + pos, buf, n);
             return n;
          }
@@ -559,7 +630,7 @@ namespace psio {
                // memcpy when that is E's own width); the generic empty
                // array for an empty list.
                const std::span<const E> list{v.data(), v.size()};
-               return encode_typed_list_at<E>(dst, pos, list, typed_list_code(list));
+               return encode_typed_list<E>(dst, pos, list);
             }
             else if constexpr (Reflected<E>)
             {
