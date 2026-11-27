@@ -33,6 +33,11 @@ psio::pjson_struct!(Strings { values: Vec<String> });
 struct Bytes { values: Vec<u8> }
 psio::pjson_struct!(Bytes { values: Vec<u8> });
 
+// A typed number is stored as its type says (C++ InteropNumbers).
+#[derive(Debug, PartialEq, Default)]
+struct Numbers { small: u16, f: f32, d: f64, whole: f64, fs: Vec<f32>, ds: Vec<f64>, is: Vec<i64>, us: Vec<u16> }
+psio::pjson_struct!(Numbers { small: u16, f: f32, d: f64, whole: f64, fs: Vec<f32>, ds: Vec<f64>, is: Vec<i64>, us: Vec<u16> });
+
 fn fixtures(format: &str) -> Vec<(String, Vec<u8>)> {
     let all: serde_json::Value = serde_json::from_str(include_str!("fixtures/cpp-golden.json")).unwrap();
     all.as_array().unwrap().iter().filter(|f| f["format"] == format)
@@ -175,8 +180,13 @@ fn cpp_pjson() {
 #[test]
 fn cpp_pjson_numbers() {
     for (id, bytes) in fixtures("pjson_f64") {
+        // A number with no declared type: the form its value gives it (the
+        // id is the bits of the double whose shortest digits it is). A typed
+        // f64 is its bits; the canonical pass over that, as a document
+        // without types, gives the row.
         let value = f64::from_bits(id.parse().unwrap());
-        assert_eq!(psio::pjson::to_pjson(&value), bytes, "pjson double {value} ({id})");
+        assert_eq!(psio::pjson::to_pjson(&value)[0], 0x63, "{id}");
+        assert_eq!(psio::pjson::canonicalize(&psio::pjson::to_pjson(&value)).unwrap(), bytes, "pjson number {value} ({id})");
         let decoded: f64 = psio::pjson::from_pjson(&bytes).unwrap();
         if value.is_nan() { assert!(decoded.is_nan()); }
         else { assert_eq!(decoded, value); }
@@ -257,6 +267,13 @@ fn cpp_pjson_typed_records() {
                 let value = Strings { values: if id == "strings" { vec!["hello".into(), "".into(), "x".repeat(300)] } else { vec![] } };
                 assert_eq!(to_pjson(&value), bytes, "{id}");
                 assert_eq!(from_pjson::<Strings>(&bytes).unwrap(), value, "{id}");
+            }
+            "numbers" | "empty_numbers" => {
+                let value = if id == "numbers" {
+                    Numbers { small: 5, f: 0.1, d: 0.1, whole: 5.0, fs: vec![0.1, 0.2], ds: vec![0.1, 0.2], is: vec![1, 2, 3], us: vec![1, 2, 3] }
+                } else { Numbers::default() };
+                assert_eq!(to_pjson(&value), bytes, "{id}");
+                assert_eq!(from_pjson::<Numbers>(&bytes).unwrap(), value, "{id}");
             }
             "bytes" | "empty_bytes" => {
                 let value = Bytes { values: if id == "bytes" { vec![0,127,255] } else { vec![] } };

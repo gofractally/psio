@@ -31,7 +31,7 @@ Implementations: `cpp/include/psio/pjson*.hpp`, `rust/psio/src/pjson*.rs`,
 | §7 JSON round trip | C++ (needs simdjson for JSON → pjson) and Rust; JS has no JSON-text path |
 | §7.5 emitter options | **not implemented** |
 | §12.1 canonical and lazy transcode | implemented in C++ and Rust |
-| §15 canonical encoding | implemented in C++, Rust, JS: every encoder writes it and `validate` accepts nothing else |
+| §15 canonical encoding | implemented in C++, Rust, JS: one encoding per value of a given type; every encoder writes it and `validate` accepts nothing else |
 | §16 type caps | C++ `maxDynamicData` only |
 | pjson → I-JSON | **not implemented** |
 | Python | **no pjson** |
@@ -136,10 +136,12 @@ speeds.
 
 ### Wire size: canonical and lazy
 
-pjson has one encoding per value, the **canonical form** (§15): an array of
-numbers is a typed array (§5.1.1), an array of objects with the same member
-names is a row array (§5.2.1). Every encoder writes it. Measured against
-compact JSON text (C++, the shapes of §Headline numbers):
+pjson has one encoding per value of a given type, the **canonical form**
+(§15). A typed encoder writes its type's; for JSON text that is not a type
+the canonical transcode chooses the compact forms from the data — a typed
+array (§5.1.1) for numbers, a row array (§5.2.1) for objects with the same
+member names. Measured against compact JSON text (C++, the shapes of
+§Headline numbers):
 
 | Document | JSON | canonical pjson | lazy transcode |
 |---|---|---|---|
@@ -148,10 +150,9 @@ compact JSON text (C++, the shapes of §Headline numbers):
 | API document, 700 records of 7 members | 96 050 B | 50 178 B (52 %) | 90 407 B (94 %) |
 | 100 objects of two alternating shapes | 2 101 B | 2 354 B (112 %) | 2 354 B (112 %) |
 
-A typed encoder reaches the canonical form from what its type declares; for
-JSON text that is not a type the canonical transcode has to look at every
-array. The **lazy transcode** (§12.1) is the one path that does not: it
-copies what it parses, is about the size of the text, and is not canonical.
+The canonical transcode has to look at every array. The **lazy transcode**
+(§12.1) does not: it copies what it parses, is about the size of the text,
+and is not canonical.
 The last row is the document with nothing to compact: generic objects carry
 a hash and a slot per member.
 
@@ -169,7 +170,7 @@ The format is designed for:
   that want sort-based canonicalization (e.g. for cross-producer
   byte-equality) run that sort in their own layer before encoding;
   pjson's role is to preserve whatever order the layer above
-  declared as significant. See §15.5.
+  declared as significant. See §15.4.
 * **Single-allocation, single-pass encode** — no DOM tape, no
   intermediate value tree. The encoder appends children forward and
   writes the index at the tail.
@@ -961,7 +962,7 @@ is 30–50% smaller.
 
 #### 5.2.1.5 Encoder rule
 
-An array is a row array in canonical form (§15.4) exactly when it has at
+An array is a row array in canonical form (§15.2) exactly when it has at
 least one element and every element is a single object with:
 - the same number of names K ≥ 1,
 - the same K names (byte-equal) in the same order,
@@ -1140,10 +1141,10 @@ byte-for-byte. Specifically:
   that want indented output.
 * Trailing zeros in decimals are normalized (`100.00` → `100`).
 * Scientific notation in number tokens is **not** preserved: `1.5e10` is
-  the number 15000000000 and is written so. A number is written from the
-  value it is, so one value has one text whichever form carries it:
-  integers in full, other numbers in plain notation while that stays
-  short and `d.ddde±x` otherwise.
+  the number 15000000000 and is written so: integers in full, other
+  numbers in plain notation while that stays short and `d.ddde±x`
+  otherwise. A float is written as its shortest digits at its stored
+  width (§15.6).
 * A JSON string stays a string, even when its content looks like a number
   (`numeric_string`, §4.8, is not implemented).
 * A JSON number keeps its value exactly or is an error: a number with more
@@ -1567,20 +1568,11 @@ tail.
 
 ### 12.1 Typed encoders, the canonical transcode and the lazy transcode
 
-Every encoder writes the canonical form (§15). How it gets there depends on
-what it knows.
-
 **A typed encoder** (a reflected record, a list of a known element type)
-takes from the type everything the type decides: a list of records is a row
-array, a string is raw text, members are in declaration order, an absent
-optional is `null`. What only the values decide it reads from the values,
-in one linear pass per list:
-
-| List | What is looked at |
-|---|---|
-| integers | the largest and smallest element (the width, §15.4) |
-| floats | whether every element is an integer, and whether binary32 carries every element; both stop at the first element that says no |
-| records | nothing (an empty list is the generic empty array) |
+writes what its type says (§15.1) and does not look at the data: a list of
+numbers is one copy at its declared element width, a float is its bits, a
+list of records is a row array, a string is raw text, members are in
+declaration order, an absent optional is `null`.
 
 **JSON text of a known type** is read as the type and encoded by the typed
 encoder: it is not either of the two transcodes below.
@@ -1588,9 +1580,10 @@ encoder: it is not either of the two transcodes below.
 **JSON text that is not a type** has two transcodes, and the caller says
 which:
 
-* **Canonical** (`pjson_json::from_json`, `psio::pjson`). The canonical
-  form of the document. It looks at every array: are the elements all
-  numbers, all objects of one shape.
+* **Canonical** (`pjson_json::from_json`, `psio::pjson`). The compact forms
+  are chosen from the data (§15.2): the narrowest integer width, decimal or
+  binary64, typed arrays, row arrays. It looks at every array. This is the
+  one place where a pass over the values is paid, because it was asked for.
 * **Lazy** (`pjson_json::from_json_lazy`, `psio::pjson_lazy`). What is
   parsed is copied as it comes: strings in `escape_form`, arrays generic,
   numbers as spelled where that is exact. The result is well-formed and
@@ -1598,18 +1591,18 @@ which:
   writer of which that is true. `canonicalize` turns such a frame into the
   canonical one.
 
-`psio::pjson` validates and decodes canonical frames only (§15.7);
+`psio::pjson` validates and decodes canonical frames only (§15.5);
 `psio::pjson_lazy` takes any well-formed frame. The untyped view (§10, §11)
 and the JSON emitter read both.
 
 Measured (C++, `clang -O3`, Apple M-series; the canonical transcode is the
 lazy one followed by `canonicalize`):
 
-| Document | lazy | canonical adds |
+| Document | lazy | canonical |
 |---|---|---|
-| 100 × `{"x":1,"y":2,"z":3}` | 5.9 µs | 4.4 µs (+75 %) |
-| `[1, 2, …, 1000]` | 15.9 µs | 10.6 µs (+67 %) |
-| API document, 700 records | 151 µs | 119 µs (+79 %) |
+| 100 × `{"x":1,"y":2,"z":3}` | 6.1 µs | 12.4 µs |
+| `[1, 2, …, 1000]` | 15.3 µs | 28.6 µs |
+| API document, 700 records | 160 µs | 313 µs |
 
 ## 13. Versioning
 
@@ -1734,93 +1727,100 @@ A reference test corpus lives at `cpp/tests/pjson_tests.cpp`
 
 ## 15. Canonical Encoding
 
-A pjson value has exactly **one** canonical encoding, and it is a function
-of the value alone: not of the type that held it, the language that wrote
-it, or how its source spelled it. Every encoder writes the canonical form,
-and `validate` accepts nothing else, so **equal values are equal bytes** —
-for hashing, signatures, deduplication and comparison by `memcmp`. The one
-writer of non-canonical frames is the lazy JSON transcode (§12.1), read
-under its own name.
+**Canonical means one encoding per value of a given type.** A typed encoder
+is deterministic and writes what its type says, with no look at the data;
+what it writes is what `validate` accepts for that type. So two values of
+one type are equal exactly when their bytes are — for hashing, signatures,
+deduplication and comparison by `memcmp`.
 
-### 15.1 What a value is
+A document **without** types (JSON text that is not a type, an array of a
+dynamic value) has no declared widths. Its compact forms are chosen **from
+the data**, by the canonical pass, which the caller asks for (§12.1). The
+result is canonical too, and is the one encoding of that document.
 
-| Kind | The value is | Not part of the value |
+Byte equality therefore holds within a type, and within untyped documents,
+not across the two: `vector<u32>{1,2,3}` is three 32-bit elements, and the
+JSON text `[1,2,3]` is three 8-bit ones. Both read back as 1, 2, 3.
+
+The one writer of non-canonical frames is the lazy JSON transcode (§12.1),
+read under its own name.
+
+### 15.1 Typed values
+
+| Type | Encoding | Cost |
 |---|---|---|
-| null, bool | itself | |
-| number | a decimal number — an integer or `mantissa × 10^scale` — or one of −0, NaN, +Inf, −Inf | the width or signedness of the type that held it; how it was spelled (`1e2`, `100`, `100.0`) |
-| string | a sequence of Unicode scalar values | whether its source had escapes |
-| bytes | a sequence of octets | how it is shown in text |
-| array | a sequence of values | whether its source was a list, a fixed array or a tuple |
-| object | a sequence of (name, value) members, in order; a name may repeat | |
+| null, bool | one byte | |
+| integer of any width | `uint_inline` (0..15), `nint_inline` (−15..−1), else `uint` / `negint` with the fewest bytes. A `u16` 5 and a `u64` 5 are both `25` | one look at the value |
+| `f32` | `ieee_float` binary32: its bits | none |
+| `f64` | `ieee_float` binary64: its bits | none |
+| string | `raw_text` (flag 0), valid UTF-8 (§15.3) | a UTF-8 check |
+| bytes | tag `A0` | one copy |
+| list of an integer or float type | typed array (§5.1.1) of the **declared** element code, in one copy: a `vector<u32>` is `u32` elements whatever they hold | one copy, no scan |
+| list of records | row array (§5.2.1), smallest `slot_w` and `recoff_w` | |
+| any other list | generic array | |
+| an empty list of anything | the generic empty array `B0 00 00 00` | |
+| record | object, members in declaration order, smallest slot width | |
+| absent optional | `null`, with its name present | |
 
-**5 is 5.** A `u16` 5, a `u64` 5, an `f64` 5.0 and JSON `5` or `5.0` are one
-value and one byte, `25`. The reader's type gives the width back, not the
-bytes.
+A float is stored as the float it is. There is no conversion through
+decimal and a double is never narrowed. As a scalar, a NaN is the quiet NaN
+of its width (§15.2.1); a list is copied whole, bit for bit.
 
-**What a binary float stands for** (default chosen, awaiting the owner's
-confirmation; gofractally/psio#17): the shortest decimal that reads back to
-it **at its own width** — its fewest significant digits, times a power of
-ten. So `f32 0.1f`, `f64 0.1` and JSON `0.1` are one value, `0.1`; the
-double `(double)0.1f` is another, `0.10000000149011612`. A binary float
-frame of width *w* holding bits *x* **denotes** that decimal, and a width
-**carries** a number `D` exactly when the float of that width nearest `D`
-denotes `D`.
+The reader's type gives the width back: an integer member reads any number
+that is an integer and fits; a float member reads any number; a list reads a
+typed array of any element code, and the generic empty array.
 
-Consequences every implementation must get right:
+### 15.2 Values without a type
 
-* A binary32 frame (or typed `f32` element) read as a binary64 is the
-  double nearest the number it denotes — through the decimal, **not** a
-  widening cast. Widening `0.1f` would give `0.10000000149011612`.
-* Reading as the same width gives the same bits back: `f32` → pjson → `f32`
-  and `f64` → pjson → `f64` are exact (NaN payloads excepted, §15.2.1).
-* The implementations keep this reading in one place (C++
-  `pjson_detail::float_model`, Rust `pjson_canonical::FLOAT_MODEL`, JS
-  `PJSON_FLOAT_MODEL`); the vector sets `pjson_f32` and `pjson_list_f32`
-  are the ones that depend on it.
+These rules are applied by the canonical pass (§12.1) and by the encoders of
+dynamic values, to what carries no type.
 
-**A typed value** is the JSON value PSIO's `json` format gives it, except
-that a byte sequence is `bytes`: a record is an object with its members in
-declaration order, an absent optional is `null` with its name present, a
-list, fixed array or tuple is an array.
+**A number** is a decimal value — an integer or `mantissa × 10^scale` — or
+−0:
 
-### 15.2 Numbers
-
-| Number | Canonical encoding |
+| Number | Encoding |
 |---|---|
-| an integer of magnitude below 2^128 | `uint_inline` (0..15), `nint_inline` (−15..−1), else `uint` / `negint` with the fewest bytes |
-| any other finite number | the smallest of: `decimal` with a mantissa that is not a multiple of 10; `ieee_float` binary32, if it carries the number; `ieee_float` binary64, if it carries the number. A tie goes to the float, the narrower first |
-| −0 | binary16 `61 00 80` |
-| NaN | binary16 `61 00 7E` (one NaN: the quiet one, §15.2.1) |
-| +Inf, −Inf | binary16 `61 00 7C`, `61 00 FC` |
+| an integer of magnitude below 2^128 | the integer forms with the fewest bytes |
+| any other finite number | the smaller of `decimal` with a mantissa that is not a multiple of 10, and binary64 **if binary64 carries it**; a tie goes to the float |
+| −0 | binary64 |
 
-Examples:
+binary64 *carries* a number when the double nearest it has that number as
+its shortest digits (the fewest significant digits that read back to the
+double, times a power of ten). So `0.1` is the decimal `70 02 01` (3 bytes),
+`0.3333333333333333` is binary64 (9 bytes; the decimal would be 10), and
+`1e400` or a 36-digit fraction, which no double is, stays decimal. `100.00`
+and `1e2` are the integer `40 64`.
 
-| Source | Number | Bytes |
-|---|---|---|
-| `f32 0.1f`, `f64 0.1`, JSON `0.1` | `0.1` | `70 02 01` (decimal, 3 B) |
-| `f32` one third, `f64 0.33333334`, JSON `0.33333334` | `0.33333334` | `62 AB AA AA 3E` (binary32, 5 B; the decimal is 6) |
-| `f64` one third | `0.3333333333333333` | binary64, 9 B |
-| `f64 (double)0.1f` | `0.10000000149011612` | binary64, 9 B |
-| `f64 2^60` | `1152921504606847000` (its shortest digits) | `uint`, 9 B |
-| JSON `1e400` | `1e400` | `70 02 60 0C` (decimal) |
-| JSON `100.00`, `1e2` | `100` | `40 64` |
+A float frame met on this path — when a frame is canonicalized as an untyped
+document — is the shortest decimal that reads back to it **at its own
+width**: a binary32 holding 0.1 is the number 0.1.
 
-`ieee_float` bit 3 (the notation hint) is clear in canonical form. binary16
-is canonical only for −0, NaN and the infinities. `numeric_string` (§4.8)
-is never canonical.
+**An array**, in this order:
 
-(Earlier drafts of this section took the shortest decimal at the width of
-the *narrowest* float whose bits survive. That turned the double
-`(double)0.1f` into `0.1`, which reads back as a different double. A width
-is narrowed to only when it carries the same number.)
+1. empty: the generic empty array;
+2. every element an integer of at most 64 bits: a typed array of the
+   **narrowest** code that holds every element — `u8`, `u16`, `u32`, `u64`
+   if none is negative, else `i8`, `i16`, `i32`, `i64`;
+3. every element a number binary64 carries, and the typed array not larger
+   than the generic one would be: typed `f64`;
+4. every element a single object with the same member names in the same
+   order — at least one name, each under 255 bytes: a row array, with the
+   smallest widths. One element is enough;
+5. otherwise generic, each element in canonical form.
+
+So untyped `[1, 2, 3]` is `B5 01 02 03 03 00`; `[0.1, 0.2]` is a generic
+array of two decimals (12 bytes; typed `f64` would be 19); three doubles
+with 16 digits each are typed `f64`.
+
+The canonical pass never writes binary32 or binary16: a number without a
+type has no reason to be one.
 
 #### 15.2.1 NaN and infinity
 
-IEEE-754 has many NaN bit patterns; pjson has one NaN. Canonical form is
-binary16 `0x7E00`; inside a typed array it is the quiet NaN of the element
-width (`0x7FC00000`, `0x7FF8000000000000`). A reader that needs a payload
-must carry it as bytes. Infinities keep their sign. A NaN or an infinity
-has no JSON text (§7.3).
+A scalar float NaN is written as the quiet NaN of its width (`0x7FC00000`,
+`0x7FF8000000000000`; binary16 `0x7E00`), and the validator refuses any
+other. Elements of a typed array are the list's bits as they are. A NaN or
+an infinity has no JSON text (§7.3).
 
 ### 15.3 Strings, names and bytes
 
@@ -1830,34 +1830,7 @@ has no JSON text (§7.3).
 * A member name is raw UTF-8 text (§4.9).
 * Bytes are tag `A0`; the low nibble is 0.
 
-### 15.4 Arrays
-
-In this order:
-
-1. **Empty**: the generic empty array, `B0 00 00 00` — whatever its element
-   type was.
-2. **Every element an integer of at most 64 bits** (fits `u64`, or `i64`
-   when any is negative): a typed array (§5.1.1) of the narrowest code that
-   holds every element — `u8`, `u16`, `u32`, `u64` if none is negative,
-   else `i8`, `i16`, `i32`, `i64`.
-3. **Every element a number binary32 carries**: typed `f32`.
-4. **Every element a number binary64 carries**: typed `f64`.
-5. **Every element a single object, with the same member names in the same
-   order** — at least one name, every name under 255 bytes: a row array
-   (§5.2.1) with the smallest `slot_w` and `recoff_w`. One element is
-   enough.
-6. **Otherwise**: generic, each element in canonical form.
-
-So `[1, 2, 3]` is `B5 01 02 03 03 00` from a `vector<u16>`, a `vector<u64>`,
-a `vector<double>` and JSON text alike; `[0.1, 0.2]` is a typed `f32` array
-from a `vector<float>`, a `vector<double>` and JSON text; `[1, "a"]`, an
-array of arrays and an array of objects of different shapes are generic.
-
-A typed reader therefore accepts any typed-array code for a list of
-numbers, and the generic empty array for any list. A zero-copy span of a
-typed array is available only when the stored code is the reader's.
-
-### 15.5 Objects and widths
+### 15.4 Objects and widths
 
 * An object is generic (§5.2); its members are in the order given and a
   repeated name is kept. pjson does not sort names: order is part of the
@@ -1867,45 +1840,70 @@ typed array is available only when the stored code is the reader's.
 * Slot offsets ascend and cover the value data with no gaps; hash bytes are
   the low byte of XXH3-64 of the name before its last dot (§5.3).
 
-### 15.6 Reaching the canonical form
-
-| Encoder | How |
-|---|---|
-| typed (a reflected type) | by type where the type decides; a linear look at a list's values for its width (§12.1). C++ writes it directly; Rust writes a well-formed frame and canonicalizes it |
-| dynamic value (`pjson_value`, `Value`, a JS value) | the value is encoded and brought to canonical form: an array built as generic is a typed array if its elements are numbers |
-| JSON text that is not a type | the canonical transcode (§12.1) |
-| any well-formed frame | `canonicalize` |
-
-### 15.7 Validation
+### 15.5 What the validator accepts
 
 `validate` (and so `decode`, and the typed validating read) accepts a frame
-exactly when it is the canonical encoding of its value: it is well-formed
-(§9) and equal to its own canonical form. A well-formed frame that is not —
-an integer in more bytes than it needs, a generic array of numbers, a
-string in `escape_form` — is refused by `psio::pjson` and accepted by
-`psio::pjson_lazy`.
+exactly when it is well-formed (§9) and every construct in it is the one
+encoding of its value **in the type it is written in**:
 
-Two canonical frames are byte-equal iff their values are equal.
+| Construct | Accepted |
+|---|---|
+| integer | the fewest bytes for its value |
+| decimal | mantissa not a multiple of 10; not an integer below 2^128 |
+| float | binary16, binary32 or binary64, any value; bit 3 clear; a NaN the quiet one |
+| string | `raw_text`, valid UTF-8 |
+| typed array | **any element code**, at least one element. A `u32` array holding small values is the encoding of a list of `u32`, so every typed encoder's output validates; `f32` and `f64` elements are both accepted |
+| generic array | not empty unless it is `B0 00 00 00`; not one the rules of §15.2 turn into a typed or a row array; smallest slot width |
+| row array | at least one record; smallest `slot_w` and `recoff_w` |
+| object | smallest slot width; names UTF-8 |
+
+There is one accepted encoding per type: a `u32` list cannot also be
+written with padding, wider slots or a longer count. What is refused is the
+alternative encodings of one value — an integer in more bytes than it
+needs, a decimal with a trailing zero, a string in `escape_form`, a generic
+array of integers, an empty typed array, the notation hint. `psio::pjson`
+refuses them; `psio::pjson_lazy` accepts any well-formed frame.
 
 The untyped view and the JSON emitter read any well-formed frame. A typed
 view's access by member index needs the canonical shape of its type and
 looks members up by name otherwise.
 
+### 15.6 Floats as JSON text, and across widths
+
+A float is written to JSON as the shortest digits that read back to it **at
+its stored width**: a binary32 holding 0.1 prints `0.1`, a binary64 prints
+its own shortest digits. A binary32 read as an `f64` is the float widened —
+a plain cast. So an `f32` written to JSON text and read back as an `f64` is
+the double nearest that text, not the float widened; the two differ, and
+that is inherent in printing a float by its own digits.
+
+### 15.7 Reaching the canonical form
+
+| Encoder | How |
+|---|---|
+| typed (a reflected type) | written as its type says (§15.1), with no pass over the data |
+| dynamic value (`pjson_value`, `Value`, a JS value) | each number in the type its variant names; an array, which has no element type, by §15.2. A JS `number` is a JSON number (§15.2) |
+| JSON text of a known type | read as the type, written by the typed encoder |
+| JSON text that is not a type | the canonical transcode (§12.1): §15.2 throughout |
+| any well-formed frame, as an untyped document | `canonicalize` |
+
 ### 15.8 Conformance
 
 `conformance/cpp-golden.json` carries, for C++, Rust and JS:
 
-* `pjson`, `pjson_f64`, `pjson_extra`, `pjson_typed`: values and their
-  canonical bytes;
-* `pjson_f32`, `pjson_list_i64`, `pjson_list_f64`, `pjson_list_f32`: native
-  floats and lists and their canonical bytes;
-* `pjson_to_json`: well-formed frames, canonical and not, each with its
-  JSON text and the canonical frame of its value (`canonical_hex`);
+* `pjson`, `pjson_extra`: dynamic values and their canonical bytes;
+* `pjson_typed`: typed records — lists at their declared width, floats as
+  their bits, empty lists — and their bytes;
+* `pjson_f64`, `pjson_list_i64`, `pjson_list_f64`: numbers and lists
+  **without** a type and the form their values give them;
+* `pjson_to_json`: well-formed frames, each with its JSON text, whether it
+  is canonical (`canonical`), and what the canonical pass gives for it as
+  an untyped document (`canonical_hex`);
 * `pjson_invalid`: bytes that are not a frame.
 
 `tools/check-pjson-validation.py` runs the three implementations over
 mutations of those frames and random bytes and requires the same verdict
-from both validators and the same canonical bytes.
+from both validators and the same bytes from the canonical pass.
 
 ## 16. Type-level caps
 

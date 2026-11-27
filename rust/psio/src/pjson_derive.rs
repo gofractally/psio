@@ -31,6 +31,9 @@ macro_rules! pjson_struct {
             }
         }
         impl $crate::pjson::Pjson for $Ty {
+            // An object of the members in order, in the smallest width: the
+            // record's encoding as written, when each member's is.
+            const PJSON_DIRECT: bool = true $(&& <$FTy as $crate::pjson::Pjson>::PJSON_DIRECT)+;
             fn pjson_size(&self) -> usize {
                 use $crate::pjson::{self, Pjson};
                 let mut vd: usize = 0;

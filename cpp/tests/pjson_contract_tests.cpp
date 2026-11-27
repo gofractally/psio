@@ -246,10 +246,10 @@ namespace
       if (!json_ok)
          REQUIRE(text == "pjson_to_json: NaN and infinity have no JSON form");
 
-      // The canonical form of a well-formed frame: it exists unless the
-      // frame holds text that is not text; it is canonical; it is its own
-      // canonical form; and it is the frame itself exactly when the frame
-      // is canonical.
+      // The canonical pass over a well-formed frame (as a document without
+      // types): it has a result unless the frame holds text that is not
+      // text; the result is canonical and is its own result; and a frame
+      // the pass leaves alone is canonical.
       Bytes made;
       bool  has_form = true;
       try
@@ -268,7 +268,8 @@ namespace
       t.canonical += canonical;
       REQUIRE(psio::pjson::validate(made));
       REQUIRE(psio::pjson::canonicalize(made) == made);
-      REQUIRE((made == bytes) == canonical);
+      if (made == bytes)
+         REQUIRE(canonical);
 #if defined(PSIO_HAVE_SIMDJSON) && PSIO_HAVE_SIMDJSON
       // ... and it is the same VALUE: the JSON text of the frame, read
       // back by the canonical transcoder, is the JSON text of its
@@ -424,23 +425,23 @@ TEST_CASE("pjson typed: every unsigned width reads back; a value the member cann
 TEST_CASE("pjson: a native minus zero keeps its sign", "[pjson][contract]")
 {
    const Bytes b = psio::pjson::encode(psio::pjson_value{-0.0});
-   CHECK(b == hex("610080"));
+   CHECK(b == hex("630000000000000080"));   // a double is its bits
    const auto back = psio::pjson::decode(b);
    REQUIRE(back.holds<double>());
    CHECK(std::signbit(std::get<double>(back.v)));
    CHECK(psio::pjson_to_json(b) == "-0");
-   CHECK(psio::pjson::encode(psio::pjson_value{0.0}) == hex("20"));
+   CHECK(psio::pjson::encode(psio::pjson_value{0.0}) == hex("630000000000000000"));
+   CHECK(psio::pjson::encode(psio::pjson_value{std::int64_t{0}}) == hex("20"));
 }
 
 TEST_CASE("pjson: NaN and infinity have no JSON form", "[pjson][contract]")
 {
-   // (The binary64 forms are well-formed; the canonical ones are binary16.)
-   for (const char* frame : {"63000000000000f07f", "63000000000000f8ff", "ba000000000000f07f0100", "61007c", "6100fc",
+   for (const char* frame : {"63000000000000f07f", "63000000000000f87f", "ba000000000000f07f0100", "61007c", "6100fc",
                              "61007e"})
    {
       const Bytes b = hex(frame);
       REQUIRE(psio::pjson_lazy::validate(b));
-      CHECK(psio::pjson::validate(b) == (b.size() == 3));
+      CHECK(psio::pjson::validate(b));   // a float is its bits (a scalar NaN: the quiet one)
       CHECK_THROWS_WITH(psio::pjson_to_json(b), "pjson_to_json: NaN and infinity have no JSON form");
    }
 }
@@ -471,8 +472,8 @@ TEST_CASE("pjson from JSON: a number keeps its value or is an error", "[pjson][c
    // Minus zero.
    CHECK(round("-0") == "-0");
    CHECK(round("-0.0") == "-0");
-   // (An array of numbers is a typed array: -0 in binary32.)
-   CHECK(psio::pjson_json::from_json("[-0e5]") == hex("b9000000800100"));
+   // (-0 is not an integer and has no decimal: binary64.)
+   CHECK(psio::pjson_json::from_json("[-0e5]") == hex("ba00000000000000800100"));
    CHECK(psio::pjson_json::from_json_lazy("[-0e5]") == hex("b000610080000100"));
    // §7.1: trailing zeros and exponent notation are not kept; the value is.
    CHECK(round("100.00") == "100");
@@ -573,40 +574,32 @@ namespace
    };
 }  // namespace
 
-TEST_CASE("pjson canonical: 5 is 5, whatever declared it", "[pjson][canonical]")
+TEST_CASE("pjson canonical: a typed value is written as its type says", "[pjson][canonical]")
 {
+   // An integer: the fewest bytes for its value, whatever its width.
    const Bytes five = hex("25");
    CHECK(typed<std::uint8_t>(5) == five);
    CHECK(typed<std::uint16_t>(5) == five);
    CHECK(typed<std::uint64_t>(5) == five);
    CHECK(typed<std::int32_t>(5) == five);
-   CHECK(typed<float>(5.0f) == five);
-   CHECK(typed<double>(5.0) == five);
-   CHECK(psio::pjson::encode(psio::pjson_value{std::int64_t{5}}) == five);
-   CHECK(psio::pjson::encode(psio::pjson_value{5.0}) == five);
    CHECK(typed<std::int64_t>(-5) == hex("35"));
-   CHECK(typed<double>(-5.0) == hex("35"));
-   // ... and read back as whatever the reader declares.
-   CHECK(typed_back<std::uint16_t>(five) == 5);
-   CHECK(typed_back<double>(five) == 5.0);
-   CHECK(typed_back<float>(five) == 5.0f);
-   CHECK(typed_back<std::uint8_t>(typed<double>(200.0)) == 200);
-   CHECK_THROWS(typed_back<std::uint8_t>(typed<double>(300.0)));
-   CHECK_THROWS(typed_back<std::uint32_t>(typed<double>(0.5)));
-   CHECK_THROWS(typed_back<std::uint32_t>(typed<std::int32_t>(-1)));
-
-   // Lists: the form is the values', not the element type's.
-   const Bytes one_two_three = hex("b50102030300");
-   CHECK(typed<std::vector<std::uint16_t>>({1, 2, 3}) == one_two_three);
-   CHECK(typed<std::vector<std::uint64_t>>({1, 2, 3}) == one_two_three);
-   CHECK(typed<std::vector<std::int32_t>>({1, 2, 3}) == one_two_three);
-   CHECK(typed<std::vector<double>>({1, 2, 3}) == one_two_three);
-   CHECK(typed<std::vector<float>>({1, 2, 3}) == one_two_three);
-   CHECK(typed_back<std::vector<std::uint64_t>>(one_two_three) == std::vector<std::uint64_t>{1, 2, 3});
-   CHECK(typed_back<std::vector<double>>(one_two_three) == std::vector<double>{1, 2, 3});
-   CHECK(typed<std::vector<std::int64_t>>({-1, 2}) == hex("b1ff020200"));
-   CHECK(typed<std::vector<std::int64_t>>({0, 256}) == hex("b6000000010200"));
-   // The empty list has one form.
+   CHECK(typed<std::uint32_t>(300) == hex("412c01"));
+   // A float: its bits, at its declared width. No decimal, no narrowing.
+   CHECK(typed<float>(0.1f) == hex("62cdcccc3d"));
+   CHECK(typed<double>(0.1) == hex("639a9999999999b93f"));
+   CHECK(typed<double>(5.0) == hex("630000000000001440"));
+   CHECK(typed<float>(5.0f) == hex("620000a040"));
+   CHECK(typed<double>(-0.0) == hex("630000000000000080"));
+   CHECK(typed<double>(static_cast<double>(0.1f)) == hex("63000000a09999b93f"));
+   // A list of numbers: a typed array of its declared element width, in
+   // one copy, whatever the values.
+   CHECK(typed<std::vector<std::uint16_t>>({1, 2, 3}) == hex("b60100020003000300"));
+   CHECK(typed<std::vector<std::uint32_t>>({1, 2, 3}) == hex("b70100000002000000030000000300"));
+   CHECK(typed<std::vector<std::int64_t>>({-1}) == hex("b4ffffffffffffffff0100"));
+   CHECK(typed<std::vector<float>>({0.1f, 0.2f}) == hex("b9cdcccc3dcdcc4c3e0200"));
+   CHECK(typed<std::vector<double>>({0.1, 0.2}) == hex("ba9a9999999999b93f9a9999999999c93f0200"));
+   CHECK(typed<std::vector<double>>({1, 2}) == hex("ba000000000000f03f00000000000000400200"));
+   // The empty list has one form, whatever its element type.
    const Bytes empty = hex("b0000000");
    CHECK(typed<std::vector<std::uint16_t>>({}) == empty);
    CHECK(typed<std::vector<double>>({}) == empty);
@@ -614,52 +607,49 @@ TEST_CASE("pjson canonical: 5 is 5, whatever declared it", "[pjson][canonical]")
    CHECK(typed<std::vector<std::string>>({}) == empty);
    CHECK(typed_back<std::vector<PcPoint>>(empty).empty());
    CHECK(typed_back<std::vector<std::uint16_t>>(empty).empty());
+
+   // Reading takes any form that carries the value: the reader's type
+   // gives the width back.
+   CHECK(typed_back<std::uint16_t>(five) == 5);
+   CHECK(typed_back<double>(five) == 5.0);
+   CHECK(typed_back<float>(five) == 5.0f);
+   CHECK(typed_back<std::uint8_t>(typed<double>(200.0)) == 200);
+   CHECK_THROWS(typed_back<std::uint8_t>(typed<double>(300.0)));
+   CHECK_THROWS(typed_back<std::uint32_t>(typed<double>(0.5)));
+   CHECK_THROWS(typed_back<std::uint32_t>(typed<std::int32_t>(-1)));
+   CHECK(typed_back<std::vector<std::uint64_t>>(hex("b50102030300")) == std::vector<std::uint64_t>{1, 2, 3});
+   CHECK(typed_back<std::vector<double>>(hex("b50102030300")) == std::vector<double>{1, 2, 3});
+   CHECK(typed_back<std::vector<std::uint16_t>>(typed<std::vector<std::uint64_t>>({1, 2, 3})) ==
+         std::vector<std::uint16_t>{1, 2, 3});
+   CHECK_THROWS(typed_back<std::vector<std::uint16_t>>(typed<std::vector<std::uint64_t>>({70000})));
 }
 
-TEST_CASE("pjson canonical: a float is the shortest decimal that reads back to it at its width", "[pjson][canonical]")
+TEST_CASE("pjson canonical: a float is its bits; as text, its shortest digits at its own width", "[pjson][canonical]")
 {
-   // DEFAULT CHOSEN, AWAITING OWNER (psio/pjson_number_model.hpp
-   // `float_model`): this case is what changes if the reading does.
-   REQUIRE(psio::pjson_detail::float_model == psio::pjson_detail::float_reading::declared_width);
-   // 0.1 is 0.1 from an f32, an f64 and JSON text.
-   const Bytes tenth = hex("700201");
-   CHECK(typed<float>(0.1f) == tenth);
-   CHECK(typed<double>(0.1) == tenth);
-   CHECK(psio::pjson_to_json(tenth) == "0.1");
-   CHECK(typed_back<float>(tenth) == 0.1f);
-   CHECK(typed_back<double>(tenth) == 0.1);
-   // A float with more digits is carried by the narrowest float that
-   // carries it, whatever declared it.
-   const Bytes third32 = hex("62abaaaa3e");
-   CHECK(typed<float>(1.0f / 3) == third32);
-   CHECK(typed<double>(0.33333334) == third32);
-   CHECK(psio::pjson_to_json(third32) == "0.33333334");
-   CHECK(typed_back<float>(third32) == 1.0f / 3);
-   CHECK(typed_back<double>(third32) == 0.33333334);          // through its decimal: not a widening cast
-   CHECK(typed_back<double>(third32) != static_cast<double>(1.0f / 3));
-   CHECK(typed<double>(1.0 / 3) == hex("63555555555555d53f"));
-   CHECK(typed_back<double>(hex("63555555555555d53f")) == 1.0 / 3);
-   // The double that happens to be exact in binary32 is not the float:
-   // docs/pjson-spec.md §15.2 as it stood turned it into 0.1.
-   const double widened = static_cast<double>(0.1f);
-   CHECK(typed<double>(widened) == hex("63000000a09999b93f"));
-   CHECK(typed_back<double>(typed<double>(widened)) == widened);
-   CHECK(psio::pjson_to_json(typed<double>(widened)) == "0.10000000149011612");
-   // Lists.
-   const Bytes tenths = hex("b9cdcccc3dcdcc4c3e0200");
-   CHECK(typed<std::vector<float>>({0.1f, 0.2f}) == tenths);
-   CHECK(typed<std::vector<double>>({0.1, 0.2}) == tenths);
-   CHECK(typed_back<std::vector<double>>(tenths) == std::vector<double>{0.1, 0.2});
-   CHECK(typed_back<std::vector<float>>(tenths) == std::vector<float>{0.1f, 0.2f});
-   CHECK(typed<std::vector<double>>({0.1, 1.0 / 3}) == hex("ba9a9999999999b93f555555555555d53f0200"));
-   // -0, NaN and the infinities are binary16; there is one NaN.
-   CHECK(typed<double>(-0.0) == hex("610080"));
-   CHECK(typed<float>(-0.0f) == hex("610080"));
-   CHECK(typed<double>(std::numeric_limits<double>::quiet_NaN()) == hex("61007e"));
-   CHECK(typed<float>(-std::numeric_limits<float>::infinity()) == hex("6100fc"));
-   CHECK(std::signbit(typed_back<double>(hex("610080"))));
-   CHECK(std::isnan(typed_back<float>(hex("61007e"))));
-   // Same-type round trips are exact, across the range.
+   const Bytes f32_tenth = hex("62cdcccc3d"), f64_tenth = hex("639a9999999999b93f");
+   // The same width back: exact.
+   CHECK(typed_back<float>(f32_tenth) == 0.1f);
+   CHECK(typed_back<double>(f64_tenth) == 0.1);
+   // A binary32 read as a double is the float, widened (a plain cast).
+   CHECK(typed_back<double>(f32_tenth) == static_cast<double>(0.1f));
+   CHECK(typed_back<std::vector<double>>(hex("b9cdcccc3dcdcc4c3e0200")) ==
+         std::vector<double>{static_cast<double>(0.1f), static_cast<double>(0.2f)});
+   // JSON text: the shortest digits that read back at the stored width.
+   CHECK(psio::pjson_to_json(f32_tenth) == "0.1");
+   CHECK(psio::pjson_to_json(f64_tenth) == "0.1");
+   CHECK(psio::pjson_to_json(hex("62abaaaa3e")) == "0.33333334");
+   CHECK(psio::pjson_to_json(hex("63555555555555d53f")) == "0.3333333333333333");
+   CHECK(psio::pjson_to_json(hex("b9cdcccc3dcdcc4c3e0200")) == "[0.1,0.2]");
+   CHECK(psio::pjson_to_json(hex("630000000000001440")) == "5");
+   // (So an f32 written as text and read back as an f64 is the double
+   // nearest that text, 0.1 — not the float widened. That is inherent in
+   // printing a float by its own digits.)
+   // NaN and the infinities are the float's bits; they have no JSON text.
+   CHECK(typed<double>(std::numeric_limits<double>::infinity()) == hex("63000000000000f07f"));
+   CHECK(std::isnan(typed_back<double>(typed<double>(std::numeric_limits<double>::quiet_NaN()))));
+   CHECK(std::signbit(typed_back<double>(typed<double>(-0.0))));
+   // Same-type round trips are exact, across the range (a scalar NaN is
+   // the quiet one; a list is copied whole, payloads and all).
    std::mt19937_64 rng{7};
    for (int i = 0; i < 20000; ++i)
    {
@@ -670,9 +660,8 @@ TEST_CASE("pjson canonical: a float is the shortest decimal that reads back to i
          REQUIRE(std::bit_cast<std::uint64_t>(typed_back<double>(typed<double>(d))) == bits);
       if (!std::isnan(f))
          REQUIRE(std::bit_cast<std::uint32_t>(typed_back<float>(typed<float>(f))) == static_cast<std::uint32_t>(bits));
-      // ... and a float survives being read as a double and written again.
-      if (!std::isnan(f))
-         REQUIRE(typed<double>(typed_back<double>(typed<float>(f))) == typed<float>(f));
+      const std::vector<double> ds{d, d};
+      REQUIRE(std::memcmp(typed_back<std::vector<double>>(typed(ds)).data(), ds.data(), 16) == 0);
    }
 }
 
@@ -716,20 +705,21 @@ TEST_CASE("pjson canonical: every typed encoding is canonical and reads back", "
       r.point = PcPoint{static_cast<std::uint32_t>(below(20)), 7};
 
       const Bytes bytes = psio::from_struct(r);
-      INFO(psio::pjson_to_json(bytes));
-      INFO(psio::pjson_to_json(psio::pjson::canonicalize(bytes)));
       REQUIRE(psio::pjson::validate(bytes));
-      REQUIRE(psio::pjson::canonicalize(bytes) == bytes);
       const psio::pjson_view view{std::span<const std::uint8_t>{bytes}};
       typed_arrays += view["u16s"].is_typed_array() + view["ds"].is_typed_array();
       rows         += view["rows"].is_row_array();
       const auto back = psio::view<PcWide, psio::pjson_format>::from_pjson(view).to_struct();
       REQUIRE(back == r);
+      // The canonical pass over it as a document without types gives a
+      // canonical frame with the same JSON text.
+      const Bytes anonymous = psio::pjson::canonicalize(bytes);
+      REQUIRE(psio::pjson::validate(anonymous));
+      REQUIRE(psio::pjson::canonicalize(anonymous) == anonymous);
+      REQUIRE(psio::pjson_to_json(anonymous) == psio::pjson_to_json(bytes));
 #if defined(PSIO_HAVE_SIMDJSON) && PSIO_HAVE_SIMDJSON
-      // The typed encoding is the canonical transcode of its own JSON
-      // text: a typed value and the anonymous document that spells it are
-      // one value.
-      REQUIRE(psio::pjson_json::from_json(psio::pjson_to_json(bytes)) == bytes);
+      // ... which is what the canonical transcode of that text gives.
+      REQUIRE(psio::pjson_json::from_json(psio::pjson_to_json(bytes)) == anonymous);
 #endif
    }
    CHECK(typed_arrays > 1000);
@@ -740,23 +730,21 @@ TEST_CASE("pjson canonical: every typed encoding is canonical and reads back", "
 
 TEST_CASE("pjson canonical: a well-formed frame that is not the canonical one", "[pjson][canonical]")
 {
+   // Not the one encoding of its value in its type; then what the canonical
+   // pass gives for it.
    for (const auto& [frame, canonical] : std::vector<std::pair<const char*, const char*>>{
            {"410500", "25"},                                  // an integer in more bytes than it needs
            {"700a00", "25"},                                  // a decimal that is an integer
            {"700204", "4064"},                                // 1e2
-           {"63000000000000f03f", "21"},                      // a float that is an integer
-           {"639a9999999999b93f", "700201"},                  // a float a shorter decimal carries
-           {"62cdcccc3d", "700201"},
-           {"73ac40f9030f", "62abaaaa3e"},                    // a decimal a shorter float carries
+           {"701403", "700201"},                              // a decimal with a trailing zero
            {"6b000000000000f83f", "701e01"},                  // the notation hint
-           {"63000000000000f87f", "61007e"},                  // NaN in binary64
-           {"630100000000f8ff7f", "61007e"},                  // a NaN with a payload
            {"915c7530306539", "90c3a9"},                      // a string in escape form
            {"916869", "906869"},
-           {"b0002122230001020300", "b50102030300"},          // a generic array of numbers
-           {"b60100020003000300", "b50102030300"},            // a typed array wider than its values
+           {"b0002122230001020300", "b50102030300"},          // a generic array of integers
            {"b50000", "b0000000"},                            // an empty typed array
            {"b000c00078211100010100000100", "c100010000000111782100000100"},   // one object: a row array
+           {"b0012122000001000200", "b501020200"},            // slots wider than they need be
+           {"630100000000f8ff7f", "63000000000000f87f"},      // a scalar NaN with a payload
         })
    {
       INFO(frame);
@@ -766,6 +754,23 @@ TEST_CASE("pjson canonical: a well-formed frame that is not the canonical one", 
       CHECK_FALSE(psio::pjson::try_decode(b).has_value());
       CHECK(psio::pjson::canonicalize(b) == hex(canonical));
       CHECK(psio::pjson::validate(hex(canonical)));
+   }
+   // Canonical in the type it is written in, and something else once it is
+   // taken as a document without types: a typed array keeps its declared
+   // width, a float its bits.
+   for (const auto& [frame, anonymous] : std::vector<std::pair<const char*, const char*>>{
+           {"b60100020003000300", "b50102030300"},            // a u16 list holding small values
+           {"639a9999999999b93f", "700201"},                  // a double 0.1
+           {"62cdcccc3d", "700201"},                          // a float 0.1
+           {"630000000000001440", "25"},                      // a double 5.0
+           {"ba9a9999999999b93f9a9999999999c93f0200", "b00070020170040100030200"},
+        })
+   {
+      INFO(frame);
+      const Bytes b = hex(frame);
+      CHECK(psio::pjson::validate(b));
+      CHECK(psio::pjson::canonicalize(b) == hex(anonymous));
+      CHECK(psio::pjson::validate(hex(anonymous)));
    }
    // Text that is not text has no canonical form.
    Bytes bad_name = hex("c000ff21");   // {"\xff": 1}
@@ -783,13 +788,17 @@ TEST_CASE("pjson canonical: JSON that is not a type, canonical or lazy by the ca
 {
    for (const auto& [json, canonical] : std::vector<std::pair<const char*, const char*>>{
            {"[1,2,3]", "b50102030300"},
-           {"[0.1,0.2]", "b9cdcccc3dcdcc4c3e0200"},
-           {"[1,0.5]", "b90000803f0000003f0200"},
+           {"[0.1,0.2]", "b00070020170040100030200"},
+           {"[1,0.5]", "b00021700a0100010200"},
+           {"[0.3333333333333333,0.14285714285714285,0.1111111111111111]",
+            "ba555555555555d53f922449922449c23f1cc7711cc771bc3f0300"},
            {"[]", "b0000000"},
            {"[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]", "c10002000000010100000111e57879212200012324000100040200"},
            {"\"a\\u00e9\\n\"", "9061c3a90a"},
            {"{\"k\\n\":1e2}", "c0006b0a4064f800020100"},
-           {"0.33333334", "62abaaaa3e"},
+           {"0.33333334", "73ac40f9030f"},
+           {"0.3333333333333333", "63555555555555d53f"},
+           {"-0", "630000000000000080"},
            {"5.0", "25"},
            {"[1e400,1]", "b0007002600c2100040200"},
         })

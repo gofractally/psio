@@ -350,8 +350,8 @@ namespace psio {
          {
             switch (synth_param_)
             {
-               case tac_f32:   // through the number it stands for (pjson_number_model.hpp)
-               { float f;  std::memcpy(&f, data_, 4); return binary32_as_double(f); }
+               case tac_f32:
+               { float f;  std::memcpy(&f, data_, 4); return f; }
                case tac_f64:
                { double d; std::memcpy(&d, data_, 8); return d; }
                default:
@@ -372,11 +372,9 @@ namespace psio {
             }
             if (width_bits == ieee_width_f32)
             {
-               // A binary32 frame read as a double is the double nearest the
-               // number the float stands for: not a widening cast.
                float f;
                std::memcpy(&f, data_ + 1, 4);
-               return binary32_as_double(f);
+               return static_cast<double>(f);
             }
             if (width_bits == ieee_width_f16)
             {
@@ -391,8 +389,8 @@ namespace psio {
          return to_double(number());
       }
 
-      // The value as a binary32: the float nearest the number. A binary32
-      // frame or element gives its own bits back.
+      // The value as a binary32. A binary32 frame or element gives its own
+      // bits back.
       float as_float() const
       {
          using namespace pjson_detail;
@@ -412,7 +410,7 @@ namespace psio {
                return f;
             }
          }
-         return to_float(number());
+         return static_cast<float>(as_double());
       }
 
       // The number this value is (psio/pjson_number_model.hpp): a decimal
@@ -678,8 +676,7 @@ namespace psio {
          switch (code)
          {
             case pjson_detail::tac_f32:
-            { float v;  std::memcpy(&v, eb, 4);
-              return pjson_detail::binary32_as_double(v); }
+            { float v;  std::memcpy(&v, eb, 4); return v; }
             case pjson_detail::tac_f64:
             { double v; std::memcpy(&v, eb, 8); return v; }
             // Integer fall-throughs: explicit conversion to double.

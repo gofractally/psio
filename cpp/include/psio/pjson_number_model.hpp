@@ -1,20 +1,22 @@
 //
-// psio/pjson_number_model.hpp — what a pjson number is, and the one
-// canonical encoding of each (docs/pjson-spec.md §15.2; gofractally/psio#17).
+// psio/pjson_number_model.hpp — what a pjson number is, and how a number
+// with no declared type is encoded (docs/pjson-spec.md §15.2;
+// gofractally/psio#17).
 //
 // Part of <psio/pjson.hpp>, which includes it at the right place; including
 // this header alone includes that one.
 //
-// A number is a decimal value (an integer or mantissa * 10^scale) or one of
-// -0, NaN, +Inf, -Inf. Its declared width or signedness is not part of it:
-// 5 is 5 whether a u16, a u64 or JSON text held it.
+// A TYPED number is stored as its type says: an integer in the integer
+// forms with the fewest bytes, a float as its IEEE bits at its declared
+// width (binary32 for float, binary64 for double). Nothing here is on that
+// path.
 //
-// What a binary float STANDS FOR is the one decision isolated here
-// (`float_model`): everything that turns a float into a number, or a number
-// into a float — encoders, readers, views, the JSON emitter, the
-// canonicalizer — goes through `float_reads_as`, `carried_by_float`,
-// `carried_by_double`, `to_double` and `to_float` below, and nothing else in
-// the library knows the model.
+// A number with NO type — a JSON number, an element of a generic array — is
+// a decimal value (an integer or mantissa * 10^scale, or -0): the anonymous
+// canonical pass chooses its form from the value (`canonical_number_bytes`,
+// `append_number_array`). A float frame met on that path, and a float
+// written as JSON text, is the shortest decimal that reads back to it at its
+// own width (`float_reads_as`): a binary32 holding 0.1f is 0.1.
 
 #include <psio/pjson.hpp>
 
@@ -36,21 +38,6 @@
 
 namespace psio {
    namespace pjson_detail {
-
-      // ── What a float stands for: THE switch point ──────────────────────
-      //
-      // DEFAULT CHOSEN, AWAITING OWNER (gofractally/psio#17, comment
-      // 7208961356).
-      //
-      //   declared_width  a float stands for the shortest decimal that
-      //                   reads back to it at its own width: f32 0.1f,
-      //                   f64 0.1 and JSON 0.1 are one value. A binary32
-      //                   frame read as a double goes through that decimal,
-      //                   not a widening cast.
-      //   binary64        a float is widened to binary64 first: f32 0.1f is
-      //                   0.10000000149011612, and a binary32 frame widens.
-      enum class float_reading { declared_width, binary64 };
-      inline constexpr float_reading float_model = float_reading::declared_width;
 
       // A finite number: (-1)^neg * mag * 10^scale. Normal form: mag is not
       // a multiple of 10, or the number is zero (mag 0, scale 0, not neg).
@@ -153,8 +140,6 @@ namespace psio {
          bool       special;
          const auto s = specials_or(f, special);
          if (special) return s;
-         if (float_model == float_reading::binary64)
-            return {number_kind::finite, shortest_decimal(static_cast<double>(f))};
          return {number_kind::finite, shortest_decimal(f)};
       }
 
@@ -169,19 +154,6 @@ namespace psio {
             return d.scale > 0 ? (d.neg ? -HUGE_VAL : HUGE_VAL) : (d.neg ? -0.0 : 0.0);
          return x;
       }
-      inline float nearest_float(const decimal_value& d) noexcept
-      {
-         if (float_model == float_reading::binary64)
-            return static_cast<float>(nearest_double(d));
-         char  text[64];
-         auto  n = decimal_text(d, text);
-         float x = 0;
-         const auto r = std::from_chars(text, text + n, x);
-         if (r.ec == std::errc::result_out_of_range)
-            return d.scale > 0 ? (d.neg ? -HUGE_VALF : HUGE_VALF) : (d.neg ? -0.0f : 0.0f);
-         return x;
-      }
-
       // Does a float frame of the width carry the number: does it read back
       // as exactly this number?
       inline bool carried_by_double(const number_value& v, double& out)
@@ -199,29 +171,6 @@ namespace psio {
          out = nearest_double(v.d);
          return std::isfinite(out) && out != 0 && shortest_decimal(out) == v.d;
       }
-      inline bool carried_by_float(const number_value& v, float& out)
-      {
-         switch (v.kind)
-         {
-            case number_kind::minus_zero: out = -0.0f; return true;
-            case number_kind::nan:        out = std::numeric_limits<float>::quiet_NaN(); return true;
-            case number_kind::plus_inf:   out = HUGE_VALF; return true;
-            case number_kind::minus_inf:  out = -HUGE_VALF; return true;
-            case number_kind::finite:     break;
-         }
-         if (v.d.mag == 0) { out = 0.0f; return true; }
-         if (float_model == float_reading::binary64)
-         {
-            double wide;
-            if (!carried_by_double(v, wide)) return false;
-            out = static_cast<float>(wide);
-            return static_cast<double>(out) == wide;
-         }
-         if (decimal_digits(v.d.mag) > 9) return false;   // a float's shortest digits
-         out = nearest_float(v.d);
-         return std::isfinite(out) && out != 0 && shortest_decimal(out) == v.d;
-      }
-
       // A number as a native float: the nearest one.
       inline double to_double(const number_value& v) noexcept
       {
@@ -235,19 +184,6 @@ namespace psio {
          }
          return v.d.mag == 0 ? 0.0 : nearest_double(v.d);
       }
-      inline float to_float(const number_value& v) noexcept
-      {
-         switch (v.kind)
-         {
-            case number_kind::minus_zero: return -0.0f;
-            case number_kind::nan:        return std::numeric_limits<float>::quiet_NaN();
-            case number_kind::plus_inf:   return HUGE_VALF;
-            case number_kind::minus_inf:  return -HUGE_VALF;
-            case number_kind::finite:     break;
-         }
-         return v.d.mag == 0 ? 0.0f : nearest_float(v.d);
-      }
-
       // The number of a native float, with the common case — an integer
       // small enough to be exact and to print as itself — taken without a
       // decimal conversion.
@@ -264,144 +200,30 @@ namespace psio {
          return float_reads_as(f);
       }
 
-      inline std::size_t canonical_number_bytes(const number_value& v, std::uint8_t* buf);
-
-      // ── Native floats, without the general machinery ───────────────────
-      //
-      // The same answers as float_reads_as / carried_by_float /
-      // canonical_number_bytes give, for the cases a typed encoder meets
-      // on every value: the shortest digits are taken once, as text, and
-      // "does binary32 carry this double" is "does the float nearest it
-      // print the same text".
-
-      // The shortest digits of a finite, non-zero float, in scientific
-      // form: `text`, and (-1)^neg * mag * 10^scale with `digits` digits.
-      struct short_digits
+      // A float as a scalar: its bits at its own width, a NaN as the quiet
+      // NaN of that width (§15.2.1; a list is copied whole, bits and all).
+      inline std::size_t float_frame_bytes(float f, std::uint8_t* buf) noexcept
       {
-         char          text[32];
-         std::size_t   length = 0;
-         bool          neg    = false;
-         std::uint64_t mag    = 0;
-         std::int32_t  scale  = 0;
-         unsigned      digits = 0;
-      };
-      template <typename F>
-      short_digits shortest_digits(F f) noexcept
-      {
-         short_digits out;
-         const auto   r = std::to_chars(out.text, out.text + sizeof(out.text), f, std::chars_format::scientific);
-         out.length     = static_cast<std::size_t>(r.ptr - out.text);
-         const char* p  = out.text;
-         if (*p == '-') { out.neg = true; ++p; }
-         int fraction = 0;
-         bool point   = false;
-         for (; *p != 'e'; ++p)
-         {
-            if (*p == '.') { point = true; continue; }
-            out.mag = out.mag * 10 + static_cast<unsigned>(*p - '0');
-            ++out.digits;
-            fraction += point;
-         }
-         ++p;
-         const bool down = *p == '-';
-         ++p;   // the sign: to_chars always writes one
-         int exponent = 0;
-         for (; p != r.ptr; ++p) exponent = exponent * 10 + (*p - '0');
-         out.scale = (down ? -exponent : exponent) - fraction;
-         return out;
+         buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f32);
+         std::uint32_t bits;
+         std::memcpy(&bits, &f, 4);
+         if (f != f) bits = canonical_nan_f32;
+         std::memcpy(buf + 1, &bits, 4);
+         return 5;
       }
-      // An integer small enough to be exact and to print as itself.
-      template <typename F>
-      bool small_integer(F f) noexcept
+      inline std::size_t float_frame_bytes(double d, std::uint8_t* buf) noexcept
       {
-         constexpr F exact = std::is_same_v<F, float> ? F(16777216) : F(9007199254740992.0);
-         return f > -exact && f < exact && f == std::trunc(f) && !(f == 0 && std::signbit(f));
+         buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f64);
+         std::uint64_t bits;
+         std::memcpy(&bits, &d, 8);
+         if (d != d) bits = canonical_nan_f64;
+         std::memcpy(buf + 1, &bits, 8);
+         return 9;
       }
-      // Does binary32 carry the number this double stands for?
-      inline bool double_carried_by_float(double d, float& out)
-      {
-         if (float_model != float_reading::declared_width || !std::isfinite(d) || d == 0)
-            return carried_by_float(native_number(d), out);
-         if (small_integer(d))
-         {
-            out = static_cast<float>(d);
-            return d > -16777216.0 && d < 16777216.0;   // exact below 2^24; above, the general test
-         }
-         const short_digits wide = shortest_digits(d);
-         if (wide.digits > 9) return false;
-         const auto same_text = [&](float f) {
-            char       narrow[32];
-            const auto w = std::to_chars(narrow, narrow + sizeof(narrow), f, std::chars_format::scientific);
-            return static_cast<std::size_t>(w.ptr - narrow) == wide.length &&
-                   std::memcmp(narrow, wide.text, wide.length) == 0;
-         };
-         // The float the double rounds to is almost always the float nearest
-         // the decimal; when it prints the same text it is.
-         float f = static_cast<float>(d);
-         if (std::isfinite(f) && f != 0 && same_text(f))
-         {
-            out = f;
-            return true;
-         }
-         // Otherwise the nearest float to the decimal itself (rounding twice
-         // can land on its neighbour).
-         const auto r = std::from_chars(wide.text, wide.text + wide.length, f);
-         if (r.ec != std::errc{} || !std::isfinite(f) || f == 0 || !same_text(f)) return false;
-         out = f;
-         return true;
-      }
-      // The canonical frame of a native float or double.
-      template <typename F>
-      std::size_t canonical_native_bytes(F f, std::uint8_t* buf)
-      {
-         if (float_model != float_reading::declared_width || !std::isfinite(f) || f == 0 || small_integer(f))
-            return canonical_number_bytes(native_number(f), buf);
-         const short_digits s = shortest_digits(f);
-         if (s.scale >= 0) return canonical_number_bytes(native_number(f), buf);   // an integer
-         const std::uint64_t zigzag  = s.mag * 2 - (s.neg ? 1 : 0);
-         const std::size_t   decimal = 1 + u64_byte_count(zigzag) + varint62_byte_count(s.scale);
-         if (decimal >= 5)
-         {
-            float narrow;
-            if constexpr (std::is_same_v<F, float>)
-               narrow = f;   // a binary32 carries the number it stands for
-            else if (!double_carried_by_float(f, narrow))
-               goto wide;
-            buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f32);
-            std::memcpy(buf + 1, &narrow, 4);
-            return 5;
-         }
-      wide:
-         if constexpr (std::is_same_v<F, double>)
-            if (decimal >= 9)
-            {
-               buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f64);
-               std::memcpy(buf + 1, &f, 8);
-               return 9;
-            }
-         const __int128 mantissa = static_cast<__int128>(s.mag);
-         return encode_number_at(buf, 0, pjson_number{s.neg ? -mantissa : mantissa, s.scale});
-      }
-
-      // The double a binary32 frame reads as: the double nearest the number
-      // the float stands for.
-      inline double binary32_as_double(float f)
-      {
-         if (float_model != float_reading::declared_width || !std::isfinite(f) || f == 0)
-            return to_double(float_reads_as(f));
-         if (small_integer(f)) return static_cast<double>(f);
-         const short_digits s = shortest_digits(f);
-         double             d = 0;
-         std::from_chars(s.text, s.text + s.length, d);
-         return d;
-      }
-
-      // The canonical frame of a native double (the dynamic encoder's
-      // double, declared in the core of pjson.hpp).
-      inline std::size_t canonical_double_bytes(double d, std::uint8_t* buf)
-      {
-         return canonical_native_bytes(d, buf);
-      }
+      // (The dynamic encoder's double; declared in the core of pjson.hpp.)
+      inline std::size_t canonical_double_bytes(double d, std::uint8_t* buf) { return float_frame_bytes(d, buf); }
+      // A binary32 frame read as a double is the float, widened.
+      inline double binary32_as_double(float f) { return static_cast<double>(f); }
 
       // ── Numbers on the wire ─────────────────────────────────────────────
 
@@ -479,21 +301,24 @@ namespace psio {
          std::memcpy(buf + 1, &mag, bc);
          return 1u + bc;
       }
+      // The encoding of a number with no declared type: an integer below
+      // 2^128 in the integer forms; any other finite number as the smaller of
+      // decimal (no trailing zeros) and binary64, where binary64 carries it
+      // (a tie goes to the float); -0 as the binary64 it is. (NaN and the
+      // infinities have no decimal and never arrive without a type; they
+      // are binary64 too.)
       inline std::size_t canonical_number_bytes(const number_value& v, std::uint8_t* buf)
       {
-         const auto half = [&](std::uint16_t bits) -> std::size_t {
-            buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f16);
-            buf[1] = static_cast<std::uint8_t>(bits);
-            buf[2] = static_cast<std::uint8_t>(bits >> 8);
-            return 3;
+         const auto wide = [&](double d) -> std::size_t {
+            buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f64);
+            std::memcpy(buf + 1, &d, 8);
+            return 9;
          };
-         switch (v.kind)
+         double d;
+         if (v.kind != number_kind::finite)
          {
-            case number_kind::minus_zero: return half(0x8000);
-            case number_kind::nan:        return half(0x7E00);
-            case number_kind::plus_inf:   return half(0x7C00);
-            case number_kind::minus_inf:  return half(0xFC00);
-            case number_kind::finite:     break;
+            carried_by_double(v, d);
+            return wide(d);
          }
          unsigned __int128 whole;
          if (as_integer(v.d, whole)) return canonical_integer_bytes(v.d.neg, whole, buf);
@@ -507,22 +332,7 @@ namespace psio {
             mantissa = v.d.neg ? -static_cast<__int128>(v.d.mag) : static_cast<__int128>(v.d.mag);
             decimal_size = 1 + mantissa_byte_count(zz128_encode(mantissa)) + varint62_byte_count(v.d.scale);
          }
-         // The smallest of decimal, binary32, binary64; a tie goes to the
-         // float, the narrower first.
-         float  f;
-         double d;
-         if (decimal_size >= 5 && carried_by_float(v, f))
-         {
-            buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f32);
-            std::memcpy(buf + 1, &f, 4);
-            return 5;
-         }
-         if (decimal_size >= 9 && carried_by_double(v, d))
-         {
-            buf[0] = static_cast<std::uint8_t>((t_ieee_float << 4) | ieee_width_f64);
-            std::memcpy(buf + 1, &d, 8);
-            return 9;
-         }
+         if (decimal_size >= 9 && carried_by_double(v, d)) return wide(d);
          if (decimal_size == ~std::size_t{0})
             throw std::runtime_error("pjson: a number has no canonical form");
          return encode_number_at(buf, 0, pjson_number{mantissa, v.d.scale});
@@ -598,8 +408,10 @@ namespace psio {
          out.insert(out.end(), {static_cast<std::uint8_t>(t_array << 4), 0, 0, 0});
       }
 
-      // The canonical array of `n` numbers (n >= 1), or false when they are
-      // not all numbers a typed array holds (the caller writes it generic).
+      // The array of `n` numbers (n >= 1) that have no declared element type:
+      // every element an integer of at most 64 bits -> a typed array of the
+      // narrowest code; else binary64 as below; else false (the caller
+      // writes a generic array).
       // `at(i)` gives element i.
       template <typename At>
       bool append_number_array(std::vector<std::uint8_t>& out, std::size_t n, At&& at)
@@ -623,27 +435,21 @@ namespace psio {
             append_count(out, n);
             return true;
          }
-         // Floats: binary32 if it carries every element, else binary64.
-         bool  narrow = true;
-         float f;
-         for (std::size_t i = 0; i < n && narrow; ++i) narrow = carried_by_float(at(i), f);
-         if (narrow)
+         // Else binary64, when it carries every element and the typed
+         // array is not larger than the generic one would be.
+         bool        wide    = true;
+         std::size_t scalars = 0;
+         double      d;
+         for (std::size_t i = 0; i < n && wide; ++i)
          {
-            out.push_back(static_cast<std::uint8_t>((t_array << 4) | typed_array_low_from_code(tac_f32)));
-            auto pos = out.size();
-            out.resize(pos + n * 4);
-            for (std::size_t i = 0; i < n; ++i, pos += 4)
-            {
-               carried_by_float(at(i), f);
-               std::memcpy(out.data() + pos, &f, 4);
-            }
-            append_count(out, n);
-            return true;
+            const number_value v = at(i);
+            std::uint8_t       scratch[max_number_size + 8];
+            wide    = carried_by_double(v, d);
+            scalars += canonical_number_bytes(v, scratch);
          }
-         bool   wide = true;
-         double d;
-         for (std::size_t i = 0; i < n && wide; ++i) wide = carried_by_double(at(i), d);
          if (!wide) return false;
+         const std::size_t generic = 2 + scalars + n * width_bytes(width_code_for(scalars)) + 2;
+         if (1 + n * 8 + 2 > generic) return false;
          out.push_back(static_cast<std::uint8_t>((t_array << 4) | typed_array_low_from_code(tac_f64)));
          auto pos = out.size();
          out.resize(pos + n * 8);
@@ -654,179 +460,6 @@ namespace psio {
          }
          append_count(out, n);
          return true;
-      }
-
-      // ── A list of numbers of one native type ────────────────────────────
-      //
-      // The canonical form of the list is a function of its values (the
-      // rule above), so a typed encoder looks at them: the largest and
-      // smallest of an integer list; for floats, whether every element is
-      // an integer and whether binary32 carries every element (both stop at
-      // the first element that says no).
-      //
-      // The code is tac_invalid for the empty list (the generic empty
-      // array) and for a list no typed array holds.
-      template <typename E>
-      std::uint8_t typed_list_code(std::span<const E> v)
-      {
-         if (v.empty()) return tac_invalid;
-         if constexpr (std::is_integral_v<E>)
-         {
-            if constexpr (std::is_unsigned_v<E>)
-            {
-               E top = 0;
-               for (const E x : v) top = x > top ? x : top;
-               return top <= 0xFF ? tac_u8 : top <= 0xFFFF ? tac_u16 : top <= 0xFFFFFFFFull ? tac_u32 : tac_u64;
-            }
-            else
-            {
-               E low = 0, top = 0;
-               for (const E x : v)
-               {
-                  low = x < low ? x : low;
-                  top = x > top ? x : top;
-               }
-               const auto t = static_cast<std::uint64_t>(top);
-               if (low == 0) return t <= 0xFF ? tac_u8 : t <= 0xFFFF ? tac_u16 : t <= 0xFFFFFFFFull ? tac_u32 : tac_u64;
-               const auto l = static_cast<std::int64_t>(low);
-               if (l >= -128 && t <= 127) return tac_i8;
-               if (l >= -32768 && t <= 32767) return tac_i16;
-               if (l >= -2147483648ll && t <= 2147483647ull) return tac_i32;
-               return tac_i64;
-            }
-         }
-         else
-         {
-            number_run run;
-            for (std::size_t i = 0; i < v.size() && run.integers; ++i)
-            {
-               const E x = v[i];
-               if (small_integer(x))
-                  run.add_integer(x < 0, static_cast<std::uint64_t>(x < 0 ? -x : x));
-               else
-                  run.add(native_number(x));
-            }
-            if (const auto code = run.integer_code(); code != tac_invalid) return code;
-            if constexpr (std::is_same_v<E, float>)
-               return tac_f32;   // a binary32 carries the number it stands for
-            else
-            {
-               float f;
-               for (const E x : v)
-                  if (!double_carried_by_float(x, f)) return tac_f64;
-               return tac_f32;
-            }
-         }
-      }
-      inline std::size_t typed_list_size(std::uint8_t code, std::size_t n) noexcept
-      {
-         return code == tac_invalid ? 4 : 1 + n * typed_array_elem_size(code) + 2;
-      }
-      // Writes the list in the form `code` (from typed_list_code) names.
-      template <typename E>
-      std::size_t encode_typed_list_at(std::uint8_t* dst, std::size_t pos, std::span<const E> v, std::uint8_t code,
-                                       bool elements_written = false)
-      {
-         const std::size_t n = v.size();
-         if (code == tac_invalid)
-         {
-            dst[pos] = static_cast<std::uint8_t>(t_array << 4);
-            dst[pos + 1] = dst[pos + 2] = dst[pos + 3] = 0;
-            return 4;
-         }
-         const std::size_t w = typed_array_elem_size(code);
-         dst[pos] = static_cast<std::uint8_t>((t_array << 4) | typed_array_low_from_code(code));
-         std::uint8_t* p = dst + pos + 1;
-         if constexpr (std::is_integral_v<E>)
-         {
-            if (code == tac_for<E>())
-               std::memcpy(p, v.data(), n * w);
-            else
-            {
-               // Two's complement of the value, truncated to the width that
-               // holds it: one plain loop per width.
-               const auto narrow = [&]<typename W>(W) {
-                  for (std::size_t i = 0; i < n; ++i)
-                  {
-                     const W x = static_cast<W>(v[i]);
-                     std::memcpy(p + i * sizeof(W), &x, sizeof(W));
-                  }
-               };
-               switch (w)
-               {
-                  case 1: narrow(std::uint8_t{}); break;
-                  case 2: narrow(std::uint16_t{}); break;
-                  case 4: narrow(std::uint32_t{}); break;
-                  default: narrow(std::uint64_t{}); break;
-               }
-            }
-         }
-         else if (code == tac_for<E>())
-         {
-            std::memcpy(p, v.data(), n * w);
-            // One NaN: the quiet one. (A pass that finds none writes none.)
-            bool any_nan = false;
-            for (std::size_t i = 0; i < n; ++i) any_nan |= v[i] != v[i];
-            if (any_nan)
-            {
-               const E quiet = std::numeric_limits<E>::quiet_NaN();
-               for (std::size_t i = 0; i < n; ++i)
-                  if (v[i] != v[i]) std::memcpy(p + i * w, &quiet, w);
-            }
-         }
-         else if (code == tac_f32)
-         {
-            for (std::size_t i = 0; i < n && !elements_written; ++i, p += 4)
-            {
-               float f = 0;
-               double_carried_by_float(static_cast<double>(v[i]), f);
-               std::memcpy(p, &f, 4);
-            }
-         }
-         else
-         {
-            for (std::size_t i = 0; i < n; ++i, p += w)
-            {
-               std::uint64_t u;
-               if (small_integer(v[i]))
-                  u = static_cast<std::uint64_t>(static_cast<std::int64_t>(v[i]));
-               else
-               {
-                  const number_value x = native_number(v[i]);
-                  unsigned __int128  whole = 0;
-                  as_integer(x.d, whole);
-                  u = x.d.neg ? 0 - static_cast<std::uint64_t>(whole) : static_cast<std::uint64_t>(whole);
-               }
-               std::memcpy(p, &u, w);
-            }
-         }
-         dst[pos + 1 + n * w] = static_cast<std::uint8_t>(n & 0xFF);
-         dst[pos + 2 + n * w] = static_cast<std::uint8_t>((n >> 8) & 0xFF);
-         return 1 + n * w + 2;
-      }
-
-      // Encodes a list of numbers in its canonical form: what
-      // typed_list_code + encode_typed_list_at give, with a list of doubles
-      // looked at once — it is written as binary32 while every element is
-      // carried, and as binary64 from the first that is not.
-      template <typename E>
-      std::size_t encode_typed_list(std::uint8_t* dst, std::size_t pos, std::span<const E> v)
-      {
-         if constexpr (std::is_same_v<E, double>)
-         {
-            const std::size_t n = v.size();
-            // (A list whose first element is not an integer is not an
-            // integer array.)
-            if (n != 0 && !(std::isfinite(v[0]) && v[0] == std::trunc(v[0]) && !(v[0] == 0 && std::signbit(v[0]))))
-            {
-               std::uint8_t* p = dst + pos + 1;
-               std::size_t   i = 0;
-               float         f;
-               for (; i < n && double_carried_by_float(v[i], f); ++i) std::memcpy(p + i * 4, &f, 4);
-               return encode_typed_list_at<E>(dst, pos, v, i == n ? tac_f32 : tac_f64, i == n);
-            }
-         }
-         return encode_typed_list_at<E>(dst, pos, v, typed_list_code(v));
       }
 
       // The number of element i of a typed array's element bytes.

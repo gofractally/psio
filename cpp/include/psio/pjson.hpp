@@ -2345,10 +2345,10 @@ namespace psio {
 
    // ── public façade ────────────────────────────────────────────────────
    //
-   // `psio::pjson` is the format: one encoding per value (the canonical
-   // form, psio/pjson_canonical.hpp, docs/pjson-spec.md §15). Every encoder
-   // writes it, and `validate` / `decode` accept nothing else, so equal
-   // values are equal bytes.
+   // `psio::pjson` is the format: one encoding per value of a given type
+   // (the canonical form, psio/pjson_canonical.hpp, docs/pjson-spec.md
+   // §15). Every encoder writes it, and `validate` / `decode` accept nothing
+   // else.
    //
    // `psio::pjson_lazy` is the one non-canonical path: any well-formed
    // frame. Its writer is the quick JSON transcode
@@ -2382,9 +2382,13 @@ namespace psio {
 
    struct pjson
    {
-      // The canonical frame of a well-formed one. Throws std::runtime_error
-      // when `bytes` are not a frame, or hold what has no canonical form
-      // (a string that is not UTF-8).
+      // The canonical pass over a well-formed frame as a document WITHOUT
+      // types: numbers and arrays take the form their values give them (the
+      // narrowest integer width, decimal or binary64, typed arrays, row
+      // arrays). This is where compaction is chosen from the data, because
+      // the caller asked. Throws std::runtime_error when `bytes` are not a
+      // frame, or hold what has no canonical form (a string that is not
+      // UTF-8).
       static std::vector<std::uint8_t> canonicalize(std::span<const std::uint8_t> bytes)
       {
          if (!pjson_lazy::validate(bytes))
@@ -2400,7 +2404,12 @@ namespace psio {
          std::size_t total = pjson_detail::value_size(v);
          std::vector<std::uint8_t> out(total);
          pjson_detail::encode_value_at(out.data(), 0, v);
-         return canonicalize(out);
+         // (An int64 and a double keep their types; an array of a dynamic
+         // value has no element type, so its form is its values'.)
+         std::vector<std::uint8_t> made;
+         made.reserve(out.size());
+         pjson_detail::append_normalized(made, out);
+         return made;
       }
 
       static std::size_t encoded_size(const pjson_value& v) { return encode(v).size(); }
@@ -2415,7 +2424,7 @@ namespace psio {
 #endif
             std::vector<std::uint8_t> out;
             out.reserve(bytes.size());
-            pjson_detail::append_canonical(out, bytes);
+            pjson_detail::append_normalized(out, bytes);
             return out.size() == bytes.size() && std::memcmp(out.data(), bytes.data(), out.size()) == 0;
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
          }

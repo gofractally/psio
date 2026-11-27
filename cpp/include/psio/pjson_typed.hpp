@@ -493,10 +493,8 @@ namespace psio {
          }
          else if constexpr (std::is_floating_point_v<F>)
          {
-            // The number the float stands for, in its one canonical form
-            // (psio/pjson_number_model.hpp).
-            std::uint8_t buf[max_number_size + 8];
-            return canonical_native_bytes(v, buf);
+            (void)v;
+            return 1 + sizeof(F);   // its bits, at its declared width
          }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
@@ -519,9 +517,9 @@ namespace psio {
             }
             else if constexpr (is_typed_array_elem_<E>)
             {
-               // A list of numbers: the form its values give it.
-               const std::span<const E> list{v.data(), v.size()};
-               return typed_list_size(typed_list_code(list), list.size());
+               // A typed array of the declared element width: 1 tag +
+               // N*sizeof(E) + 2 count. (The empty array has one form.)
+               return v.empty() ? 4u : 1u + v.size() * sizeof(E) + 2u;
             }
             else if constexpr (Reflected<E>)
             {
@@ -584,10 +582,9 @@ namespace psio {
          }
          else if constexpr (std::is_floating_point_v<F>)
          {
-            std::uint8_t buf[max_number_size + 8];
-            const auto   n = canonical_native_bytes(v, buf);
-            std::memcpy(dst + pos, buf, n);
-            return n;
+            // A float is stored as the float it is: binary32 for float,
+            // binary64 for double.
+            return float_frame_bytes(v, dst + pos);
          }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
@@ -626,11 +623,17 @@ namespace psio {
             }
             else if constexpr (is_typed_array_elem_<E>)
             {
-               // The narrowest typed array that holds every element (one
-               // memcpy when that is E's own width); the generic empty
-               // array for an empty list.
-               const std::span<const E> list{v.data(), v.size()};
-               return encode_typed_list<E>(dst, pos, list);
+               // One copy at the declared element width; the generic
+               // empty array for an empty list.
+               if (v.empty())
+               {
+                  dst[pos] = static_cast<std::uint8_t>(t_array << 4);
+                  dst[pos + 1] = dst[pos + 2] = dst[pos + 3] = 0;
+                  return 4;
+               }
+               return encode_typed_array_at<E>(
+                  dst, pos,
+                  std::span<const E>{v.data(), v.size()});
             }
             else if constexpr (Reflected<E>)
             {

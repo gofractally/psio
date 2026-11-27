@@ -7,23 +7,29 @@
 // A pjson value has exactly one canonical encoding (docs/pjson-spec.md §15;
 // gofractally/psio#17). It is a function of the VALUE alone:
 //
-//   number    an integer below 2^128 in magnitude: uint_inline / nint_inline
-//             / uint / negint with the fewest bytes. Any other finite
-//             number: the smallest of decimal (no trailing zeros), binary32
-//             and binary64 that carries it; a tie goes to the float, the
-//             narrower first. -0, NaN, +Inf, -Inf: binary16.
-//   string    raw_text (flag 0), valid UTF-8.
-//   bytes     tag A0.
-//   array     empty: the generic empty array. Every element an integer of
-//             at most 64 bits: a typed array of the narrowest code
-//             (unsigned if none is negative). Else every element a number
-//             binary32 carries: typed f32; else every element a number
-//             binary64 carries: typed f64. Else every element an object
-//             with the same names in the same order (at least one name,
-//             each under 255 bytes): a row array. Else generic.
-//   object    generic; members in the order given; repeated names kept;
-//             names are raw text.
-//   widths    the smallest that fit.
+// Canonical is ONE ENCODING PER VALUE OF A GIVEN TYPE. A typed encoder
+// writes what its type says, with no look at the data: an integer in the
+// integer forms with the fewest bytes, a float as its bits at its declared
+// width, a list of numbers as a typed array of its declared element code, a
+// list of records as a row array, a string as raw UTF-8 text.
+//
+// What has no type is decided from the data, by the canonical pass
+// (`anonymous`): a number is the integer forms, or the smaller of decimal
+// and binary64; a generic array whose elements are all integers of at most
+// 64 bits is a typed array of the narrowest code, one whose elements are all
+// numbers binary64 carries is typed f64 when that is not larger, one whose
+// elements are all objects with the same names is a row array.
+//
+// The walk below writes a well-formed frame again:
+//
+//   typed mode      every construct in the SAME type, in its one encoding
+//                   (a frame is canonical exactly when this gives it back);
+//   anonymous mode  as a document with no types: numbers and typed arrays
+//                   are chosen again from their values.
+//
+// In both modes: the empty array is the generic empty array, a generic
+// array is typed / a row array where the rules above say, strings are raw
+// text, widths are the smallest that fit.
 //
 // Numbers: psio/pjson_number_model.hpp.
 
@@ -33,6 +39,8 @@
 #define PSIO_PJSON_CANONICAL_HPP
 
 #include <cstdint>
+#include <cstring>
+#include <functional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
@@ -48,6 +56,7 @@ namespace psio {
          using view = dynamic_view<pjson_format>;
          using kind = view::kind;
          std::vector<std::uint8_t>&    out;
+         bool                          anonymous; // choose numbers and typed arrays from the data
          std::vector<std::uint32_t>    offsets;   // one stack for every container
          std::vector<std::string_view> names;
          std::vector<number_value>     numbers;
@@ -68,7 +77,7 @@ namespace psio {
                case kind::integer:
                case kind::decimal:
                case kind::floating:
-                  return append_canonical_number(out, frame_number(raw.data(), raw.size()));
+                  return number(raw);
                case kind::string:
                {
                   out.push_back(static_cast<std::uint8_t>(t_string << 4));
@@ -95,6 +104,64 @@ namespace psio {
             }
          }
 
+         // A scalar number. Typed mode keeps its type: an integer in the
+         // fewest bytes, a decimal without trailing zeros (an integer when
+         // it is one), a float as its bits (the notation hint cleared).
+         void number(std::span<const std::uint8_t> raw)
+         {
+            const std::uint8_t tag = raw[0] >> 4;
+            if (anonymous) return append_canonical_number(out, frame_number(raw.data(), raw.size()));
+            if (tag == t_ieee_float)
+            {
+               out.push_back(static_cast<std::uint8_t>(raw[0] & ~ieee_sci_bit));
+               const std::uint8_t width = raw[0] & ieee_width_mask;
+               std::uint64_t      bits  = 0;
+               std::memcpy(&bits, raw.data() + 1, raw.size() - 1);
+               // A scalar NaN is the quiet NaN of its width.
+               if (width == ieee_width_f64 && (bits & 0x7FF0000000000000ull) == 0x7FF0000000000000ull && (bits & 0xFFFFFFFFFFFFFull))
+                  bits = canonical_nan_f64;
+               else if (width == ieee_width_f32 && (bits & 0x7F800000u) == 0x7F800000u && (bits & 0x7FFFFFu))
+                  bits = canonical_nan_f32;
+               else if (width == ieee_width_f16 && (bits & 0x7C00u) == 0x7C00u && (bits & 0x3FFu))
+                  bits = 0x7E00u;
+               const auto at = out.size();
+               out.resize(at + raw.size() - 1);
+               std::memcpy(out.data() + at, &bits, raw.size() - 1);
+               return;
+            }
+            const number_value v = frame_number(raw.data(), raw.size());
+            std::uint8_t       buf[max_number_size + 8];
+            unsigned __int128  whole;
+            std::size_t        n;
+            if (as_integer(v.d, whole))
+               n = canonical_integer_bytes(v.d.neg, whole, buf);
+            else
+            {
+               const __int128 m = static_cast<__int128>(v.d.mag);   // a decimal frame's mantissa is below 2^127
+               n = encode_number_at(buf, 0, pjson_number{v.d.neg ? -m : m, v.d.scale});
+            }
+            out.insert(out.end(), buf, buf + n);
+         }
+
+         // A generic array of numbers, each with no type.
+         void generic_numbers(std::size_t n, const std::function<number_value(std::size_t)>& at)
+         {
+            out.push_back(static_cast<std::uint8_t>(t_array << 4));
+            const std::size_t width_at = out.size();
+            out.push_back(0);
+            const std::size_t data = out.size(), base = offsets.size();
+            for (std::size_t i = 0; i < n; ++i)
+            {
+               offsets.push_back(static_cast<std::uint32_t>(out.size() - data));
+               append_canonical_number(out, at(i));
+            }
+            const std::uint8_t code = width_code_for(out.size() - data);
+            out[width_at] = code;
+            for (std::size_t i = 0; i < n; ++i) append_width(out, code, offsets[base + i]);
+            offsets.resize(base);
+            append_count(out, n);
+         }
+
          void typed_array(const view& v)
          {
             const auto        raw  = v.raw();
@@ -102,10 +169,12 @@ namespace psio {
             const std::size_t w    = typed_array_elem_size(code);
             const std::size_t n    = (raw.size() - 3) / w;
             if (n == 0) return append_empty_array(out);
-            // Always a typed array again: a typed element is a number a
-            // typed array holds.
-            if (!append_number_array(out, n, [&](std::size_t i) { return typed_element_number(code, raw.data() + 1 + i * w); }))
-               no_form("pjson: internal: a typed array element is not a number a typed array holds");
+            // A typed array has its element type: typed mode keeps it.
+            if (!anonymous) return (void)out.insert(out.end(), raw.begin(), raw.end());
+            // Without a type the form is the values': the narrowest integer
+            // code, binary64, or a generic array of numbers.
+            const auto at = [&](std::size_t i) { return typed_element_number(code, raw.data() + 1 + i * w); };
+            if (!append_number_array(out, n, at)) generic_numbers(n, at);
          }
 
          void object(const view& v)
@@ -276,7 +345,14 @@ namespace psio {
       // `bytes` must be a valid frame (pjson_lazy::validate).
       inline void append_canonical(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> bytes)
       {
-         canonicalizer c{out, {}, {}, {}};
+         canonicalizer c{out, true, {}, {}, {}};
+         c.value(dynamic_view<pjson_format>{bytes.data(), bytes.size()});
+      }
+      // `bytes` in the same types, each in its one encoding: the frame
+      // itself exactly when it is canonical.
+      inline void append_normalized(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> bytes)
+      {
+         canonicalizer c{out, false, {}, {}, {}};
          c.value(dynamic_view<pjson_format>{bytes.data(), bytes.size()});
       }
 

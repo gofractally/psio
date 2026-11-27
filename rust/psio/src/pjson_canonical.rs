@@ -1,51 +1,30 @@
-//! The canonical form of a pjson value, and what a pjson number is.
+//! The canonical form of a pjson value.
 //!
 //! The counterpart of C++ `psio/pjson_number_model.hpp` and
 //! `psio/pjson_canonical.hpp` (docs/pjson-spec.md §15; gofractally/psio#17).
 //!
-//! A pjson value has exactly one canonical encoding, a function of the
-//! VALUE alone:
+//! Canonical is ONE ENCODING PER VALUE OF A GIVEN TYPE. A typed encoder
+//! writes what its type says, with no look at the data: an integer in the
+//! integer forms with the fewest bytes, a float as its bits at its declared
+//! width, a list of numbers as a typed array of its declared element code, a
+//! list of records as a row array, a string as raw UTF-8 text.
 //!
-//! * number — an integer below 2^128 in magnitude: `uint_inline` /
-//!   `nint_inline` / `uint` / `negint` with the fewest bytes. Any other
-//!   finite number: the smallest of decimal (no trailing zeros), binary32
-//!   and binary64 that carries it; a tie goes to the float, the narrower
-//!   first. -0, NaN, +Inf, -Inf: binary16.
-//! * string — `raw_text` (flag 0), valid UTF-8.
-//! * array — empty: the generic empty array. Every element an integer of at
-//!   most 64 bits: a typed array of the narrowest code. Else every element
-//!   a number binary32 carries: typed f32; else binary64: typed f64. Else
-//!   every element an object with the same names in the same order: a row
-//!   array. Else generic.
-//! * object — generic; order and repeated names kept; names are raw text.
-//! * widths — the smallest that fit.
+//! What has no type is decided from the data, by the canonical pass
+//! ([`canonical_of_valid`]): a number is the integer forms, or the smaller
+//! of decimal and binary64; a generic array whose elements are all integers
+//! of at most 64 bits is a typed array of the narrowest code, one whose
+//! elements are all numbers binary64 carries is typed f64 when that is not
+//! larger, one whose elements are all objects with the same names is a row
+//! array.
 //!
-//! What a binary float STANDS FOR is the one decision isolated here
-//! ([`FLOAT_MODEL`]): everything that turns a float into a number, or a
-//! number into a float, goes through [`f32_reads_as`], [`f64_reads_as`],
-//! [`carried_by_f32`], [`carried_by_f64`], [`Number::to_f32`] and
-//! [`Number::to_f64`], and nothing else in the crate knows the model.
+//! A float met on that path, and a float written as JSON text, is the
+//! shortest decimal that reads back to it at its own width
+//! ([`f32_reads_as`], [`f64_reads_as`]): a binary32 holding 0.1 is 0.1.
 
 use crate::pjson::{
     key_hash8, tac, tag, typed_array_elem_size, varscale_byte_count, varuint_byte_count, PjsonError, PjsonResult,
 };
 use crate::pjson_view::View;
-
-/// What a float stands for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FloatReading {
-    /// The shortest decimal that reads back to the float at its own width:
-    /// `0.1f32`, `0.1f64` and JSON `0.1` are one value. A binary32 frame
-    /// read as an `f64` goes through that decimal, not a widening cast.
-    DeclaredWidth,
-    /// The float is widened to binary64 first: `0.1f32` is
-    /// `0.10000000149011612`.
-    Binary64,
-}
-
-/// THE switch point. DEFAULT CHOSEN, AWAITING OWNER (gofractally/psio#17,
-/// comment 7208961356).
-pub const FLOAT_MODEL: FloatReading = FloatReading::DeclaredWidth;
 
 /// A finite number: `(-1)^neg * mag * 10^scale`. Normal form: `mag` is not
 /// a multiple of 10, or the number is zero (`mag` 0, `scale` 0, not `neg`).
@@ -155,22 +134,12 @@ pub fn f32_reads_as(f: f32) -> Number {
     if f.abs() < 16_777_216.0 && f == f.trunc() {
         return Number::Finite(Decimal { neg: f < 0.0, mag: f.abs() as u128, scale: 0 }.normalized());
     }
-    match FLOAT_MODEL {
-        FloatReading::DeclaredWidth => Number::Finite(shortest(&format!("{f:e}"))),
-        FloatReading::Binary64 => Number::Finite(shortest(&format!("{:e}", f as f64))),
-    }
+    Number::Finite(shortest(&format!("{f:e}")))
 }
 
 fn nearest_f64(d: &Decimal) -> f64 {
     d.text().parse::<f64>().unwrap_or(0.0)
 }
-fn nearest_f32(d: &Decimal) -> f32 {
-    match FLOAT_MODEL {
-        FloatReading::DeclaredWidth => d.text().parse::<f32>().unwrap_or(0.0),
-        FloatReading::Binary64 => nearest_f64(d) as f32,
-    }
-}
-
 /// Does a binary64 frame carry the number: does it read back as exactly it?
 pub fn carried_by_f64(v: &Number) -> Option<f64> {
     match v {
@@ -191,31 +160,6 @@ pub fn carried_by_f64(v: &Number) -> Option<f64> {
     }
 }
 
-/// Does a binary32 frame carry the number?
-pub fn carried_by_f32(v: &Number) -> Option<f32> {
-    match v {
-        Number::MinusZero => Some(-0.0),
-        Number::Nan => Some(f32::NAN),
-        Number::PlusInf => Some(f32::INFINITY),
-        Number::MinusInf => Some(f32::NEG_INFINITY),
-        Number::Finite(d) => {
-            if d.mag == 0 {
-                return Some(0.0);
-            }
-            if FLOAT_MODEL == FloatReading::Binary64 {
-                let wide = carried_by_f64(v)?;
-                let narrow = wide as f32;
-                return (narrow as f64 == wide).then_some(narrow);
-            }
-            if d.digits() > 9 {
-                return None;
-            }
-            let x = nearest_f32(d);
-            (x.is_finite() && x != 0.0 && f32_reads_as(x) == *v).then_some(x)
-        }
-    }
-}
-
 impl Number {
     /// The number as an `f64`: the nearest one.
     pub fn to_f64(&self) -> f64 {
@@ -229,22 +173,6 @@ impl Number {
                     0.0
                 } else {
                     nearest_f64(d)
-                }
-            }
-        }
-    }
-    /// The number as an `f32`: the nearest one.
-    pub fn to_f32(&self) -> f32 {
-        match self {
-            Number::MinusZero => -0.0,
-            Number::Nan => f32::NAN,
-            Number::PlusInf => f32::INFINITY,
-            Number::MinusInf => f32::NEG_INFINITY,
-            Number::Finite(d) => {
-                if d.mag == 0 {
-                    0.0
-                } else {
-                    nearest_f32(d)
                 }
             }
         }
@@ -324,18 +252,19 @@ fn push_integer(out: &mut Vec<u8>, neg: bool, mag: u128) {
     out.extend_from_slice(&mag.to_le_bytes()[..bc]);
 }
 
-/// The one canonical encoding of a number, appended to `out`.
+/// The encoding of a number with no declared type, appended to `out`: an
+/// integer below 2^128 in the integer forms; any other finite number as the
+/// smaller of decimal (no trailing zeros) and binary64, where binary64
+/// carries it (a tie goes to the float); -0 (and NaN and the infinities,
+/// which never arrive without a type) as binary64.
 pub fn push_canonical_number(out: &mut Vec<u8>, v: &Number) -> PjsonResult<()> {
-    let half = |out: &mut Vec<u8>, bits: u16| {
-        out.push((tag::IEEE_FLOAT << 4) | 1);
-        out.extend_from_slice(&bits.to_le_bytes());
+    let wide = |out: &mut Vec<u8>, f: f64| {
+        out.push((tag::IEEE_FLOAT << 4) | 3);
+        out.extend_from_slice(&(if f.is_nan() { f64::from_bits(0x7FF8_0000_0000_0000) } else { f }).to_le_bytes());
     };
-    let d = match v {
-        Number::MinusZero => return Ok(half(out, 0x8000)),
-        Number::Nan => return Ok(half(out, 0x7E00)),
-        Number::PlusInf => return Ok(half(out, 0x7C00)),
-        Number::MinusInf => return Ok(half(out, 0xFC00)),
-        Number::Finite(d) => d,
+    let Number::Finite(d) = v else {
+        wide(out, carried_by_f64(v).expect("a special is a binary64"));
+        return Ok(());
     };
     if let Some(whole) = d.as_integer() {
         push_integer(out, d.neg, whole);
@@ -351,32 +280,26 @@ pub fn push_canonical_number(out: &mut Vec<u8>, v: &Number) -> PjsonResult<()> {
         let bc = ((128 - zigzag.leading_zeros() as usize + 7) / 8).max(1);
         decimal_size = 1 + bc + varscale_byte_count(d.scale);
     }
-    // The smallest of decimal, binary32, binary64; a tie goes to the float,
-    // the narrower first.
-    if decimal_size >= 5 {
-        if let Some(f) = carried_by_f32(v) {
-            out.push((tag::IEEE_FLOAT << 4) | 2);
-            out.extend_from_slice(&f.to_le_bytes());
-            return Ok(());
-        }
-    }
     if decimal_size >= 9 {
         if let Some(f) = carried_by_f64(v) {
-            out.push((tag::IEEE_FLOAT << 4) | 3);
-            out.extend_from_slice(&f.to_le_bytes());
+            wide(out, f);
             return Ok(());
         }
     }
     if decimal_size == usize::MAX {
         return Err(PjsonError("pjson: a number has no canonical form"));
     }
+    push_decimal_frame(out, zigzag, d.scale);
+    Ok(())
+}
+
+fn push_decimal_frame(out: &mut Vec<u8>, zigzag: u128, scale: i32) {
     let bc = ((128 - zigzag.leading_zeros() as usize + 7) / 8).max(1);
     out.push((tag::DECIMAL << 4) | (bc as u8 - 1));
     out.extend_from_slice(&zigzag.to_le_bytes()[..bc]);
     let at = out.len();
-    out.resize(at + varscale_byte_count(d.scale), 0);
-    crate::pjson::write_varscale(out, at, d.scale);
-    Ok(())
+    out.resize(at + varscale_byte_count(scale), 0);
+    crate::pjson::write_varscale(out, at, scale);
 }
 
 // ── Arrays of numbers ────────────────────────────────────────────────────
@@ -448,8 +371,10 @@ fn width_code_for(v: usize) -> u8 {
 }
 const EMPTY_ARRAY: [u8; 4] = [tag::ARRAY << 4, 0, 0, 0];
 
-/// The canonical array of the numbers (at least one), or `false` when they
-/// are not all numbers a typed array holds (the caller writes it generic).
+/// The array of numbers (at least one) that have no declared element type:
+/// every element an integer of at most 64 bits -> a typed array of the
+/// narrowest code; else binary64 as below; else `false` (the caller writes
+/// a generic array).
 pub fn push_number_array(out: &mut Vec<u8>, numbers: &[Number]) -> bool {
     let n = numbers.len();
     let mut run = Run::default();
@@ -470,20 +395,23 @@ pub fn push_number_array(out: &mut Vec<u8>, numbers: &[Number]) -> bool {
         push_count(out, n);
         return true;
     }
-    let narrow: Option<Vec<f32>> = numbers.iter().map(carried_by_f32).collect();
-    if let Some(floats) = narrow {
-        out.push((tag::ARRAY << 4) | (tac::F32 + 1));
-        for f in floats {
-            out.extend_from_slice(&f.to_le_bytes());
-        }
-        push_count(out, n);
-        return true;
-    }
+    // Else binary64, when it carries every element and the typed array is
+    // not larger than the generic one would be.
     let wide: Option<Vec<f64>> = numbers.iter().map(carried_by_f64).collect();
     let Some(floats) = wide else { return false };
+    let mut scratch = Vec::new();
+    for v in numbers {
+        if push_canonical_number(&mut scratch, v).is_err() {
+            return false;
+        }
+    }
+    let generic = 2 + scratch.len() + n * (width_code_for(scratch.len()) as usize + 1) + 2;
+    if 1 + n * 8 + 2 > generic {
+        return false;
+    }
     out.push((tag::ARRAY << 4) | (tac::F64 + 1));
     for f in floats {
-        out.extend_from_slice(&f.to_le_bytes());
+        out.extend_from_slice(&(if f.is_nan() { f64::from_bits(0x7FF8_0000_0000_0000) } else { f }).to_le_bytes());
     }
     push_count(out, n);
     true
@@ -580,10 +508,10 @@ fn is_number(v: &View<'_>) -> bool {
     matches!(v.type_code(), tag::UINT_INLINE | tag::NINT_INLINE | tag::UINT | tag::NEGINT | tag::DECIMAL | tag::IEEE_FLOAT)
 }
 
-fn value(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
+fn value(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let raw = v.raw();
     match v.type_code() {
-        _ if is_number(&v) => push_canonical_number(out, &frame_number(raw)?),
+        _ if is_number(&v) => number(raw, out, anonymous),
         tag::STRING => {
             out.push(tag::STRING << 4);
             if v.low_nibble() == 1 {
@@ -598,10 +526,10 @@ fn value(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
             }
             Ok(())
         }
-        tag::ARRAY if v.is_typed_array() => typed_array(v, out),
-        tag::ARRAY => array(v, out),
-        tag::OBJECT if v.is_row_array() => rows_of_row_array(v, out),
-        tag::OBJECT => object(v, out),
+        tag::ARRAY if v.is_typed_array() => typed_array(v, out, anonymous),
+        tag::ARRAY => array(v, out, anonymous),
+        tag::OBJECT if v.is_row_array() => rows_of_row_array(v, out, anonymous),
+        tag::OBJECT => object(v, out, anonymous),
         _ => {
             out.extend_from_slice(raw); // null, bool, bytes: one form
             Ok(())
@@ -609,7 +537,62 @@ fn value(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
     }
 }
 
-fn typed_array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
+/// A scalar number. Typed mode keeps its type: an integer in the fewest
+/// bytes, a decimal without trailing zeros (an integer when it is one), a
+/// float as its bits (the notation hint cleared, a NaN the quiet one).
+fn number(raw: &[u8], out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+    if anonymous {
+        return push_canonical_number(out, &frame_number(raw)?);
+    }
+    if raw[0] >> 4 == tag::IEEE_FLOAT {
+        let width = raw[0] & 0x07;
+        let mut tmp = [0u8; 8];
+        tmp[..raw.len() - 1].copy_from_slice(&raw[1..]);
+        let mut bits = u64::from_le_bytes(tmp);
+        let (exponent, fraction, quiet) = match width {
+            3 => (0x7FF0_0000_0000_0000u64, 0x000F_FFFF_FFFF_FFFFu64, 0x7FF8_0000_0000_0000u64),
+            2 => (0x7F80_0000, 0x007F_FFFF, 0x7FC0_0000),
+            _ => (0x7C00, 0x03FF, 0x7E00),
+        };
+        if bits & exponent == exponent && bits & fraction != 0 {
+            bits = quiet;
+        }
+        out.push(raw[0] & !0x08);
+        out.extend_from_slice(&bits.to_le_bytes()[..raw.len() - 1]);
+        return Ok(());
+    }
+    let Number::Finite(d) = frame_number(raw)? else { unreachable!("an integer or decimal frame is finite") };
+    match d.as_integer() {
+        Some(whole) => push_integer(out, d.neg, whole),
+        None => {
+            let mantissa = if d.neg { -(d.mag as i128) } else { d.mag as i128 };
+            push_decimal_frame(out, ((mantissa << 1) ^ (mantissa >> 127)) as u128, d.scale);
+        }
+    }
+    Ok(())
+}
+
+/// A generic array of numbers, each with no type.
+fn generic_numbers(out: &mut Vec<u8>, numbers: &[Number]) -> PjsonResult<()> {
+    out.push(tag::ARRAY << 4);
+    let width_at = out.len();
+    out.push(0);
+    let data = out.len();
+    let mut offsets: Vec<u32> = Vec::with_capacity(numbers.len());
+    for v in numbers {
+        offsets.push((out.len() - data) as u32);
+        push_canonical_number(out, v)?;
+    }
+    let code = width_code_for(out.len() - data);
+    out[width_at] = code;
+    for offset in offsets {
+        push_width(out, code, offset);
+    }
+    push_count(out, numbers.len());
+    Ok(())
+}
+
+fn typed_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let code = v.typed_array_code()?;
     let w = typed_array_elem_size(code);
     let bytes = v.typed_array_bytes()?;
@@ -617,9 +600,16 @@ fn typed_array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
         out.extend_from_slice(&EMPTY_ARRAY);
         return Ok(());
     }
+    // A typed array has its element type: typed mode keeps it.
+    if !anonymous {
+        out.extend_from_slice(v.raw());
+        return Ok(());
+    }
+    // Without a type the form is the values': the narrowest integer code,
+    // binary64, or a generic array of numbers.
     let numbers: Vec<Number> = bytes.chunks_exact(w).map(|e| typed_element_number(code, e)).collect();
     if !push_number_array(out, &numbers) {
-        return Err(PjsonError("pjson: internal: a typed array element is not a number a typed array holds"));
+        generic_numbers(out, &numbers)?;
     }
     Ok(())
 }
@@ -628,7 +618,7 @@ fn push_key_checked(key: &[u8]) -> PjsonResult<()> {
     std::str::from_utf8(key).map(drop).map_err(|_| NAME)
 }
 
-fn object(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
+fn object(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let n = v.object_len()?;
     out.push(tag::OBJECT << 4);
     let width_at = out.len();
@@ -646,7 +636,7 @@ fn object(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
             crate::pjson::write_varuint_at(out, at, excess);
         }
         out.extend_from_slice(key);
-        value(field, out)?;
+        value(field, out, anonymous)?;
     }
     let code = width_code_for(out.len() - data);
     out[width_at] = code;
@@ -666,6 +656,7 @@ fn rows<'a>(
     names: &[&[u8]],
     n: usize,
     record: &dyn Fn(usize) -> PjsonResult<Vec<View<'a>>>,
+    anonymous: bool,
 ) -> PjsonResult<()> {
     let k = names.len();
     for name in names {
@@ -697,7 +688,7 @@ fn rows<'a>(
             let mut fields: Vec<u32> = Vec::with_capacity(k);
             for field in record(i)? {
                 fields.push((out.len() - start_of_record) as u32);
-                value(field, out)?;
+                value(field, out, anonymous)?;
             }
             if width_code_for(out.len() - start_of_record) > slot_code {
                 refit = true;
@@ -722,7 +713,7 @@ fn rows<'a>(
     }
 }
 
-fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
+fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let table = v.rows()?;
     if table.is_empty() {
         out.extend_from_slice(&EMPTY_ARRAY);
@@ -732,7 +723,7 @@ fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
     rows(out, &names, table.len(), &|i| {
         let row = table.get(i)?;
         (0..row.len()).map(|j| row.field(j).map(|f| f.1)).collect()
-    })
+    }, anonymous)
 }
 
 /// The member names of an element, when it is a single object.
@@ -744,7 +735,7 @@ fn shape<'a>(e: &View<'a>) -> PjsonResult<Option<Vec<&'a [u8]>>> {
     (0..k).map(|j| e.object_at(j).map(|f| f.0)).collect::<PjsonResult<Vec<_>>>().map(Some)
 }
 
-fn array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
+fn array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let n = v.array_len()?;
     if n == 0 {
         out.extend_from_slice(&EMPTY_ARRAY);
@@ -771,7 +762,7 @@ fn array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
             return rows(out, &names, n, &|i| {
                 let e = &elements[i];
                 (0..names.len()).map(|j| e.object_at(j).map(|f| f.1)).collect()
-            });
+            }, anonymous);
         }
     }
     out.push(tag::ARRAY << 4);
@@ -781,7 +772,7 @@ fn array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
     let mut offsets: Vec<u32> = Vec::with_capacity(n);
     for e in elements {
         offsets.push((out.len() - data) as u32);
-        value(e, out)?;
+        value(e, out, anonymous)?;
     }
     let code = width_code_for(out.len() - data);
     out[width_at] = code;
@@ -792,11 +783,20 @@ fn array(v: View<'_>, out: &mut Vec<u8>) -> PjsonResult<()> {
     Ok(())
 }
 
-/// The canonical frame of a well-formed one (`pjson::lazy::validate`
-/// accepts `bytes`). An error when the frame holds what has no canonical
-/// form: a string or a member name that is not UTF-8.
+/// The canonical pass over a well-formed frame (`pjson::lazy::validate`
+/// accepts `bytes`) as a document WITHOUT types: numbers and arrays take the
+/// form their values give them. An error when the frame holds what has no
+/// canonical form: a string or a member name that is not UTF-8.
 pub fn canonical_of_valid(bytes: &[u8]) -> PjsonResult<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len());
-    value(View::new(bytes), &mut out)?;
+    value(View::new(bytes), &mut out, true)?;
+    Ok(out)
+}
+
+/// `bytes` in the same types, each in its one encoding: the frame itself
+/// exactly when it is canonical.
+pub fn normalized_of_valid(bytes: &[u8]) -> PjsonResult<Vec<u8>> {
+    let mut out = Vec::with_capacity(bytes.len());
+    value(View::new(bytes), &mut out, false)?;
     Ok(out)
 }

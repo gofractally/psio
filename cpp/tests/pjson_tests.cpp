@@ -268,9 +268,8 @@ TEST_CASE("pjson wire: ieee_float emits binary64 with width selector",
    // forced to the IEEE path: NaN.
    auto nan_b = pjson::encode(pjson_value{
        std::numeric_limits<double>::quiet_NaN()});
-   // NaN is binary16, the smallest float that has one (§15.2.1).
-   REQUIRE(nan_b.size() == 3);
-   CHECK(nan_b[0] == 0x61);  // (t_ieee_float << 4) | ieee_width_f16
+   REQUIRE(nan_b.size() == 9);
+   CHECK(nan_b[0] == 0x63);  // (t_ieee_float << 4) | ieee_width_f64
 }
 
 TEST_CASE("pjson wire: NaN canonicalized to quiet-NaN-zero-payload",
@@ -288,12 +287,11 @@ TEST_CASE("pjson wire: NaN canonicalized to quiet-NaN-zero-payload",
    REQUIRE(std::isnan(weird_nan));
 
    auto b = pjson::encode(pjson_value{weird_nan});
-   // One NaN: the quiet one, in binary16.
-   REQUIRE(b.size() == 3);
-   CHECK(b[0] == 0x61);
-   std::uint16_t got;
-   std::memcpy(&got, b.data() + 1, 2);
-   CHECK(got == 0x7E00);
+   REQUIRE(b.size() == 9);
+   CHECK(b[0] == 0x63);
+   std::uint64_t got;
+   std::memcpy(&got, b.data() + 1, 8);
+   CHECK(got == 0x7FF8000000000000ull);
 }
 
 TEST_CASE("pjson wire: ieee_float decode accepts binary32",

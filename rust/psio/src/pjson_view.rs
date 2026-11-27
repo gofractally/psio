@@ -203,11 +203,9 @@ impl<'a> View<'a> {
                 Ok(crate::pjson_json::f16_bits_to_f64(u16::from_le_bytes([self.data[1], self.data[2]])))
             }
             2 if self.data.len() == 5 => {
-                // The f64 nearest the number the float stands for
-                // (pjson_canonical): not a widening cast.
                 let mut tmp = [0u8; 4];
                 tmp.copy_from_slice(&self.data[1..5]);
-                Ok(crate::pjson_canonical::f32_reads_as(f32::from_le_bytes(tmp)).to_f64())
+                Ok(f32::from_le_bytes(tmp) as f64)
             }
             3 if self.data.len() == 9 => {
                 let mut tmp = [0u8; 8];
@@ -375,12 +373,12 @@ impl<'a> View<'a> {
         })
     }
 
-    /// Element `i` of a typed array as an `f64`: the f64 nearest the
-    /// number (an f32 element through the number it stands for).
+    /// Element `i` of a typed array as an `f64` (exact for the float codes
+    /// and for integers up to 2^53).
     pub fn typed_f64_at(&self, i: usize) -> PjsonResult<f64> {
         let (code, b) = self.typed_elem(i)?;
         Ok(match code {
-            8 => crate::pjson_canonical::typed_element_number(code, b).to_f64(),
+            8 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64,
             9 => f64::from_le_bytes(b.try_into().map_err(|_| PjsonError("pjson view: typed array element"))?),
             _ => self.typed_int_at(i)? as f64,
         })
@@ -642,11 +640,10 @@ mod tests {
         let buf = crate::pjson::to_pjson(&v);
         let view = View::new(&buf);
         assert!(view.is_typed_array());
-        // The narrowest code that holds -1..1000 is i16.
-        assert_eq!(view.typed_array_code().unwrap(), crate::pjson::tac::I16);
+        assert_eq!(view.typed_array_code().unwrap(), crate::pjson::tac::I32);
         assert_eq!(view.array_len().unwrap(), 5);
         let bytes = view.typed_array_bytes().unwrap();
-        assert_eq!(bytes.len(), 10);
+        assert_eq!(bytes.len(), 20);
         assert_eq!(view.typed_int_at(4).unwrap(), 1000);
     }
 

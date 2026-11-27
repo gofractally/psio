@@ -14,9 +14,10 @@ result = subprocess.run([str(args.emitter.resolve())], capture_output=True, text
 if result.returncode:
     raise SystemExit(result.stderr.strip() or "C++ fixture emitter failed")
 fixtures = json.loads(result.stdout)
-# (A pjson_to_json row also carries "json", the JSON text of the bytes, and
-# "canonical_hex", the canonical frame of the same value.)
-assert fixtures and all(set(f) - {'json', 'canonical_hex'} == {'format', 'id', 'wire_hex'} for f in fixtures)
+# (A pjson_to_json row also carries "json", the JSON text of the bytes;
+# "canonical", whether psio::pjson accepts the frame; and "canonical_hex",
+# what the canonical pass gives for it as a document without types.)
+assert fixtures and all(set(f) - {'json', 'canonical', 'canonical_hex'} == {'format', 'id', 'wire_hex'} for f in fixtures)
 paths = ['conformance/cpp-golden.json', 'rust/psio/tests/fixtures/cpp-golden.json',
          'js/src/test/cpp-golden.json']
 for name in paths:

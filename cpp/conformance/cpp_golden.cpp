@@ -32,6 +32,11 @@ PSIO_REFLECT(InteropRows, rows)
 
 struct InteropStrings { std::vector<std::string> values; };
 PSIO_REFLECT(InteropStrings, values)
+struct InteropNumbers {
+   std::uint16_t small = 0; float f = 0; double d = 0; double whole = 0;
+   std::vector<float> fs; std::vector<double> ds; std::vector<std::int64_t> is; std::vector<std::uint16_t> us;
+};
+PSIO_REFLECT(InteropNumbers, small, f, d, whole, fs, ds, is, us)
 struct InteropBytes { std::vector<std::uint8_t> values; };
 PSIO_REFLECT(InteropBytes, values)
 
@@ -51,7 +56,7 @@ bool first_fixture = true;
 // are canonical).
 template <typename Bytes>
 void emit_json(std::string_view format, std::string_view id, const Bytes& bytes, std::string_view json,
-               const std::vector<std::uint8_t>* canonical = nullptr) {
+               const std::vector<std::uint8_t>* canonical = nullptr, const bool* is_canonical = nullptr) {
    if (!first_fixture) std::cout << ",\n";
    first_fixture = false;
    std::cout << "  {\"format\":\"" << format << "\",\"id\":\"" << id << "\",\"wire_hex\":\"";
@@ -73,6 +78,7 @@ void emit_json(std::string_view format, std::string_view id, const Bytes& bytes,
       for (auto byte : *canonical) std::cout << digits[byte >> 4] << digits[byte & 15];
       std::cout << "\"";
    }
+   if (is_canonical) std::cout << ",\"canonical\":\"" << (*is_canonical ? "yes" : "no") << "\"";
    std::cout << "}";
 }
 
@@ -172,14 +178,16 @@ int main() {
          1e-4, 1e-5, 1e6, 1e15, 1e20, 1e38, 1.5e308, 5e-324,
          std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
          std::numeric_limits<double>::quiet_NaN()};
-      // The number of a native double, in its canonical form: the dynamic
-      // encoder and the typed one give the same bytes.
+      // A number with NO declared type (a JSON number, a JS number): its
+      // form is chosen from the value — an integer in the integer forms,
+      // else the smaller of decimal and binary64. The id is the bits of the
+      // double whose shortest digits the number is. (A TYPED double is its
+      // bits, `63` and eight bytes: the pjson_typed row "numbers".)
       const auto f64_row = [](double value) {
-         const auto bytes = psio::pjson::encode(psio::pjson_value{value});
          std::uint8_t buf[32];
-         const auto   n = psio::pjson_detail::canonical_number_bytes(psio::pjson_detail::native_number(value), buf);
-         if (bytes != std::vector<std::uint8_t>(buf, buf + n) || !psio::pjson::validate(bytes))
-            throw std::runtime_error("pjson_f64: the dynamic and the typed encoder disagree");
+         const auto   n = psio::pjson_detail::canonical_number_bytes(psio::pjson_detail::float_reads_as(value), buf);
+         const std::vector<std::uint8_t> bytes(buf, buf + n);
+         if (!psio::pjson::validate(bytes)) throw std::runtime_error("pjson_f64: not canonical");
          emit("pjson_f64", std::to_string(std::bit_cast<std::uint64_t>(value)), bytes);
       };
       for (auto value : numbers) f64_row(value);
@@ -189,38 +197,17 @@ int main() {
          bits ^= bits << 13; bits ^= bits >> 7; bits ^= bits << 17;
          f64_row(std::bit_cast<double>(bits));
       }
-      // The same for a native float: what a binary32 stands for (the float
-      // model, psio/pjson_number_model.hpp; gofractally/psio#17). The id is
-      // the float's bits.
-      {
-         const auto f32_row = [](float value) {
-            std::uint8_t buf[32];
-            const auto   n = psio::pjson_detail::canonical_number_bytes(psio::pjson_detail::native_number(value), buf);
-            emit("pjson_f32", std::to_string(std::bit_cast<std::uint32_t>(value)), std::vector<std::uint8_t>(buf, buf + n));
-         };
-         for (float value : {0.0f, -0.0f, 1.0f, -1.5f, 0.1f, 0.2f, 0.5f, 1.0f / 3, 3.14f, 1e-4f, 1e10f, 3e9f, 16777216.0f,
-                             16777218.0f, 3.4028235e38f, 1e-45f, 1.17549435e-38f,
-                             // Powers of two: below one the decimals that read back lie lopsided.
-                             0x1p-100f, 0x1p-60f, 0x1p-27f, 0x1p-10f, 0x1p60f, 0x1p90f, 0x1p100f, 0x1p-126f,
-                             -0x1p-77f, 0x1p-40f, 0x1p33f, 0x1.fffffep-1f, std::numeric_limits<float>::infinity(),
-                             -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()})
-            f32_row(value);
-         std::uint32_t f32_bits = 0x9abcdef1u;
-         for (unsigned i = 0; i < 128; ++i) {
-            f32_bits ^= f32_bits << 13; f32_bits ^= f32_bits >> 17; f32_bits ^= f32_bits << 5;
-            f32_row(std::bit_cast<float>(f32_bits));
-         }
-      }
-      // Lists of numbers of one native type: the form is the values', not
-      // the type's. The id is the list (a float as its shortest text).
+      // Lists of numbers with NO declared element type: the form is the
+      // values' — the narrowest integer code; binary64 when it carries
+      // every element and is not larger; else a generic array. The id is
+      // the list.
       {
          const auto list_row = [](std::string_view format, std::string_view id, const auto& list) {
             using E = typename std::remove_cvref_t<decltype(list)>::value_type;
-            const std::span<const E> view{list.data(), list.size()};
-            const auto               code = psio::pjson_detail::typed_list_code(view);
-            std::vector<std::uint8_t> bytes(psio::pjson_detail::typed_list_size(code, view.size()));
-            psio::pjson_detail::encode_typed_list_at(bytes.data(), 0, view, code);
-            if (!psio::pjson::validate(bytes)) throw std::runtime_error("a typed list is not canonical: " + std::string(id));
+            std::vector<std::uint8_t> typed(1 + list.size() * sizeof(E) + 2);
+            psio::pjson_detail::encode_typed_array_at<E>(typed.data(), 0, std::span<const E>{list.data(), list.size()});
+            const auto bytes = psio::pjson::canonicalize(typed);
+            if (!psio::pjson::validate(bytes)) throw std::runtime_error("an anonymous list is not canonical: " + std::string(id));
             emit(format, id, bytes);
          };
          using I = std::vector<std::int64_t>;
@@ -243,14 +230,10 @@ int main() {
          list_row("pjson_list_f64", "1,0.5", D{1, 0.5});
          list_row("pjson_list_f64", "0.3333333333333333", D{1.0 / 3});
          list_row("pjson_list_f64", "0.1,0.3333333333333333", D{0.1, 1.0 / 3});
-         list_row("pjson_list_f64", "-0,1", D{-0.0, 1});
+         list_row("pjson_list_f64", "0.3333333333333333,0.14285714285714285,0.1111111111111111", D{1.0 / 3, 1.0 / 7, 1.0 / 9});
          list_row("pjson_list_f64", "19.99,5,1e300", D{19.99, 5, 1e300});
          list_row("pjson_list_f64", "1e300", D{1e300});
          list_row("pjson_list_f64", "-1,2", D{-1, 2});
-         using F = std::vector<float>;
-         list_row("pjson_list_f32", "0.1,0.2", F{0.1f, 0.2f});
-         list_row("pjson_list_f32", "1,2,300", F{1, 2, 300});
-         list_row("pjson_list_f32", "0.33333334,16777216", F{1.0f / 3, 16777216.0f});
       }
       psio::pjson_array boundaries;
       for (std::int64_t n = -16; n <= 16; ++n) boundaries.emplace_back(n);
@@ -266,6 +249,11 @@ int main() {
       typed_fixture("empty_strings", InteropStrings{{}});
       typed_fixture("bytes", InteropBytes{{0,127,255}});
       typed_fixture("empty_bytes", InteropBytes{{}});
+      // A typed number is stored as its type says: an integer in the fewest
+      // bytes, a float as its bits at its declared width, a list as a typed
+      // array of its declared element code — whatever the values.
+      typed_fixture("numbers", InteropNumbers{5, 0.1f, 0.1, 5.0, {0.1f, 0.2f}, {0.1, 0.2}, {1, 2, 3}, {1, 2, 3}});
+      typed_fixture("empty_numbers", InteropNumbers{});
       for (auto [id, value] : std::vector<std::pair<std::string, psio::pjson_value>>{
          {"empty_array", psio::pjson_array{}}, {"empty_object", psio::pjson_object{}},
          {"long_key", psio::pjson_object{{std::string(300, 'x'), std::int64_t{7}}}},
@@ -292,12 +280,16 @@ int main() {
             throw std::runtime_error("Accepted invalid pjson: " + id);
          emit("pjson_invalid", id, bytes);
       }
-      // Well-formed pjson frames, the JSON text every codec must give for
-      // them, and the canonical frame of the same value (gofractally/
-      // psio#17). "wire_hex" is accepted by the lazy tag; it is accepted by
-      // psio::pjson exactly when it equals "canonical_hex", which is also
-      // what canonicalizing it — and what the canonical transcode of "json"
-      // (ids not starting "bytes") — must give.
+      // Well-formed pjson frames (gofractally/psio#17). For each:
+      //   "wire_hex"       the frame; the lazy tag accepts it;
+      //   "json"           the JSON text every codec gives for it;
+      //   "canonical"      "yes" when psio::pjson accepts it: it is the one
+      //                    encoding of its value in the types it is written
+      //                    in;
+      //   "canonical_hex"  what the canonical pass gives for it as a
+      //                    document WITHOUT types — and what the canonical
+      //                    transcode of "json" gives (ids not starting
+      //                    "bytes").
       for (const auto& [id, bytes, json] : std::vector<std::tuple<std::string, std::vector<std::uint8_t>, std::string>>{
          {"uint_inline", {0x25}, "5"},
          {"nint_inline", {0x35}, "-5"},
@@ -377,9 +369,14 @@ int main() {
          if (text != json)
             throw std::runtime_error("pjson_to_json of " + id + " is " + text + ", not " + json);
          const auto canonical = psio::pjson::canonicalize(view);
-         if (!psio::pjson::validate(canonical) || psio::pjson::validate(view) != (canonical == bytes))
+         // (A frame the canonical pass leaves alone is canonical; one it
+         // changes may be too — a typed array wider than its values is the
+         // one encoding of that list OF ITS TYPE.)
+         if (!psio::pjson::validate(canonical) || psio::pjson::canonicalize(canonical) != canonical ||
+             (canonical == bytes && !psio::pjson::validate(view)))
             throw std::runtime_error("the canonical form of " + id + " is not canonical");
-         emit_json("pjson_to_json", id, bytes, json, &canonical);
+         const bool is_canonical = psio::pjson::validate(view);
+         emit_json("pjson_to_json", id, bytes, json, &canonical, &is_canonical);
       }
       std::cout << "\n]\n";
    } catch (const std::exception& e) {

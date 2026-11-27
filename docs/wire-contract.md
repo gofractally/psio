@@ -43,39 +43,45 @@ then uses the compact integer/decimal representation only when shorter than
 binary64. The 274 double fixtures include both selected edge values and a
 reproducible sample of bit patterns. This is coverage, not an exhaustive proof.
 
-**One encoding per value.** Every pjson encoder — typed, dynamic, the
-canonical JSON transcode — writes the canonical form of
-[pjson-spec §15](pjson-spec.md#15-canonical-encoding), and
+**One encoding per value of a given type.** Every pjson encoder writes the
+canonical form of [pjson-spec §15](pjson-spec.md#15-canonical-encoding), and
 `psio::pjson::validate` / `decode` (Rust `pjson::validate`, JS
-`pjsonValidate`) accept nothing else. The canonical form is a function of
-the value, not of the type that held it: `5` is `25` from a `u16`, a `u64`,
-an `f64` and JSON text; `[1,2,3]` is the typed array `b5 01 02 03 03 00`
-from a list of any numeric type; an empty list is `b0 00 00 00`; an array of
-objects with the same names is a row array; a string is raw UTF-8 text.
+`pjsonValidate`) accept nothing else. A typed encoder writes what its type
+says, with no look at the data: an integer in the fewest bytes (`5` is `25`
+from a `u16` and a `u64`), a float as its bits at its declared width
+(`float` 0.1 is `62 cd cc cc 3d`, `double` 0.1 is `63` and eight bytes), a
+list of numbers as a typed array of its declared element width in one copy,
+a list of records as a row array, a string as raw UTF-8 text; an empty list
+of anything is `b0 00 00 00`.
 
-A binary float stands for the shortest decimal that reads back to it at its
-own width (**default chosen, awaiting the owner**, gofractally/psio#17): a
-`float` 0.1, a `double` 0.1 and JSON `0.1` are all `70 02 01`. A binary32
-frame read as a double goes through that decimal, not a widening cast. Zero
-with its sign set is binary16 `61 00 80`, NaN is `61 00 7e`.
+What has no type takes its form from its values, by the canonical pass the
+caller asks for (`pjson_json::from_json`, `canonicalize`): a number is the
+integer forms or the smaller of decimal and binary64 (`0.1` is `70 02 01`),
+an array of integers is a typed array of the narrowest width (`[1,2,3]` is
+`b5 01 02 03 03 00`), an array of objects with the same names is a row
+array. So a typed list and the same numbers from untyped JSON may be
+different bytes that read back as the same values; byte equality holds
+within a type and within untyped documents.
 
 `psio::pjson_lazy` (Rust `pjson::lazy`, JS `pjsonLazy`) reads any
 well-formed frame. Its one writer is the quick JSON transcode
 (`pjson_json::from_json_lazy`), which copies what it parses and is **not**
-canonical; `canonicalize` turns such a frame into the canonical one. The
-untyped view and `pjson_to_json` read both.
+canonical. The untyped view and `pjson_to_json` read both.
 
 JSON text and pjson (C++ `psio::pjson_json::from_json` / `psio::pjson_to_json`,
 Rust `pjson_json::from_json` / `to_json`): a JSON number keeps its value or is
 an error (a number whose digits do not fit a 127-bit mantissa is refused);
-any JSON value may be the document. To text, a number is written from the
-value it is (so one value has one text whichever form carries it), bytes are
+any JSON value may be the document. To text, an integer is written in full,
+a float as the shortest digits that read back to it at its stored width (a
+binary32 holding 0.1 is `0.1`; read as a double it is the float widened),
+bytes are
 standard padded base64, strings and member names keep their text (only the
 escapes JSON requires), member order and duplicate names are kept, and a NaN
 or an infinity is an error. The `pjson_to_json` rows of
 `conformance/cpp-golden.json` pin, for C++, Rust and JS, well-formed frames,
-their JSON text and the canonical frame of each; `pjson_f32` and the
-`pjson_list_*` rows pin native floats and lists.
+their JSON text, whether each is canonical, and what the canonical pass
+gives for it; `pjson_typed` pins typed records, and `pjson_f64` and the
+`pjson_list_*` rows numbers and lists without a type.
 
 Pjson containers use little-endian adaptive offsets and a trailing u16 count.
 Generic objects preserve encounter order and duplicate names. Key hashes are

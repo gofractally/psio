@@ -305,28 +305,23 @@ function decodeRows(data: Uint8Array, depth: number): PjsonRows {
 }
 // ── The canonical form (docs/pjson-spec.md §15; gofractally/psio#17) ────────
 //
-// One encoding per value, a function of the VALUE alone (C++
-// psio/pjson_number_model.hpp and psio/pjson_canonical.hpp):
+// Canonical is ONE ENCODING PER VALUE OF A GIVEN TYPE (C++
+// psio/pjson_canonical.hpp). A value that names its type is written as the
+// type says: a bigint in the integer forms with the fewest bytes, a
+// `PjsonFloat` as its bits at its width, a `PjsonTypedArray` as it is, a
+// `PjsonDecimal` without trailing zeros.
 //
-//   number   an integer below 2^128 in magnitude: the integer forms with the
-//            fewest bytes. Any other finite number: the smallest of decimal
-//            (no trailing zeros), binary32 and binary64 that carries it; a
-//            tie goes to the float, the narrower first. -0, NaN, ±Infinity:
-//            binary16.
-//   string   raw text, valid UTF-8.
-//   array    empty: the generic empty array. All integers of at most 64
-//            bits: a typed array of the narrowest code. Else all numbers
-//            binary32 carries: typed f32; else binary64: typed f64. Else all
-//            objects with the same names in the same order: a row array.
-//            Else generic.
-//   object   generic; order and repeated names kept.
-
-/** What a float stands for: THE switch point (C++ `pjson_detail::float_model`).
- *  DEFAULT CHOSEN, AWAITING OWNER (gofractally/psio#17, comment 7208961356).
- *  `declared-width`: the shortest decimal that reads back to the float at its
- *  own width, so a binary32 holding 0.1f is 0.1. `binary64`: the float is
- *  widened first, so it is 0.10000000149011612. */
-export const PJSON_FLOAT_MODEL: 'declared-width' | 'binary64' = 'declared-width';
+// What has no type takes its form from its value: a JS `number` is a JSON
+// number (the integer forms, or the smaller of decimal and binary64); an
+// array whose elements are all integers of at most 64 bits is a typed array
+// of the narrowest code, one whose elements are all numbers binary64
+// carries is typed f64 when that is not larger, one whose elements are all
+// objects with the same names in the same order is a row array. The empty
+// array is the generic empty array; a string is raw UTF-8 text.
+//
+// `anonymous` (pjsonCanonicalize) takes the whole value as a document
+// without types: floats, decimals and typed arrays are chosen again from
+// their values.
 
 /** A pjson number: (-1)^neg * mag * 10^scale, or one of the specials. */
 interface Num { kind: 'finite' | '-0' | 'nan' | '+inf' | '-inf'; neg: boolean; mag: bigint; scale: number; }
@@ -363,11 +358,11 @@ function special(x: number): Num | undefined {
 function doubleReadsAs(x: number): Num {
   return special(x) ?? parseExponential(x.toExponential());
 }
-/** The number a binary32 stands for (`x` is exactly a binary32). */
+/** The number a binary32 is when it has no type and when it is written as
+ *  text: its shortest digits at its own width (`x` is exactly a binary32). */
 function floatReadsAs(x: number): Num {
   const s = special(x);
   if (s) return s;
-  if (PJSON_FLOAT_MODEL === 'binary64') return parseExponential(x.toExponential());
   // The fewest digits that read back to this binary32, and of those the
   // decimal nearest it. (The value rounded to that many digits, or the
   // decimal one step either side of it: below a power of two the interval
@@ -386,12 +381,6 @@ function floatReadsAs(x: number): Num {
   return parseExponential(x.toExponential(8));
 }
 const scratch = new DataView(new ArrayBuffer(8));
-function stepFloat(x: number, up: boolean): number {
-  scratch.setFloat32(0, x, true);
-  const bits = scratch.getUint32(0, true), positive = x > 0;
-  scratch.setUint32(0, positive === up ? bits + 1 : bits - 1, true);
-  return scratch.getFloat32(0, true);
-}
 /** The binary64 that carries the number, if one does. */
 function carriedByDouble(n: Num): number | undefined {
   if (n.kind === '-0') return -0;
@@ -402,22 +391,6 @@ function carriedByDouble(n: Num): number | undefined {
   if (n.mag.toString().length > 17) return undefined;
   const x = Number(`${n.neg ? '-' : ''}${n.mag}e${n.scale}`);
   return Number.isFinite(x) && x !== 0 && sameNum(doubleReadsAs(x), n) ? x : undefined;
-}
-/** The binary32 that carries the number, if one does. */
-function carriedByFloat(n: Num): number | undefined {
-  if (n.kind !== 'finite' || n.mag === 0n) { const d = carriedByDouble(n); return d === undefined ? d : Math.fround(d); }
-  if (PJSON_FLOAT_MODEL === 'binary64') {
-    const wide = carriedByDouble(n);
-    return wide !== undefined && Math.fround(wide) === wide ? wide : undefined;
-  }
-  if (n.mag.toString().length > 9) return undefined;
-  // The binary32 nearest the decimal. Rounding the nearest binary64 again
-  // can land on a neighbour, so the neighbours are tried too.
-  const x = Math.fround(Number(`${n.neg ? '-' : ''}${n.mag}e${n.scale}`));
-  if (!Number.isFinite(x) || x === 0) return undefined;
-  for (const candidate of [x, stepFloat(x, true), stepFloat(x, false)])
-    if (Number.isFinite(candidate) && candidate !== 0 && sameNum(floatReadsAs(candidate), n)) return candidate;
-  return undefined;
 }
 function halfToNumber(bits: number): number {
   const sign = bits & 0x8000 ? -1 : 1, exp = (bits >> 10) & 31, frac = bits & 1023;
@@ -447,22 +420,35 @@ function floatBytes(x: number, bytes: 4 | 8): Uint8Array {
   else if (bytes === 4) view.setFloat32(0, x, true); else view.setFloat64(0, x, true);
   return out;
 }
-/** The one canonical encoding of a number. */
+/** The encoding of a number with no declared type: an integer below 2^128
+ *  in the integer forms; any other finite number as the smaller of decimal
+ *  and binary64, where binary64 carries it (a tie goes to the float); -0,
+ *  NaN and the infinities as binary64. */
 function canonicalNumber(n: Num): Uint8Array {
-  if (n.kind === '-0') return Uint8Array.of(0x61, 0x00, 0x80);
-  if (n.kind === 'nan') return Uint8Array.of(0x61, 0x00, 0x7e);
-  if (n.kind === '+inf') return Uint8Array.of(0x61, 0x00, 0x7c);
-  if (n.kind === '-inf') return Uint8Array.of(0x61, 0x00, 0xfc);
+  if (n.kind !== 'finite') return join([Uint8Array.of(0x63), floatBytes(carriedByDouble(n)!, 8)]);
   const whole = wholeOf(n);
   if (whole !== undefined) return integer(n.neg ? -whole : whole);
   const asDecimal = n.mag < (1n << 127n) ? decimal(n.neg ? -n.mag : n.mag, n.scale) : undefined;
   const size = asDecimal ? asDecimal.length : Infinity;
-  if (size >= 5) { const f = carriedByFloat(n); if (f !== undefined) return join([Uint8Array.of(0x62), floatBytes(f, 4)]); }
   if (size >= 9) { const d = carriedByDouble(n); if (d !== undefined) return join([Uint8Array.of(0x63), floatBytes(d, 8)]); }
   require(asDecimal, 'A number has no canonical form');
   return asDecimal;
 }
-/** The canonical array of the numbers, or undefined when a typed array does not hold them. */
+/** A number in the type its class names: a bigint and a JS number have no
+ *  width (the integer forms; a JSON number); a decimal stays a decimal
+ *  (without trailing zeros; an integer when it is one); a float is its bits. */
+function typedNumber(value: PjsonValue, n: Num): Uint8Array {
+  if (value instanceof PjsonFloat) return ieee(new PjsonFloat(value.bits, value.width));
+  if (value instanceof PjsonDecimal) {
+    const whole = wholeOf(n);
+    return whole !== undefined ? integer(n.neg ? -whole : whole) : decimal(n.neg ? -n.mag : n.mag, n.scale);
+  }
+  return canonicalNumber(n);
+}
+/** The array of numbers (at least one) that have no declared element type:
+ *  all integers of at most 64 bits -> a typed array of the narrowest code;
+ *  else binary64 when it carries every element and is not larger than the
+ *  generic array; else undefined (the caller writes a generic array). */
 function numberArray(numbers: Num[]): Uint8Array | undefined {
   let integers = true, anyNegative = false, maxPositive = 0n, maxNegative = 0n;
   const wholes: bigint[] = [];
@@ -486,11 +472,18 @@ function numberArray(numbers: Num[]): Uint8Array | undefined {
       return join([Uint8Array.of(0xb1 + code), ...wholes.map(v => le(v < 0n ? v + (1n << BigInt(8 * w)) : v, w)), count]);
     }
   }
-  const narrow = numbers.map(carriedByFloat);
-  if (narrow.every(f => f !== undefined)) return join([Uint8Array.of(0xb9), ...narrow.map(f => floatBytes(f!, 4)), count]);
   const wide = numbers.map(carriedByDouble);
-  if (wide.every(d => d !== undefined)) return join([Uint8Array.of(0xba), ...wide.map(d => floatBytes(d!, 8)), count]);
-  return undefined;
+  if (!wide.every(d => d !== undefined)) return undefined;
+  const scalars = numbers.reduce((n, v) => n + canonicalNumber(v).length, 0);
+  if (1 + numbers.length * 8 + 2 > 2 + scalars + numbers.length * width(scalars) + 2) return undefined;
+  return join([Uint8Array.of(0xba), ...wide.map(d => floatBytes(d!, 8)), count]);
+}
+/** A generic array of numbers, each with no type. */
+function genericNumbers(numbers: Num[]): Uint8Array {
+  const parts = numbers.map(canonicalNumber);
+  let length = 0; const offsets = parts.map(p => { const at = length; length += p.length; return at; });
+  const w = width(length);
+  return join([Uint8Array.of(0xb0, w - 1), ...parts, ...offsets.map(o => le(o, w)), le(numbers.length, 2)]);
 }
 function typedElements(value: PjsonTypedArray): Num[] {
   const size = sizes[value.code], out: Num[] = [];
@@ -555,10 +548,10 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((v, i) => v === b[i]);
 }
 /** A row array of the records (at least one), each a list of members with the same names. */
-function canonicalRows(records: Entries[], depth: number): Uint8Array {
+function canonicalRows(records: Entries[], depth: number, anonymous: boolean): Uint8Array {
   require(records.length <= 65535, 'Container exceeds 65535 entries');
   const keys = records[0].map(([k]) => keyBytes(k));
-  const rows = records.map(r => r.map(([, v]) => canonical(v, depth + 1)));
+  const rows = records.map(r => r.map(([, v]) => canonical(v, depth + 1, anonymous)));
   const sw = width(rows.reduce((max, row) => Math.max(max, row.reduce((n, v) => n + v.length, 0)), 0));
   const bodies = rows.map(row => {
     let pos = 0; const offsets = row.map(v => { const at = pos; pos += v.length; return le(at, sw); });
@@ -574,7 +567,7 @@ function canonicalRows(records: Entries[], depth: number): Uint8Array {
     ...offsets.map(o => le(o, rw)), le(records.length, 2)]);
 }
 const EMPTY_ARRAY = Uint8Array.of(0xb0, 0, 0, 0);
-function canonicalArray(elements: PjsonValue[], depth: number): Uint8Array {
+function canonicalArray(elements: PjsonValue[], depth: number, anonymous: boolean): Uint8Array {
   require(elements.length <= 65535, 'Container exceeds 65535 entries');
   if (elements.length === 0) return EMPTY_ARRAY;
   const numbers = elements.map(numOf);
@@ -587,35 +580,38 @@ function canonicalArray(elements: PjsonValue[], depth: number): Uint8Array {
     const first = records[0]!.map(([k]) => keyBytes(k));
     const same = first.length > 0 && first.every(k => k.length < 255) && records.every(r =>
       r!.length === first.length && r!.every(([k], i) => sameBytes(keyBytes(k), first[i])));
-    if (same) return canonicalRows(records as Entries[], depth);
+    if (same) return canonicalRows(records as Entries[], depth, anonymous);
   }
-  const parts = elements.map(e => canonical(e, depth + 1));
+  const parts = elements.map(e => canonical(e, depth + 1, anonymous));
   let length = 0; const offsets = parts.map(p => { const at = length; length += p.length; return at; });
   const w = width(length);
   return join([Uint8Array.of(0xb0, w - 1), ...parts, ...offsets.map(o => le(o, w)), le(elements.length, 2)]);
 }
-function canonical(value: PjsonValue, depth = 0): Uint8Array {
+function canonical(value: PjsonValue, depth = 0, anonymous = false): Uint8Array {
   require(depth <= 64, 'Maximum nesting depth exceeded');
   if (value === null) return Uint8Array.of(0);
   if (typeof value === 'boolean') return Uint8Array.of(value ? 0x11 : 0x10);
   const n = numOf(value);
-  if (n) return canonicalNumber(n);
+  if (n) return anonymous ? canonicalNumber(n) : typedNumber(value, n);
   if (typeof value === 'string') return join([Uint8Array.of(0x90), utf8.encode(value)]);
   if (value instanceof PjsonString)
     return join([Uint8Array.of(0x90), value.escaped ? unescapeText(value.bytes) : textBytes(value.bytes)]);
   if (value instanceof Uint8Array) return join([Uint8Array.of(0xa0), value]);
   if (value instanceof PjsonTypedArray) {
+    const size = sizes[value.code];
+    require(size && value.bytes.length % size === 0, 'Invalid typed array');
+    if (value.bytes.length === 0) return EMPTY_ARRAY;
+    // A typed array has its element type: it is kept, unless the value is
+    // taken as a document without types.
+    if (!anonymous) return join([Uint8Array.of(0xb1 + value.code), value.bytes, le(value.bytes.length / size, 2)]);
     const elements = typedElements(value);
-    if (elements.length === 0) return EMPTY_ARRAY;
-    const typed = numberArray(elements);
-    require(typed, 'A typed array element is not a number a typed array holds');
-    return typed;
+    return numberArray(elements) ?? genericNumbers(elements);
   }
   if (value instanceof PjsonRows) {
     if (value.records.length === 0) return EMPTY_ARRAY;
-    return canonicalRows(value.records.map(r => r instanceof PjsonObject ? r.entries : [...r.entries()]), depth);
+    return canonicalRows(value.records.map(r => r instanceof PjsonObject ? r.entries : [...r.entries()]), depth, anonymous);
   }
-  if (Array.isArray(value)) return canonicalArray(value, depth);
+  if (Array.isArray(value)) return canonicalArray(value, depth, anonymous);
   const entries = entriesOf(value)!;
   require(entries.length <= 65535, 'Container exceeds 65535 entries');
   const parts: Uint8Array[] = [], offsets: number[] = [], keys: Uint8Array[] = [];
@@ -623,7 +619,7 @@ function canonical(value: PjsonValue, depth = 0): Uint8Array {
   for (const [key, child] of entries) {
     offsets.push(length);
     const k = keyBytes(key); keys.push(k);
-    const part = join([k.length < 255 ? k : join([varuint(k.length - 255), k]), canonical(child, depth + 1)]);
+    const part = join([k.length < 255 ? k : join([varuint(k.length - 255), k]), canonical(child, depth + 1, anonymous)]);
     parts.push(part); length += part.length;
   }
   const w = width(length);
@@ -646,9 +642,10 @@ function input(data: unknown): Uint8Array {
   return data.constructor === Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.length);
 }
 
-/** The pjson bytes of `value`: the canonical form of the value it is. An
- *  array of numbers is a typed array, an escaped `PjsonString` is its text,
- *  and so on, whichever classes the value was built from. */
+/** The pjson bytes of `value`, canonical: a value that names its type
+ *  (`PjsonFloat`, `PjsonTypedArray`, a bigint) is written as that type; a JS
+ *  number is a JSON number and an array has no element type, so they take
+ *  the form their values give them; an escaped `PjsonString` is its text. */
 export function pjsonEncode(value: PjsonValue): Uint8Array {
   return guarded(() => canonical(value));
 }
@@ -672,10 +669,13 @@ export function pjsonValidate(data: Uint8Array): boolean {
     return false;
   }
 }
-/** The canonical frame of a well-formed one. Throws a `PjsonError` when the
- *  bytes are not a frame, or hold text that is not UTF-8. */
+/** The canonical pass over a well-formed frame as a document WITHOUT types:
+ *  numbers and arrays take the form their values give them (the narrowest
+ *  integer width, decimal or binary64, typed arrays, row arrays). Throws a
+ *  `PjsonError` when the bytes are not a frame, or hold text that is not
+ *  UTF-8. */
 export function pjsonCanonicalize(data: Uint8Array): Uint8Array {
-  return guarded(() => canonical(decode(input(data))));
+  return guarded(() => canonical(decode(input(data)), 0, true));
 }
 /** C++ `psio::pjson_lazy`: any well-formed frame. The one non-canonical
  *  path (what a quick JSON transcode writes); `encode` writes a value in the

@@ -79,12 +79,16 @@ fn the_shared_vectors_convert_to_their_json_text() {
         assert!(pjson::lazy::validate(&bytes).is_ok(), "{id}");
         assert!(pjson::lazy::decode(&bytes).is_ok(), "{id}");
         assert_eq!(to_json(&bytes).unwrap(), json, "{id}");
-        // psio::pjson reads it exactly when it is the canonical frame of
-        // its value, which is what canonicalizing it gives ...
-        assert_eq!(pjson::validate(&bytes).is_ok(), bytes == canonical, "{id}");
-        assert_eq!(pjson::decode(&bytes).is_ok(), bytes == canonical, "{id}");
+        // psio::pjson reads it exactly when it is the one encoding of its
+        // value in the types it is written in ("canonical").
+        let is_canonical = row["canonical"] == "yes";
+        assert_eq!(pjson::validate(&bytes).is_ok(), is_canonical, "{id}");
+        assert_eq!(pjson::decode(&bytes).is_ok(), is_canonical, "{id}");
+        // The canonical pass over it as a document without types gives
+        // "canonical_hex", which is canonical ...
         assert_eq!(pjson::canonicalize(&bytes).unwrap(), canonical, "{id}");
         assert!(pjson::validate(&canonical).is_ok(), "{id}");
+        assert!(is_canonical || bytes != canonical, "{id}");
         // ... and what the canonical transcode of its JSON text gives (a
         // bytes value is a string once it is text).
         if !id.starts_with("bytes") {
@@ -92,9 +96,9 @@ fn the_shared_vectors_convert_to_their_json_text() {
             assert_eq!(pjson::canonicalize(&psio::pjson_json::from_json_lazy(json).unwrap()).unwrap(), canonical, "{id}");
         }
         seen += 1;
-        not_canonical += (bytes != canonical) as usize;
+        not_canonical += !is_canonical as usize;
     }
-    assert!(seen >= 46 && not_canonical >= 20, "{seen} {not_canonical}");
+    assert!(seen >= 46 && not_canonical >= 10, "{seen} {not_canonical}");
 }
 
 fn rows(format: &str) -> Vec<(String, Vec<u8>)> {
@@ -107,90 +111,94 @@ fn rows(format: &str) -> Vec<(String, Vec<u8>)> {
         .collect()
 }
 
-// The float model (pjson_canonical::FLOAT_MODEL; DEFAULT CHOSEN, AWAITING
-// OWNER): what an f32 stands for. The id of a row is the float's bits.
+// A typed number is stored as its type says.
 #[test]
-fn a_native_float_is_the_number_it_stands_for() {
-    assert_eq!(psio::pjson_canonical::FLOAT_MODEL, psio::pjson_canonical::FloatReading::DeclaredWidth);
-    let mut seen = 0;
-    for (id, bytes) in rows("pjson_f32") {
-        let f = f32::from_bits(id.parse().unwrap());
-        assert_eq!(to_pjson(&f), bytes, "f32 {f:e} ({id})");
-        assert!(pjson::validate(&bytes).is_ok(), "{id}");
-        let back: f32 = from_pjson(&bytes).unwrap();
-        assert!(back.to_bits() == f.to_bits() || (f.is_nan() && back.is_nan()), "{id}");
-        // Read as an f64 and written again, it is the same number.
-        if !f.is_nan() {
-            assert_eq!(to_pjson(&from_pjson::<f64>(&bytes).unwrap()), bytes, "{id}");
-        }
-        seen += 1;
-    }
-    for (id, bytes) in rows("pjson_f64") {
-        let f = f64::from_bits(id.parse().unwrap());
-        assert_eq!(to_pjson(&f), bytes, "f64 {f:e} ({id})");
-        let back: f64 = from_pjson(&bytes).unwrap();
-        assert!(back.to_bits() == f.to_bits() || (f.is_nan() && back.is_nan()), "{id}");
-        seen += 1;
-    }
-    assert!(seen >= 148 + 274, "{seen}");
-    // 0.1 is 0.1 from an f32, an f64 and JSON text.
-    assert_eq!(to_pjson(&0.1f32), unhex("700201"));
-    assert_eq!(to_pjson(&0.1f64), unhex("700201"));
-    assert_eq!(from_json("0.1").unwrap(), unhex("700201"));
-    assert_eq!(to_json(&to_pjson(&0.1f32)).unwrap(), "0.1");
-    // A binary32 frame read as an f64 goes through its decimal.
-    assert_eq!(from_pjson::<f64>(&unhex("62abaaaa3e")).unwrap(), 0.33333334);
-    assert_eq!(from_pjson::<f32>(&unhex("62abaaaa3e")).unwrap(), 1.0f32 / 3.0);
-    // The double that is exact in binary32 is not the float.
+fn a_typed_value_is_written_as_its_type_says() {
+    // An integer: the fewest bytes for its value, whatever its width.
+    assert_eq!(to_pjson(&5u16), unhex("25"));
+    assert_eq!(to_pjson(&5u64), unhex("25"));
+    assert_eq!(to_pjson(&-5i64), unhex("35"));
+    // A float: its bits at its declared width. No decimal, no narrowing.
+    assert_eq!(to_pjson(&0.1f32), unhex("62cdcccc3d"));
+    assert_eq!(to_pjson(&0.1f64), unhex("639a9999999999b93f"));
+    assert_eq!(to_pjson(&5.0f64), unhex("630000000000001440"));
     assert_eq!(to_pjson(&(0.1f32 as f64)), unhex("63000000a09999b93f"));
-    assert_eq!(from_pjson::<f64>(&to_pjson(&(0.1f32 as f64))).unwrap(), 0.1f32 as f64);
-}
-
-// A list's form is its values', not its element type's.
-#[test]
-fn a_list_of_numbers_has_the_form_its_values_give_it() {
-    let mut seen = 0;
-    for (id, bytes) in rows("pjson_list_i64") {
-        let list: Vec<i64> = id.split(',').filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect();
-        assert_eq!(to_pjson(&list), bytes, "[{id}]");
-        assert_eq!(from_pjson::<Vec<i64>>(&bytes).unwrap(), list, "[{id}]");
-        if list.iter().all(|&x| x >= 0) {
-            let unsigned: Vec<u64> = list.iter().map(|&x| x as u64).collect();
-            assert_eq!(to_pjson(&unsigned), bytes, "[{id}] as u64");
-            assert_eq!(from_pjson::<Vec<u64>>(&bytes).unwrap(), unsigned, "[{id}]");
-        }
-        if list.iter().all(|&x| x.unsigned_abs() < 1 << 53) {
-            let floats: Vec<f64> = list.iter().map(|&x| x as f64).collect();
-            assert_eq!(to_pjson(&floats), bytes, "[{id}] as f64");
-            assert_eq!(from_pjson::<Vec<f64>>(&bytes).unwrap(), floats, "[{id}]");
-        }
-        seen += 1;
-    }
-    for (id, bytes) in rows("pjson_list_f64") {
-        let list: Vec<f64> = id.split(',').filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect();
-        assert_eq!(to_pjson(&list), bytes, "[{id}]");
-        let back = from_pjson::<Vec<f64>>(&bytes).unwrap();
-        assert_eq!(back.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), list.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), "[{id}]");
-        assert!(pjson::validate(&bytes).is_ok());
-        // The anonymous document that spells the list is the same value.
-        if !id.is_empty() {
-            assert_eq!(from_json(&format!("[{id}]")).unwrap(), bytes, "[{id}] from JSON");
-        }
-        seen += 1;
-    }
-    for (id, bytes) in rows("pjson_list_f32") {
-        let list: Vec<f32> = id.split(',').map(|t| t.parse().unwrap()).collect();
-        assert_eq!(to_pjson(&list), bytes, "[{id}]");
-        assert_eq!(from_pjson::<Vec<f32>>(&bytes).unwrap(), list, "[{id}]");
-        assert_eq!(from_json(&format!("[{id}]")).unwrap(), bytes, "[{id}] from JSON");
-        seen += 1;
-    }
-    assert_eq!(seen, 24);
-    // The empty list has one form.
+    // A list: a typed array of its declared element width, whatever the
+    // values; the empty list has one form.
+    assert_eq!(to_pjson(&vec![1u16, 2, 3]), unhex("b60100020003000300"));
+    assert_eq!(to_pjson(&vec![1u32, 2, 3]), unhex("b70100000002000000030000000300"));
+    assert_eq!(to_pjson(&vec![0.1f32, 0.2]), unhex("b9cdcccc3dcdcc4c3e0200"));
+    assert_eq!(to_pjson(&vec![0.1f64, 0.2]), unhex("ba9a9999999999b93f9a9999999999c93f0200"));
     for empty in [to_pjson(&Vec::<u16>::new()), to_pjson(&Vec::<f64>::new()), to_pjson(&Vec::<Point>::new()), to_pjson(&Vec::<String>::new())] {
         assert_eq!(empty, unhex("b0000000"));
     }
     assert!(from_pjson::<Vec<Point>>(&unhex("b0000000")).unwrap().is_empty());
+    // The same width back is exact; a binary32 read as an f64 is the float
+    // widened (a plain cast).
+    assert_eq!(from_pjson::<f32>(&unhex("62cdcccc3d")).unwrap(), 0.1f32);
+    assert_eq!(from_pjson::<f64>(&unhex("62cdcccc3d")).unwrap(), 0.1f32 as f64);
+    assert_eq!(from_pjson::<Vec<f64>>(&unhex("b9cdcccc3dcdcc4c3e0200")).unwrap(), vec![0.1f32 as f64, 0.2f32 as f64]);
+    // The reader's type gives the width back.
+    assert_eq!(from_pjson::<Vec<u64>>(&unhex("b50102030300")).unwrap(), vec![1, 2, 3]);
+    assert_eq!(from_pjson::<Vec<f64>>(&unhex("b50102030300")).unwrap(), vec![1.0, 2.0, 3.0]);
+    assert_eq!(from_pjson::<u8>(&to_pjson(&200.0f64)).unwrap(), 200);
+    assert!(from_pjson::<u8>(&to_pjson(&300.0f64)).is_err());
+    assert!(from_pjson::<u32>(&to_pjson(&0.5f64)).is_err());
+    // As JSON text a float is its shortest digits at its own width.
+    assert_eq!(to_json(&to_pjson(&0.1f32)).unwrap(), "0.1");
+    assert_eq!(to_json(&to_pjson(&0.1f64)).unwrap(), "0.1");
+    assert_eq!(to_json(&to_pjson(&(1.0f32 / 3.0))).unwrap(), "0.33333334");
+    assert_eq!(to_json(&to_pjson(&5.0f64)).unwrap(), "5");
+    // Same-type round trips are exact.
+    let mut rng = Rng(7);
+    for _ in 0..20_000 {
+        let bits = rng.next();
+        let (d, f) = (f64::from_bits(bits), f32::from_bits(bits as u32));
+        if !d.is_nan() {
+            assert_eq!(from_pjson::<f64>(&to_pjson(&d)).unwrap().to_bits(), bits);
+        }
+        if !f.is_nan() {
+            assert_eq!(from_pjson::<f32>(&to_pjson(&f)).unwrap().to_bits(), bits as u32);
+        }
+    }
+}
+
+// A number and a list with NO declared type take the form their values
+// give them: what the canonical transcode of JSON text does.
+#[test]
+fn what_has_no_type_takes_its_form_from_its_values() {
+    let mut seen = 0;
+    // The id of a pjson_f64 row is the bits of the double whose shortest
+    // digits the number is.
+    for (id, bytes) in rows("pjson_f64") {
+        let f = f64::from_bits(id.parse().unwrap());
+        assert!(pjson::validate(&bytes).is_ok(), "{id}");
+        if f.is_finite() {
+            assert_eq!(from_json(&format!("{f:e}")).unwrap(), bytes, "{f:e} ({id})");
+            assert_eq!(from_pjson::<f64>(&bytes).unwrap().to_bits(), f.to_bits(), "{id}");
+        }
+        // The typed double canonicalized as a document without types.
+        assert_eq!(pjson::canonicalize(&to_pjson(&f)).unwrap(), bytes, "{id}");
+        seen += 1;
+    }
+    assert!(seen >= 274, "{seen}");
+    seen = 0;
+    for (id, bytes) in rows("pjson_list_i64") {
+        let list: Vec<i64> = id.split(',').filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect();
+        assert_eq!(from_json(&format!("[{id}]")).unwrap(), bytes, "[{id}]");
+        assert_eq!(pjson::canonicalize(&to_pjson(&list)).unwrap(), bytes, "[{id}]");
+        assert_eq!(from_pjson::<Vec<i64>>(&bytes).unwrap(), list, "[{id}]");
+        seen += 1;
+    }
+    for (id, bytes) in rows("pjson_list_f64") {
+        let list: Vec<f64> = id.split(',').filter(|t| !t.is_empty()).map(|t| t.parse().unwrap()).collect();
+        assert_eq!(from_json(&format!("[{id}]")).unwrap(), bytes, "[{id}]");
+        assert_eq!(pjson::canonicalize(&to_pjson(&list)).unwrap(), bytes, "[{id}]");
+        assert_eq!(from_pjson::<Vec<f64>>(&bytes).unwrap(), list, "[{id}]");
+        assert!(pjson::validate(&bytes).is_ok());
+        seen += 1;
+    }
+    assert_eq!(seen, 21);
 }
 
 // Every typed encoding is canonical, reads back, and is the canonical
@@ -215,26 +223,34 @@ fn every_typed_encoding_is_canonical() {
         r.bytes = Vec::new(); // (bytes are a string once they are JSON text)
         let bytes = to_pjson(&r);
         assert!(pjson::validate(&bytes).is_ok());
-        assert_eq!(pjson::canonicalize(&bytes).unwrap(), bytes);
         assert_eq!(from_pjson::<Record>(&bytes).unwrap(), r);
+        // The canonical pass over it as a document without types gives a
+        // canonical frame with the same JSON text: the canonical transcode
+        // of that text.
+        let anonymous = pjson::canonicalize(&bytes).unwrap();
+        assert!(pjson::validate(&anonymous).is_ok());
+        assert_eq!(pjson::canonicalize(&anonymous).unwrap(), anonymous);
         let text = to_json(&bytes).unwrap();
-        assert_eq!(text.contains("\"bytes\":\"\""), true);
+        assert_eq!(to_json(&anonymous).unwrap(), text);
+        // (The record has a bytes member, which is a string once it is
+        // text: the two are compared as text.)
+        assert_eq!(to_json(&from_json(&text).unwrap()).unwrap(), text);
     }
 }
 
 #[test]
 fn a_well_formed_frame_that_is_not_the_canonical_one() {
+    // Not the one encoding of its value in its type; then what the
+    // canonical pass gives for it.
     for (frame, canonical) in [
         ("410500", "25"),
         ("700a00", "25"),
-        ("63000000000000f03f", "21"),
-        ("639a9999999999b93f", "700201"),
-        ("62cdcccc3d", "700201"),
-        ("73ac40f9030f", "62abaaaa3e"),
-        ("63000000000000f87f", "61007e"),
+        ("701403", "700201"),
+        ("6b000000000000f83f", "701e01"),
+        ("630100000000f8ff7f", "63000000000000f87f"),
         ("915c7530306539", "90c3a9"),
         ("b0002122230001020300", "b50102030300"),
-        ("b60100020003000300", "b50102030300"),
+        ("b0012122000001000200", "b501020200"),
         ("b50000", "b0000000"),
         ("b000c00078211100010100000100", "c100010000000111782100000100"),
     ] {
@@ -243,6 +259,19 @@ fn a_well_formed_frame_that_is_not_the_canonical_one() {
         assert!(pjson::validate(&b).is_err(), "{frame}");
         assert!(pjson::decode(&b).is_err(), "{frame}");
         assert_eq!(pjson::canonicalize(&b).unwrap(), unhex(canonical), "{frame}");
+    }
+    // Canonical in the type it is written in, and something else as a
+    // document without types.
+    for (frame, anonymous) in [
+        ("b60100020003000300", "b50102030300"),
+        ("639a9999999999b93f", "700201"),
+        ("62cdcccc3d", "700201"),
+        ("630000000000001440", "25"),
+        ("ba9a9999999999b93f9a9999999999c93f0200", "b00070020170040100030200"),
+    ] {
+        let b = unhex(frame);
+        assert!(pjson::validate(&b).is_ok(), "{frame}");
+        assert_eq!(pjson::canonicalize(&b).unwrap(), unhex(anonymous), "{frame}");
     }
     // Text that is not text has no canonical form.
     for frame in ["90ff", "915c7564383030", "9122"] {
@@ -276,7 +305,7 @@ fn a_json_number_keeps_its_value_or_is_an_error() {
     // Minus zero.
     assert_eq!(round("-0"), "-0");
     assert_eq!(round("-0.0"), "-0");
-    assert_eq!(from_json("[-0e5]").unwrap(), unhex("b9000000800100"));
+    assert_eq!(from_json("[-0e5]").unwrap(), unhex("ba00000000000000800100"));
     assert_eq!(round("0"), "0");
     // §7.1: trailing zeros are not kept; the value is.
     assert_eq!(round("100.00"), "100");
@@ -508,7 +537,7 @@ fn probe(bytes: &[u8], counts: &mut (usize, usize, usize)) {
     };
     assert!(pjson::validate(&made).is_ok(), "the canonical form of {} is not canonical", hex());
     assert_eq!(pjson::canonicalize(&made).unwrap(), made, "{}", hex());
-    assert_eq!(made == bytes, canonical, "{}", hex());
+    assert!(made != bytes || canonical, "{}", hex());
     if let Ok(text) = &json {
         let again = from_json(text).unwrap_or_else(|e| panic!("from_json of the text of {}: {e}", hex()));
         assert_eq!(to_json(&again).unwrap(), to_json(&made).unwrap(), "{}", hex());
