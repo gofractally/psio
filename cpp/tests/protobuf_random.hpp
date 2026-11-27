@@ -131,8 +131,13 @@ namespace pb_random_detail
       {
          v.clear();
          for (std::uint64_t i = 0; i < count; ++i)
-            v.insert_or_assign(make<typename X::key_type>(r, depth + 1),
-                               make<typename X::mapped_type>(r, depth + 1));
+         {
+            // The key is drawn first, then the value: as two arguments of
+            // one call their order is the compiler's (gofractally/psio#19).
+            auto key    = make<typename X::key_type>(r, depth + 1);
+            auto mapped = make<typename X::mapped_type>(r, depth + 1);
+            v.insert_or_assign(std::move(key), std::move(mapped));
+         }
       }
       else if constexpr (pb::is_variant_v<X>)
       {
