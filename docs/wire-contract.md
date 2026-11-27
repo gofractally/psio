@@ -17,7 +17,7 @@ The C++ pjson type codes are:
 
 | High nibble | Meaning |
 |---|---|
-| 0 | null |
+| 0 | null; low nibble must be zero |
 | 1 | bool |
 | 2 | inline unsigned integer, 0..15 |
 | 3 | inline negative integer, -1..-15; low nibble zero is invalid |
@@ -42,6 +42,23 @@ The public C++ dynamic double encoder chooses its shortest decimal spelling,
 then uses the compact integer/decimal representation only when shorter than
 binary64. The 274 double fixtures include both selected edge values and a
 reproducible sample of bit patterns. This is coverage, not an exhaustive proof.
+
+Zero with its sign set (`-0.0`, JSON `-0`) is binary16 `61 00 80` in every
+implementation, from a native float and from JSON text; `0` stays `20`.
+
+JSON text and pjson (C++ `psio::pjson_json::from_json` / `psio::pjson_to_json`,
+Rust `pjson_json::from_json` / `to_json`): a JSON number keeps its value or is
+an error. An integer of up to 128 bits of magnitude is an integer; any other
+number keeps the form it had (binary64, or the compact integer / decimal that
+spells it) when that form is exactly the number written, and is a decimal
+otherwise (`1e400` is `70 02 60 0c`; a 36-digit fraction keeps its 36 digits).
+A number whose digits do not fit a 127-bit mantissa is refused. Any JSON value
+may be the document, a scalar included. To text, a decimal is written exactly,
+bytes are standard padded base64, strings keep their text (only the escapes
+JSON requires), member order and duplicate names are kept, and a NaN or an
+infinity is an error rather than `null` or `inf`. Both directions validate the
+pjson bytes first. The `pjson_to_json` rows of `conformance/cpp-golden.json`
+pin bytes and text for C++ and Rust.
 
 Pjson containers use little-endian adaptive offsets and a trailing u16 count.
 Generic objects preserve encounter order and duplicate names. Key hashes are
