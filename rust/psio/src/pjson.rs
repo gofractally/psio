@@ -375,7 +375,8 @@ fn parse_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<Value
 
     match high {
         tag::NULL => {
-            if size != 1 {
+            // (§3, §9: the low nibble of null is reserved and must be 0.)
+            if size != 1 || low != 0 {
                 return Err(err("pjson: invalid null tag"));
             }
             Ok(Value::Null)
@@ -1263,8 +1264,12 @@ pub fn to_pjson<T: Pjson>(value: &T) -> Vec<u8> {
     out
 }
 
-/// One-shot decode entry point.
+/// One-shot decode entry point: the VALIDATING read. The bytes are held
+/// against the format first (`validate`: every tag, count and offset), so
+/// the typed read that follows walks a frame and every malformed input is
+/// an `Err` — never a panic (gofractally/psio#17).
 pub fn from_pjson<T: Pjson>(bytes: &[u8]) -> PjsonResult<T> {
+    validate(bytes)?;
     T::pjson_decode(bytes)
 }
 
@@ -1408,11 +1413,24 @@ fn compact_double(value: f64) -> Option<Value<'static>> {
     (value_size(&result) < 9).then_some(result)
 }
 
+#[inline]
+fn is_minus_zero(f: f64) -> bool {
+    f == 0.0 && f.is_sign_negative()
+}
+
 impl Pjson for f64 {
     fn pjson_size(&self) -> usize {
+        if is_minus_zero(*self) {
+            return 3;
+        }
         compact_double(*self).map(|v| value_size(&v)).unwrap_or(9)
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
+        // Minus zero keeps its sign: binary16 `61 00 80`, the form every
+        // codec writes for it (gofractally/psio#17).
+        if is_minus_zero(*self) {
+            return encode_ieee_float_at(dst, pos, 1, 0x8000);
+        }
         match compact_double(*self) {
             Some(value) => encode_value_at(dst, pos, &value),
             None => encode_ieee_float_at(dst, pos, 3, self.to_bits() as u128),
@@ -1817,6 +1835,8 @@ impl<T: Pjson> crate::Encode<format::Pjson> for T {
 
 impl<T: Pjson> crate::Decode<format::Pjson> for T {
     fn decode(bytes: &[u8]) -> PjsonResult<T> {
+        // The validating read: see `from_pjson`.
+        validate(bytes)?;
         T::pjson_decode(bytes)
     }
 }
@@ -1837,6 +1857,8 @@ impl<T: Pjson> crate::Validate<format::Pjson> for T {
                  pending kernel migration; see docs/spec-compliance.md",
             ));
         }
+        // The format first (every tag, count and offset), then the type.
+        validate(bytes)?;
         T::pjson_validate(bytes)
     }
 }

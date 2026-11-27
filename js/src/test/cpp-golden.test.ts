@@ -15,7 +15,7 @@ test('cpp-golden.json: the JS copy is conformance/cpp-golden.json', () => {
 });
 
 // Every row is run or accounted for. The formats this package implements:
-const RUN = ['pssz', 'key', 'json', 'pjson', 'pjson_f64', 'pjson_extra', 'pjson_typed', 'pjson_invalid'];
+const RUN = ['pssz', 'key', 'json', 'pjson', 'pjson_f64', 'pjson_extra', 'pjson_typed', 'pjson_invalid', 'pjson_to_json'];
 // Formats of the C++ library with no JavaScript implementation (the legacy
 // fracpack rows, frac16 / frac32*, among them).
 const NOT_IN_JS = [
@@ -34,8 +34,8 @@ test('cpp-golden.json: every row is run or is a format JS does not implement', (
     rows: fixtures.length, run: sum(RUN), notImplementedInJs: sum(NOT_IN_JS),
     byFormat: Object.fromEntries(counts),
   }));
-  assert.equal(fixtures.length, 366);
-  assert.equal(sum(RUN), 320);
+  assert.equal(fixtures.length, 391);
+  assert.equal(sum(RUN), 345);
 });
 
 // The C++ record { u32 id; std::string name; std::vector<u32> values; bool active; },
@@ -153,6 +153,26 @@ for (const f of fixtures.filter(f => f.format === 'pjson_invalid')) {
     assert.equal(pjson.validate(bytes), false); assert.throws(() => pjson.decode(bytes));
   });
 }
+// The rows that pin the JSON text of a pjson value (gofractally/psio#17).
+// This package has no pjson-to-JSON-text function, so what runs here is the
+// byte side: each frame validates, decodes, and encodes back to itself.
+for (const f of fixtures.filter(f => f.format === 'pjson_to_json')) {
+  test(`C++ pjson_to_json/${f.id}`, () => {
+    note('pjson_to_json');
+    const bytes = Buffer.from(f.wire_hex, 'hex');
+    assert.equal(pjson.validate(bytes), true);
+    assert.equal(Buffer.from(pjson.encode(pjson.decode(bytes))).toString('hex'), f.wire_hex);
+  });
+}
+test('pjson: minus zero keeps its sign; null has one byte value', () => {
+  assert.deepEqual(pjson.encode(-0), Uint8Array.of(0x61, 0x00, 0x80));
+  assert.deepEqual(pjson.encode(0), Uint8Array.of(0x20));
+  assert.deepEqual(pjson.encode([-0]), Uint8Array.from(Buffer.from('b000610080000100', 'hex')));
+  for (const hex of ['01', '0f', 'b00001000100']) {
+    assert.equal(pjson.validate(Buffer.from(hex, 'hex')), false, hex);
+    assert.throws(() => pjson.decode(Buffer.from(hex, 'hex')), hex);
+  }
+});
 
 // Last: the tests above have run.
 test('cpp-golden.json: every runnable row ran', () => {

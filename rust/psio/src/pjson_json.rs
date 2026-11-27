@@ -48,10 +48,12 @@ pub fn from_json_with(text: &str, opts: FromJsonOptions) -> PjsonResult<Vec<u8>>
     encode_jvalue(&parsed, &opts)
 }
 
-/// pjson bytes → JSON text.  Walks the buffer once and appends
-/// children to the output string.  Error if the buffer is malformed
-/// per `pjson::validate`.
+/// pjson bytes → JSON text.  The bytes are held against the format first
+/// (`pjson::validate`), so what it refuses is an error here too; then one
+/// walk appends the text.  A NaN, an infinity or a string that is not
+/// UTF-8 has no JSON form and is an error.
 pub fn to_json(buf: &[u8]) -> PjsonResult<String> {
+    crate::pjson::validate(buf)?;
     let mut out = String::new();
     out.reserve(buf.len() * 2 + 16);
     walk_to_json(buf, &mut out)?;
@@ -111,20 +113,16 @@ impl JValue {
             }
             JsonKind::Object => {
                 cursor.begin_object()?;
+                // Every member, in the order written: an object keeps its
+                // encounter order and its duplicate names (docs/pjson-spec.md
+                // §5.2, §7.1).
                 let mut members: Vec<(String, JValue)> = Vec::new();
-                let mut index = std::collections::HashMap::<String, usize>::new();
                 loop {
                     let Some(name) = cursor.next_field()?.map(|name| name.into_owned()) else {
                         break;
                     };
                     let value = JValue::read(cursor)?;
-                    match index.get(&name) {
-                        Some(&at) => members[at].1 = value,
-                        None => {
-                            index.insert(name.clone(), members.len());
-                            members.push((name, value));
-                        }
-                    }
+                    members.push((name, value));
                 }
                 JValue::Object(members)
             }
@@ -178,61 +176,123 @@ fn jvalue_to_pjson_value<'a>(
 /// Map a number's source token to a pjson::Value: scan it for `e`/`E`
 /// to set the sci flag, and dispatch integer vs. fractional from the
 /// digit shape.
+/// A JSON number token, exactly: (-1)^neg × mag × 10^scale, with every
+/// trailing zero of the digits moved into the scale. A number whose digits
+/// do not fit 128 bits has no pjson form.
+struct JsonNumber {
+    neg: bool,
+    mag: u128,
+    scale: i64,
+}
+
+fn parse_json_number(token: &str) -> PjsonResult<JsonNumber> {
+    const WIDE: PjsonError =
+        PjsonError("pjson_json: a number with more than 128 bits of significant digits has no pjson form");
+    let bytes = token.as_bytes();
+    let (neg, rest) = match bytes.first() {
+        Some(b'-') => (true, &bytes[1..]),
+        Some(b'+') => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    let (mut mag, mut scale, mut zeros, mut seen_dot, mut digits) = (0u128, 0i64, 0i64, false, 0usize);
+    let mut exponent = 0i64;
+    let mut at = 0;
+    while at < rest.len() {
+        let c = rest[at];
+        at += 1;
+        match c {
+            b'.' if !seen_dot => seen_dot = true,
+            b'e' | b'E' => {
+                let text = std::str::from_utf8(&rest[at..]).map_err(|_| PjsonError("pjson_json: bad exponent"))?;
+                // (An exponent beyond i64 is beyond any decimal's scale.)
+                exponent = text.parse::<i64>().map_err(|_| PjsonError("pjson_json: bad exponent"))?;
+                at = rest.len();
+            }
+            b'0'..=b'9' => {
+                digits += 1;
+                if seen_dot {
+                    scale -= 1;
+                }
+                if c == b'0' {
+                    zeros += 1;
+                } else {
+                    for _ in 0..zeros {
+                        mag = mag.checked_mul(10).ok_or(WIDE)?;
+                    }
+                    zeros = 0;
+                    mag = mag.checked_mul(10).and_then(|m| m.checked_add((c - b'0') as u128)).ok_or(WIDE)?;
+                }
+            }
+            _ => return Err(PjsonError("pjson_json: not a number")),
+        }
+    }
+    if digits == 0 {
+        return Err(PjsonError("pjson_json: not a number"));
+    }
+    let scale = if mag == 0 { 0 } else { scale.saturating_add(zeros).saturating_add(exponent) };
+    Ok(JsonNumber { neg, mag, scale })
+}
+
+/// A JSON number token → the pjson form that holds its VALUE exactly
+/// (docs/pjson-spec.md §7.2, §15.2; gofractally/psio#17):
+///
+/// * minus zero: the float that has one, at the smallest width;
+/// * an integer of up to 128 bits of magnitude: the integer forms;
+/// * a number with a fraction or an exponent: binary64 when that holds it
+///   exactly (its shortest round-trip decimal is the number), else a
+///   decimal;
+/// * a number none of these holds exactly is an error — never a rounded
+///   double, never infinity.
 fn json_number_to_pjson<'a>(
     token: &str,
     opts: &FromJsonOptions,
 ) -> PjsonResult<Value<'a>> {
+    let number = parse_json_number(token)?;
+    if number.mag == 0 && number.neg {
+        // -0: binary16 negative zero (§15.2.1: the smallest width).
+        return Ok(Value::Float { width_log2: 1, bits: 0x8000 });
+    }
     let has_dot = token.bytes().any(|b| b == b'.');
     let has_sci = token.bytes().any(|b| b == b'e' || b == b'E');
-
-    if !has_dot && !has_sci {
-        // Pure integer literal — dispatch via uint / negint.
-        // The leading sign chooses the dispatch path.
-        let bytes = token.as_bytes();
-        let (negative, digits) = match bytes.first() {
-            Some(b'-') => (true, &bytes[1..]),
-            Some(b'+') => (false, &bytes[1..]),
-            _ => (false, bytes),
-        };
-        // Try u128 first; fail if too big (we don't support bigints
-        // beyond 16-byte magnitude per §4.4).
-        let s = std::str::from_utf8(digits).map_err(|_| {
-            PjsonError("pjson_json: number token not utf-8")
-        })?;
-        if negative {
-            // Reject negative-zero by forwarding to the negint path
-            // when |s| > 0; if all zeroes, fall through to UInt(0).
-            let mag: u128 = s.parse().map_err(|_| {
-                PjsonError("pjson_json: integer magnitude overflows u128")
-            })?;
-            if mag == 0 {
-                Ok(Value::UInt(0))
-            } else {
-                Ok(Value::NegInt(mag))
-            }
-        } else {
-            let mag: u128 = s.parse().map_err(|_| {
-                PjsonError("pjson_json: integer overflows u128")
-            })?;
-            Ok(Value::UInt(mag))
+    // The exact decimal: mantissa × 10^scale, or the error of a number it
+    // cannot hold.
+    let decimal = |number: &JsonNumber| -> PjsonResult<Value<'a>> {
+        if number.mag > i128::MAX as u128 {
+            return Err(PjsonError(
+                "pjson_json: a number with more than 127 bits of significant digits and an exponent has no pjson form",
+            ));
         }
-    } else {
-        // Fractional or scientific source — emit ieee_float.  The
-        // sci flag is set per `preserve_sci_notation` && has_sci.
-        let f: f64 = token.parse().map_err(|_| {
-            PjsonError("pjson_json: float parse failed")
-        })?;
-        let _ = opts;  // sci flag set in the post-encode pass below.
-        // We dodge a Value-tree-level sci flag by encoding the float
-        // here with the appropriate flag.  The pjson::Value::Float
-        // variant always emits low_nibble = 3 (binary64, sci=0); to
-        // stamp the sci bit we encode directly into a tiny Vec and
-        if has_sci && opts.preserve_sci_notation {
-            Ok(Value::FloatSci(f))
-        } else {
-            Ok(Value::Float { width_log2: 3, bits: f.to_bits() as u128 })
+        if number.scale > 536_870_911 || number.scale < -536_870_912 {
+            return Err(PjsonError("pjson_json: a number's exponent is outside the range of a decimal"));
+        }
+        let mantissa = number.mag as i128;
+        Ok(Value::Decimal { mantissa: if number.neg { -mantissa } else { mantissa }, scale: number.scale as i32 })
+    };
+    // An integer literal, or a number whose value is an integer that fits.
+    if !has_dot && !has_sci {
+        let integer = (0..number.scale).try_fold(number.mag, |m, _| m.checked_mul(10));
+        return match integer {
+            Some(mag) if number.neg => Ok(Value::NegInt(mag)),
+            Some(mag) => Ok(Value::UInt(mag)),
+            // More digits than 128 bits, the excess being zeros: exact as a
+            // decimal.
+            None => decimal(&number),
+        };
+    }
+    // Binary64 only when it is the number.
+    if let Ok(f) = token.parse::<f64>() {
+        if f.is_finite() {
+            let back = parse_json_number(&format!("{f:e}"))?;
+            if back.neg == number.neg && back.mag == number.mag && back.scale == number.scale {
+                return Ok(if has_sci && opts.preserve_sci_notation {
+                    Value::FloatSci(f)
+                } else {
+                    Value::Float { width_log2: 3, bits: f.to_bits() as u128 }
+                });
+            }
         }
     }
+    decimal(&number)
 }
 
 // ── pjson → JSON (decoder/walker) ────────────────────────────────────────
@@ -338,7 +398,7 @@ fn walk_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
                     return Err(PjsonError("pjson_json: ieee_float width"));
                 }
             };
-            push_f64_text(out, f, sci);
+            push_f64_text(out, f, sci)?;
             Ok(())
         }
         tag::DECIMAL => {
@@ -353,8 +413,7 @@ fn walk_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
             let zz = u128::from_le_bytes(tmp);
             let mantissa = ((zz >> 1) as i128) ^ (-((zz & 1) as i128));
             let (scale, _) = read_varuint_signed(&buf[1 + bc..])?;
-            let f = (mantissa as f64) * 10f64.powi(scale);
-            push_f64_text(out, f, false);
+            push_decimal(out, mantissa, scale as i64);
             Ok(())
         }
         tag::STRING => {
@@ -364,7 +423,7 @@ fn walk_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
             out.push('"');
             let payload = &buf[1..];
             if low == str_flag::RAW_TEXT {
-                emit_string_escaping(out, payload);
+                emit_string_escaping(out, payload)?;
             } else {
                 // ESCAPE_FORM — pjson stored the JSON-escape form
                 // verbatim; emit unchanged.
@@ -382,10 +441,7 @@ fn walk_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
                 return Err(PjsonError("pjson_json: reserved bytes nibble"));
             }
             out.push('"');
-            for b in &buf[1..] {
-                out.push(hex_nybble(b >> 4));
-                out.push(hex_nybble(b & 0x0F));
-            }
+            push_base64(out, &buf[1..]);
             out.push('"');
             Ok(())
         }
@@ -498,12 +554,12 @@ fn walk_typed_array_to_json(buf: &[u8], code: u8, out: &mut String) -> PjsonResu
             tac::F32 => {
                 let mut t = [0u8; 4];
                 t.copy_from_slice(chunk);
-                push_f64_text(out, f32::from_le_bytes(t) as f64, false);
+                push_f64_text(out, f32::from_le_bytes(t) as f64, false)?;
             }
             tac::F64 => {
                 let mut t = [0u8; 8];
                 t.copy_from_slice(chunk);
-                push_f64_text(out, f64::from_le_bytes(t), false);
+                push_f64_text(out, f64::from_le_bytes(t), false)?;
             }
             _ => return Err(PjsonError("pjson_json: typed_array code")),
         }
@@ -560,10 +616,7 @@ fn walk_object_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
         }
         let key = &entry[klen_bytes..klen_bytes + klen];
         out.push('"');
-        emit_string_escaping(
-            out,
-            key,
-        );
+        emit_string_escaping(out, key)?;
         out.push('"');
         out.push(':');
         let value_buf = &entry[klen_bytes + klen..];
@@ -602,8 +655,7 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
             Ok(())
         }
         Value::Decimal { mantissa, scale } => {
-            let f = (*mantissa as f64) * 10f64.powi(*scale);
-            push_f64_text(out, f, false);
+            push_decimal(out, *mantissa, *scale as i64);
             Ok(())
         }
         Value::Float { width_log2, bits } => {
@@ -620,11 +672,11 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                 }
                 _ => return Err(PjsonError("pjson_json: float width")),
             };
-            push_f64_text(out, f, false);
+            push_f64_text(out, f, false)?;
             Ok(())
         }
         Value::FloatSci(f) => {
-            push_f64_text(out, *f, true);
+            push_f64_text(out, *f, true)?;
             Ok(())
         }
         Value::Str(b, fl) => {
@@ -635,22 +687,17 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                         .map_err(|_| PjsonError("pjson_json: bad utf8"))?,
                 );
             } else {
-                emit_string_escaping(out, b);
+                emit_string_escaping(out, b)?;
             }
             out.push('"');
             Ok(())
         }
         Value::Bytes(b, hint) => {
-            // §4.10 / §7 — render per the hint. For now everything
-            // routes through hex; full base64 / base58 / base64url
-            // emit lands when the lib's bytes-formatter helpers
-            // migrate from the conformance driver.
+            // §4.10 hint 0 (the only one the codecs accept): standard
+            // base64, padded.
             let _ = hint;
             out.push('"');
-            for byte in *b {
-                out.push(hex_nybble(byte >> 4));
-                out.push(hex_nybble(byte & 0x0F));
-            }
+            push_base64(out, b);
             out.push('"');
             Ok(())
         }
@@ -712,12 +759,12 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                     tac::F32 => {
                         let mut t = [0u8; 4];
                         t.copy_from_slice(chunk);
-                        push_f64_text(out, f32::from_le_bytes(t) as f64, false);
+                        push_f64_text(out, f32::from_le_bytes(t) as f64, false)?;
                     }
                     tac::F64 => {
                         let mut t = [0u8; 8];
                         t.copy_from_slice(chunk);
-                        push_f64_text(out, f64::from_le_bytes(t), false);
+                        push_f64_text(out, f64::from_le_bytes(t), false)?;
                     }
                     _ => return Err(PjsonError("pjson_json: typed_array code")),
                 }
@@ -732,7 +779,7 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                     out.push(',');
                 }
                 out.push('"');
-                emit_string_escaping(out, k);
+                emit_string_escaping(out, k)?;
                 out.push('"');
                 out.push(':');
                 write_value_as_json(v, out)?;
@@ -753,7 +800,7 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                         out.push(',');
                     }
                     out.push('"');
-                    emit_string_escaping(out, k);
+                    emit_string_escaping(out, k)?;
                     out.push('"');
                     out.push(':');
                     write_value_as_json(v, out)?;
@@ -809,12 +856,15 @@ fn push_i64_decimal(out: &mut String, v: i64) {
 
 /// Emit an f64 in JSON-compatible text. If `sci` is true, force
 /// scientific notation regardless of magnitude.
-fn push_f64_text(out: &mut String, f: f64, sci: bool) {
-    // JSON forbids NaN / Infinity; emit `null` to be lenient (matches
-    // simdjson on-demand's tolerance).  Strict callers can flag this.
+fn push_f64_text(out: &mut String, f: f64, sci: bool) -> PjsonResult<()> {
+    // §7.3: JSON has no NaN or infinity. An error, never `null` in their
+    // place.
     if !f.is_finite() {
-        out.push_str("null");
-        return;
+        return Err(PjsonError("pjson_json: NaN and infinity have no JSON form"));
+    }
+    if f == 0.0 && f.is_sign_negative() {
+        out.push_str("-0");
+        return Ok(());
     }
     if sci {
         // Force scientific notation via the `{:e}` formatter then
@@ -826,11 +876,6 @@ fn push_f64_text(out: &mut String, f: f64, sci: bool) {
         // Default emission — use Rust's Display, which avoids
         // scientific notation for moderate values.
         let s = if f.fract() == 0.0 && f.abs() < 1e16 {
-            // Integer-valued — emit with `.0` suffix? JSON accepts
-            // integers as numbers; the test suite typically expects
-            // round-trippable form.  Choose to emit `1.0` for clarity
-            // when the source carried a fractional flag.  But default
-            // here is the integer form.
             format!("{}", f as i64)
         } else {
             // Use Rust's `Display` which is shortest round-trippable.
@@ -838,34 +883,80 @@ fn push_f64_text(out: &mut String, f: f64, sci: bool) {
         };
         out.push_str(&s);
     }
+    Ok(())
 }
 
-fn emit_string_escaping(out: &mut String, bytes: &[u8]) {
-    for &c in bytes {
+/// mantissa × 10^scale as JSON number text, exactly: plain notation while
+/// that stays short, an exponent otherwise (`1e400`). (C++
+/// `pjson_detail::emit_decimal`: the same text.)
+fn push_decimal(out: &mut String, mantissa: i128, scale: i64) {
+    if mantissa == 0 {
+        out.push('0');
+        return;
+    }
+    let digits = mantissa.unsigned_abs().to_string();
+    if mantissa < 0 {
+        out.push('-');
+    }
+    let point = digits.len() as i64 + scale; // digits before the point
+    if (0..=20).contains(&scale) {
+        out.push_str(&digits);
+        for _ in 0..scale {
+            out.push('0');
+        }
+    } else if scale < 0 && point > 0 {
+        out.push_str(&digits[..point as usize]);
+        out.push('.');
+        out.push_str(&digits[point as usize..]);
+    } else if scale < 0 && point > -7 {
+        out.push_str("0.");
+        for _ in 0..-point {
+            out.push('0');
+        }
+        out.push_str(&digits);
+    } else {
+        out.push_str(&digits[..1]);
+        if digits.len() > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        out.push('e');
+        out.push_str(&(point - 1).to_string());
+    }
+}
+
+fn push_base64(out: &mut String, bytes: &[u8]) {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for chunk in bytes.chunks(3) {
+        let v = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        out.push(ALPHABET[(v >> 18) as usize] as char);
+        out.push(ALPHABET[(v >> 12 & 63) as usize] as char);
+        out.push(if chunk.len() > 1 { ALPHABET[(v >> 6 & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[(v & 63) as usize] as char } else { '=' });
+    }
+}
+
+/// Text as a JSON string body. The bytes are UTF-8 text and are written as
+/// the characters they are (the escapes JSON requires, nothing else);
+/// bytes that are not UTF-8 are not text and have no JSON string.
+fn emit_string_escaping(out: &mut String, bytes: &[u8]) -> PjsonResult<()> {
+    let text = std::str::from_utf8(bytes).map_err(|_| PjsonError("pjson_json: a string is not UTF-8"))?;
+    for c in text.chars() {
         match c {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\r' => out.push_str("\\r"),
-            b'\t' => out.push_str("\\t"),
-            b'\x08' => out.push_str("\\b"),
-            b'\x0C' => out.push_str("\\f"),
-            0x00..=0x1F => {
-                out.push_str(&format!("\\u{:04x}", c));
-            }
-            _ => out.push(c as char),
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0C' => out.push_str("\\f"),
+            '\0'..='\x1F' => out.push_str(&format!("\\u{:04x}", c as u32)),
+            _ => out.push(c),
         }
     }
+    Ok(())
 }
 
-#[inline]
-fn hex_nybble(n: u8) -> char {
-    match n {
-        0..=9 => (b'0' + n) as char,
-        10..=15 => (b'a' + (n - 10)) as char,
-        _ => '?',
-    }
-}
 
 // ── binary16 software widen (decode-only, §4.6) ──────────────────────────
 //

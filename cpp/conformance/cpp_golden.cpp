@@ -4,13 +4,16 @@
 #include <psio/flatbuf.hpp>
 #include <psio/msgpack.hpp>
 #include <psio/pjson.hpp>
+#include <psio/pjson_to_json.hpp>
 #include <psio/pjson_typed.hpp>
 #include <psio/protobuf.hpp>
 
 #include <iostream>
 #include <bit>
 #include <limits>
+#include <span>
 #include <stdexcept>
+#include <tuple>
 #include <variant>
 
 struct InteropRecord {
@@ -42,6 +45,27 @@ struct InteropEnvelope {
 PSIO_REFLECT(InteropEnvelope, head, rows, note, choice)
 
 bool first_fixture = true;
+
+// A row that also carries a JSON text ("json"), escaped.
+template <typename Bytes>
+void emit_json(std::string_view format, std::string_view id, const Bytes& bytes, std::string_view json) {
+   if (!first_fixture) std::cout << ",\n";
+   first_fixture = false;
+   std::cout << "  {\"format\":\"" << format << "\",\"id\":\"" << id << "\",\"wire_hex\":\"";
+   constexpr char digits[] = "0123456789abcdef";
+   for (auto byte : bytes) {
+      auto b = static_cast<unsigned char>(byte);
+      std::cout << digits[b >> 4] << digits[b & 15];
+   }
+   std::cout << "\",\"json\":\"";
+   for (char c : json) {
+      if (c == '"' || c == '\\') std::cout << '\\' << c;
+      else if (static_cast<unsigned char>(c) < 0x20)
+         std::cout << "\\u00" << digits[static_cast<unsigned char>(c) >> 4] << digits[c & 15];
+      else std::cout << c;
+   }
+   std::cout << "\"}";
+}
 
 template <typename Bytes>
 void emit(std::string_view format, std::string_view id, const Bytes& bytes) {
@@ -179,11 +203,62 @@ int main() {
          {"reserved_bytes", {0xa1,0}}, {"truncated_array", {0xb0,0,1,0}},
          {"truncated_object", {0xc0,0,1,0}},
          {"row_key_outside_buffer", {0xc1,0,1,0xff,0xff,0xff,0xfe,0,0,0}},
-         {"row_reserved_width", {0xc1,0xf0,1,0,0,0,0,0,0,0}}
+         {"row_reserved_width", {0xc1,0xf0,1,0,0,0,0,0,0,0}},
+         // §3 / §9: the low nibble of null is reserved and must be 0.
+         {"null_low_nibble_1", {0x01}}, {"null_low_nibble_15", {0x0f}},
+         {"null_low_nibble_in_array", {0xb0,0x00,0x01,0x00,0x01,0x00}}
       }) {
          if (psio::pjson::validate(bytes) || psio::pjson::try_decode(bytes))
             throw std::runtime_error("Accepted invalid pjson: " + id);
          emit("pjson_invalid", id, bytes);
+      }
+      // pjson bytes and the JSON text every codec must give for them
+      // (gofractally/psio#17): what a validator accepts converts to JSON,
+      // exactly. The text is in the row ("json"); the id names the case.
+      for (const auto& [id, bytes, json] : std::vector<std::tuple<std::string, std::vector<std::uint8_t>, std::string>>{
+         {"uint_inline", {0x25}, "5"},
+         {"nint_inline", {0x35}, "-5"},
+         {"u64_max", {0x47,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff}, "18446744073709551615"},
+         {"u128_max", {0x4f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff},
+          "340282366920938463463374607431768211455"},
+         {"negint_128_bits", {0x5f,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff},
+          "-340282366920938463463374607431768211455"},
+         {"minus_zero_binary16", {0x61,0x00,0x80}, "-0"},
+         {"half_binary16", {0x61,0x00,0x38}, "0.5"},
+         {"decimal_tenth", {0x70,0x02,0x01}, "0.1"},
+         {"decimal_1e400", {0x70,0x02,0x60,0x0c}, "1e400"},
+         {"decimal_minus_15e-401", {0x70,0x1d,0x61,0x0c}, "-1.5e-400"},
+         {"decimal_scale_2", {0x70,0x02,0x04}, "100"},
+         {"decimal_small_fraction", {0x70,0x02,0x07}, "0.0001"},
+         {"string_raw_non_ascii", {0x90,0x68,0xc3,0xa9,0xe4,0xb8,0xad}, "\"h\xc3\xa9\xe4\xb8\xad\""},
+         {"string_raw_needs_escape", {0x90,0x61,0x22,0x5c,0x0a,0x62}, "\"a\\\"\\\\\\nb\""},
+         {"string_escape_form", {0x91,0x5c,0x75,0x30,0x30,0x65,0x39}, "\"\\u00e9\""},
+         {"bytes_base64", {0xa0,0x09,0x08}, "\"CQg=\""},
+         {"array_generic", {0xb0,0x00,0x21,0x22,0x23,0x00,0x01,0x02,0x03,0x00}, "[1,2,3]"},
+         {"array_typed_u16", {0xb6,0x01,0x00,0x02,0x00,0x03,0x00,0x03,0x00}, "[1,2,3]"},
+         {"object_duplicate_keys", {0xc0,0x00,0x61,0x21,0x61,0x22,0x1f,0x1f,0x00,0x01,0x02,0x01,0x02,0x00},
+          "{\"a\":1,\"a\":2}"},
+         {"object_order_kept", {0xc0,0x00,0x62,0x21,0x61,0x22,0x3f,0x1f,0x00,0x01,0x02,0x01,0x02,0x00},
+          "{\"b\":1,\"a\":2}"},
+         {"row_array", {0xc1,0x00,0x02,0x00,0x00,0x00,0x01,0x01,0x00,0x00,0x01,0x11,0xe5,0x78,0x79,
+                        0x21,0x22,0x00,0x01,0x23,0x24,0x00,0x01,0x00,0x04,0x02,0x00},
+          "[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]"},
+         // The frame on which the C++ view recursed without end: an object
+         // holding a typed array.
+         {"typed_array_in_object", {0xc0,0x00,0x76,0x61,0x6c,0x75,0x65,0x73,0xb7,0x01,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+                                    0x00,0x01,0x00,0x03,0x00,0xaf,0x00,0x06,0x01,0x00},
+          "{\"values\":[1,256,65536]}"}
+      }) {
+         const std::span<const std::uint8_t> view{bytes.data(), bytes.size()};
+         // (The C++ dynamic value holds 127 bits of magnitude: the two
+         // 128-bit integers are valid and have no pjson_value.)
+         const bool wide = id == "u128_max" || id == "negint_128_bits";
+         if (!psio::pjson::validate(view) || psio::pjson::try_decode(view).has_value() == wide)
+            throw std::runtime_error("Refused valid pjson: " + id);
+         const std::string text = psio::pjson_to_json(view);
+         if (text != json)
+            throw std::runtime_error("pjson_to_json of " + id + " is " + text + ", not " + json);
+         emit_json("pjson_to_json", id, bytes, json);
       }
       std::cout << "\n]\n";
    } catch (const std::exception& e) {

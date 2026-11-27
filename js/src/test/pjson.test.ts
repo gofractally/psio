@@ -79,7 +79,6 @@ const DRAFT_ONLY: { [id: string]: string } = {
   row_array_empty: 'a row array with no keys (C++ rejects K == 0)',
 };
 const DRAFT_ONLY_REJECT: { [id: string]: string } = {
-  null_low_nibble_set_rejected: 'revision 2 does not check the low nibble of null (C++: size == 1)',
   ieee_float_bit3_set_reserved: 'IEEE bit 3 is the notation hint in revision 2',
 };
 

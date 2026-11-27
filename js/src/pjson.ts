@@ -108,6 +108,8 @@ function ieee(value: PjsonFloat): Uint8Array {
 }
 function number(value: number): Uint8Array {
   if (!Number.isFinite(value)) return ieee(PjsonFloat.fromNumber(value));
+  // Minus zero keeps its sign: binary16, the form every codec writes for it.
+  if (Object.is(value, -0)) return Uint8Array.of(0x61, 0x00, 0x80);
   // Match to_chars' shortest notation, which counts the exponent sign and
   // its minimum two digits when choosing fixed versus scientific notation.
   const scientific = value.toExponential().replace(/e([+-])(\d)$/, 'e$10$2');
@@ -208,7 +210,7 @@ function decodeKey(bytes: Uint8Array): string | PjsonString {
 function decode(data: Uint8Array, depth = 0): PjsonValue {
   require(depth <= 64 && data.length > 0, 'Empty value or maximum depth exceeded');
   const low = data[0] & 15, tag = data[0] >> 4, len = data.length;
-  if (tag === 0) { require(len === 1, 'Invalid null'); return null; }
+  if (tag === 0) { require(len === 1 && low === 0, 'Invalid null'); return null; }
   if (tag === 1) { require(len === 1 && low <= 1, 'Invalid bool'); return low === 1; }
   if (tag === 2) { require(len === 1, 'Invalid inline uint'); return BigInt(low); }
   if (tag === 3) { require(len === 1 && low !== 0, 'Invalid inline negative integer'); return -BigInt(low); }
