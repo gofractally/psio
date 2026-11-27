@@ -1,17 +1,41 @@
 #!/usr/bin/env python3
-"""Compare public C++, Rust and JS validators on deterministic mutations and random inputs."""
+"""Compare the public C++, Rust and JS pjson validators on deterministic mutations and random inputs.
+
+The three validators must be built first; the tool does not build them:
+
+    cmake --build <build-dir> --target psio_pjson_validate
+    (cd rust && cargo build -p psio --example pjson_validate --features pjson)
+    (cd js && npm ci && npm run build)
+
+    python3 tools/check-pjson-validation.py \
+        <build-dir>/cpp/conformance/psio_pjson_validate \
+        rust/target/debug/examples/pjson_validate [--cases N]
+
+Each validator reads one hex frame per line and prints one verdict per line. The inputs are every pjson
+row of conformance/cpp-golden.json, three single-byte mutations of each, and N random frames (default
+10 000; the seed is fixed, so a run is reproducible). The tool prints the number of cases on which all
+three agree, or the first disagreements and a non-zero exit.
+"""
 import argparse
 import json
 from pathlib import Path
 import random
 import subprocess
 
-parser = argparse.ArgumentParser(description=__doc__)
+parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
 parser.add_argument('cpp_validator', type=Path)
 parser.add_argument('rust_validator', type=Path)
 parser.add_argument('--cases', type=int, default=10000)
 args = parser.parse_args()
+for label, path, how in [
+    ('C++', args.cpp_validator, 'cmake --build <build-dir> --target psio_pjson_validate'),
+    ('Rust', args.rust_validator, '(cd rust && cargo build -p psio --example pjson_validate --features pjson)'),
+]:
+    if not path.is_file():
+        raise SystemExit(f'{label} validator not found at {path}; build it with: {how}')
 root = Path(__file__).resolve().parent.parent
+if not (root / 'js/dist/pjson.js').is_file():
+    raise SystemExit('the JS validator is not built; run: (cd js && npm ci && npm run build)')
 rng = random.Random(20260916)
 fixtures = json.loads((root / 'conformance/cpp-golden.json').read_text())
 inputs = [bytes.fromhex(f['wire_hex']) for f in fixtures
