@@ -27,6 +27,8 @@
 #include <psio/key.hpp>
 #include <psio/msgpack.hpp>
 #include <psio/mutable_view.hpp>
+#include <psio/pjson.hpp>
+#include <psio/pjson_typed.hpp>
 #include <psio/protobuf.hpp>
 #include <psio/pssz.hpp>
 #include <psio/pssz_view.hpp>
@@ -259,5 +261,18 @@ TEST_CASE("format concept: what is not a format, and what a format does not take
    static_assert(!psio::codec_for<psio::bson, int>);      // a BSON document is a record
    static_assert(psio::codec_for<psio::pssz, int>);
    static_assert(psio::codec_for<psio::json, std::vector<std::string>>);
+
+   // pjson as it stands is OUTSIDE the concept (gofractally/psio#17, stage
+   // S3 brings it in). Declared gaps: `psio::pjson` is a struct of static
+   // functions over `pjson_value`, not a tag (no format_tag_base, no
+   // tag_invoke, so no psio::encode / decode / validate / size_of, no
+   // helper family, no buffer, no transcode); its bytes are std::uint8_t and
+   // its failures std::runtime_error / bool; the typed path is
+   // `from_struct` and `view<T, pjson_format>::to_struct`, a view without
+   // unpack() or a trusted store. These flip when pjson joins.
+   static_assert(!psio::format<psio::pjson>);
+   static_assert(!psio::format<psio::pjson_format>);
+   static_assert(!psio::codec_for<psio::pjson, FcRecord>);
+   static_assert(!psio::encodes<psio::pjson_format, FcRecord>);
    SUCCEED();
 }

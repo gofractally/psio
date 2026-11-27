@@ -67,6 +67,8 @@ class FormatConcept(unittest.TestCase):
                 fmt.decode(T, cut)
 
     def test_the_format_values_and_their_capabilities(self) -> None:
+        # pjson has no Python implementation yet (gofractally/psio#17, S4): a declared gap.
+        self.assertFalse(hasattr(formats, "pjson"))
         self.assertEqual(sorted(f.name for f in formats.ALL), sorted(EXPECTED))
         for fmt in formats.ALL:
             self.assertEqual((fmt.text, fmt.decode_trusted is not None, fmt.view is not None),

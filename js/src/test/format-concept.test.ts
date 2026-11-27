@@ -48,6 +48,10 @@ function exercise(format: Format, type: FormatType, value: unknown, golden?: str
 }
 
 test('format concept: the format values and their capabilities', () => {
+  // pjson as it stands is outside the concept (gofractally/psio#17, S3):
+  // `pjsonEncode` / `pjsonDecode` / `pjsonValidate` work on dynamic values
+  // and take no type, so there is no `formats.pjson`. This flips when it joins.
+  assert.equal('pjson' in formats, false);
   assert.deepEqual(Object.keys(formats).sort(), Object.keys(EXPECTED).sort());
   for (const format of Object.values(formats)) {
     const expected = EXPECTED[format.name];

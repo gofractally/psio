@@ -123,7 +123,10 @@ format_case!(ssz, psio::Ssz, caps("ssz", false, TrustedRead::Parses, true), view
 #[cfg(feature = "flatbuf")]
 format_case!(flatbuf, psio::flatbuf::Flatbuf, caps("flatbuf", false, TrustedRead::ValidatedBytesOnly, true), view = true);
 // Gaps against the concept (psio#18, B7): no generic view (`ViewFormat`) for
-// capnp, wit and pjson; no trusted read for protobuf and pjson.
+// capnp, wit and pjson; no trusted read for protobuf and pjson. pjson is in
+// the traits as it stands (gofractally/psio#17): its tag is
+// `pjson::format::Pjson`, not at the crate root, its types are declared by
+// `pjson_struct!` rather than a derive, and it is behind a cargo feature.
 #[cfg(feature = "capnp")]
 format_case!(capnp, psio::capnp::Capnp, caps("capnp", false, TrustedRead::Parses, false));
 #[cfg(feature = "wit")]
