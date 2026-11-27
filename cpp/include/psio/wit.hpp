@@ -955,7 +955,12 @@ namespace psio {
       friend std::size_t tag_invoke(decltype(::psio::size_of), wit,
                                     const T& v)
       {
-         return detail::wit_impl::packed_size_of(v);
+         // The size of the encoding. `packed_size_of` is the encoder's
+         // reserve — an upper bound that counts the worst-case alignment
+         // padding of every list — so it is not this (gofractally/psio#20).
+         // The exact size depends on where the bump allocator has reached
+         // when each list is placed: it is found by encoding, as flatbuf's.
+         return ::psio::encode(wit{}, v).size();
       }
 
       template <typename T>

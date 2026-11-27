@@ -93,12 +93,11 @@ namespace
    template <> inline constexpr capabilities expected<psio::bson>    {false, true,  true,  false, false, false, false, false, false, false, true};
    // Gaps against the concept (psio#18, B7): flatbuf and capnp REPLACE the
    // sink; wit has no sink overload; the ssz and wit views have no
-   // unpack() (their view traits lack it); wit's size_of is not the size of
-   // its encoding (27 for a record that encodes to 24 bytes).
+   // unpack() (their view traits lack it).
    template <> inline constexpr capabilities expected<psio::flatbuf> {false, true,  false, false, false, true,  true,  true,  false, true, true};
    template <> inline constexpr capabilities expected<psio::capnp>   {false, true,  false, false, false, true,  false, true,  false, true, true};
    template <> inline constexpr capabilities expected<psio::protobuf>{false, true,  true,  false, true,  false, false, false, false, false, true};
-   template <> inline constexpr capabilities expected<psio::wit>     {false, false, false, false, false, true,  true,  false, false, false, false};
+   template <> inline constexpr capabilities expected<psio::wit>     {false, false, false, false, false, true,  true,  false, false, false, true};
 
    template <psio::format F, typename T>
    constexpr capabilities actual()
@@ -251,6 +250,31 @@ FORMAT_CASE(flatbuf)
 FORMAT_CASE(capnp)
 FORMAT_CASE(protobuf)
 FORMAT_CASE(wit)
+
+// gofractally/psio#20: size_of was the encoder's reserve (an upper bound).
+namespace
+{
+   struct FcAligned
+   {
+      std::string                              a;
+      std::vector<std::uint64_t>               wide;
+      std::vector<std::uint16_t>               narrow;
+      std::vector<std::vector<std::uint32_t>>  nested;
+      friend bool operator==(const FcAligned&, const FcAligned&) = default;
+      PSIO_REFLECT(FcAligned, a, wide, narrow, nested)
+   };
+}
+TEST_CASE("format concept: size_of is the size of the encoding, for lists of every alignment", "[format][concept]")
+{
+   for (const auto& v : {FcAligned{}, FcAligned{"x", {1}, {2, 3}, {{4}, {}, {5, 6}}},
+                         FcAligned{"abc", {1, 2, 3}, {7}, {{1, 2, 3}}}, FcAligned{"abcdefg", {}, {1, 2, 3}, {}}})
+   {
+      CHECK(psio::size_of(psio::wit{}, v) == psio::encode(psio::wit{}, v).size());
+      CHECK(psio::size_of(psio::pssz{}, v) == psio::encode(psio::pssz{}, v).size());
+      CHECK(psio::size_of(psio::ssz{}, v) == psio::encode(psio::ssz{}, v).size());
+      CHECK(psio::size_of(psio::bin{}, v) == psio::encode(psio::bin{}, v).size());
+   }
+}
 
 TEST_CASE("format concept: what is not a format, and what a format does not take", "[format][concept]")
 {

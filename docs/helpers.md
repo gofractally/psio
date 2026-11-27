@@ -1249,8 +1249,7 @@ The four operations by tag are `psio::encode` (fast write),
 `cpp/tests/format_concept_tests.cpp` instantiates one function for every
 format through an alias and holds each format's capabilities against a
 table. What the formats do not yet do alike is in that table, not hidden:
-`flatbuf` and `capnp` replace the sink, `wit` has no sink overload and its
-`size_of` is larger than its encoding for the record tested (27 against 24), the `ssz` and `wit` views have no `unpack()`.
+`flatbuf` and `capnp` replace the sink, `wit` has no sink overload, the `ssz` and `wit` views have no `unpack()`.
 pjson is not a format in this sense yet (gofractally/psio#17). The same test
 exists for Rust (`rust/psio/tests/format_concept.rs`, over `psio::Format` and
 `psio::Codec<F>`), TypeScript (`formats.pssz` ..., `js/src/format.ts`) and
