@@ -3,19 +3,22 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   PsszSchema, bool, generateSchema, list, rawString, record, u32, type PsszType,
-  PJSON_WIRE_REVISION, pjsonDecode, pjsonEncode, pjsonValidate, PjsonDecimal, PjsonFloat,
+  PJSON_FLOAT_MODEL, PJSON_WIRE_REVISION, pjsonCanonicalize, pjsonDecode, pjsonEncode, pjsonLazy, pjsonValidate,
+  PjsonDecimal, PjsonFloat,
 } from '../index.js';
 
 // The checked-in copy (tools/check-cpp-golden.py keeps it equal to C++) is
 // the shared fixture, byte for byte.
 const fixtureText = readFileSync(new URL('../../src/test/cpp-golden.json', import.meta.url), 'utf8');
-const fixtures: { format: string; id: string; wire_hex: string }[] = JSON.parse(fixtureText);
+const fixtures: { format: string; id: string; wire_hex: string; json?: string; canonical_hex?: string }[] =
+  JSON.parse(fixtureText);
 test('cpp-golden.json: the JS copy is conformance/cpp-golden.json', () => {
   assert.equal(fixtureText, readFileSync(new URL('../../../conformance/cpp-golden.json', import.meta.url), 'utf8'));
 });
 
 // Every row is run or accounted for. The formats this package implements:
-const RUN = ['pssz', 'key', 'json', 'pjson', 'pjson_f64', 'pjson_extra', 'pjson_typed', 'pjson_invalid', 'pjson_to_json'];
+const RUN = ['pssz', 'key', 'json', 'pjson', 'pjson_f64', 'pjson_extra', 'pjson_typed', 'pjson_invalid', 'pjson_to_json',
+  'pjson_f32', 'pjson_list_i64', 'pjson_list_f64', 'pjson_list_f32'];
 // Formats of the C++ library with no JavaScript implementation (the legacy
 // fracpack rows, frac16 / frac32*, among them).
 const NOT_IN_JS = [
@@ -34,8 +37,8 @@ test('cpp-golden.json: every row is run or is a format JS does not implement', (
     rows: fixtures.length, run: sum(RUN), notImplementedInJs: sum(NOT_IN_JS),
     byFormat: Object.fromEntries(counts),
   }));
-  assert.equal(fixtures.length, 391);
-  assert.equal(sum(RUN), 345);
+  assert.equal(fixtures.length, 599);
+  assert.equal(sum(RUN), 553);
 });
 
 // The C++ record { u32 id; std::string name; std::vector<u32> values; bool active; },
@@ -126,8 +129,10 @@ test('pjson boundary and malformed input', () => {
   assert.throws(() => pjson.encode(new Array(65536).fill(null)), /65535/);
   let nested: any = null; for (let n = 0; n < 65; ++n) nested = [nested];
   assert.throws(() => pjson.encode(nested), /depth/);
+  // One NaN: the quiet one, in binary16.
   const nan = pjson.encode(new PjsonFloat(0x7ff0000000000001n));
-  assert.equal(Buffer.from(nan).toString('hex'), '63000000000000f87f');
+  assert.equal(Buffer.from(nan).toString('hex'), '61007e');
+  assert.equal(Buffer.from(pjsonLazy.encode(new PjsonFloat(0x7ff0000000000001n))).toString('hex'), '63000000000000f87f');
 });
 
 test('C++ pjson numeric encoding across exponents', () => {
@@ -153,21 +158,57 @@ for (const f of fixtures.filter(f => f.format === 'pjson_invalid')) {
     assert.equal(pjson.validate(bytes), false); assert.throws(() => pjson.decode(bytes));
   });
 }
-// The rows that pin the JSON text of a pjson value (gofractally/psio#17).
-// This package has no pjson-to-JSON-text function, so what runs here is the
-// byte side: each frame validates, decodes, and encodes back to itself.
+// Well-formed frames and the canonical frame of the same value
+// (gofractally/psio#17). This package has no pjson-to-JSON-text function,
+// so what runs here is the byte side: the lazy tag reads the frame; pjson
+// reads it exactly when it is canonical; canonicalizing it gives the
+// canonical frame.
 for (const f of fixtures.filter(f => f.format === 'pjson_to_json')) {
   test(`C++ pjson_to_json/${f.id}`, () => {
     note('pjson_to_json');
     const bytes = Buffer.from(f.wire_hex, 'hex');
-    assert.equal(pjson.validate(bytes), true);
-    assert.equal(Buffer.from(pjson.encode(pjson.decode(bytes))).toString('hex'), f.wire_hex);
+    assert.equal(pjsonLazy.validate(bytes), true);
+    pjsonLazy.decode(bytes);
+    assert.equal(pjson.validate(bytes), f.wire_hex === f.canonical_hex);
+    if (f.wire_hex === f.canonical_hex) pjson.decode(bytes); else assert.throws(() => pjson.decode(bytes));
+    assert.equal(Buffer.from(pjsonCanonicalize(bytes)).toString('hex'), f.canonical_hex);
+    assert.equal(pjson.validate(Buffer.from(f.canonical_hex!, 'hex')), true);
   });
 }
+// What a float stands for (PJSON_FLOAT_MODEL; DEFAULT CHOSEN, AWAITING
+// OWNER). The id of a row is the binary32's bits.
+test('C++ pjson_f32: a binary32 is the number it stands for', () => {
+  assert.equal(PJSON_FLOAT_MODEL, 'declared-width');
+  for (const f of fixtures.filter(f => f.format === 'pjson_f32')) {
+    note('pjson_f32');
+    assert.equal(Buffer.from(pjson.encode(new PjsonFloat(BigInt(f.id), 2))).toString('hex'), f.wire_hex, f.id);
+    assert.equal(pjson.validate(Buffer.from(f.wire_hex, 'hex')), true, f.id);
+  }
+  // 0.1 is 0.1 from a binary32, a binary64 and a JS number.
+  assert.equal(hex(pjson.encode(new PjsonFloat(0x3dcccccdn, 2))), '700201');
+  assert.equal(hex(pjson.encode(0.1)), '700201');
+  assert.equal(hex(pjson.encode(new PjsonDecimal(1n, -1))), '700201');
+});
+// A list's form is its values', not its element type's. The id is the list.
+for (const format of ['pjson_list_i64', 'pjson_list_f64', 'pjson_list_f32'])
+  test(`C++ ${format}: a list of numbers has the form its values give it`, () => {
+    for (const f of fixtures.filter(f => f.format === format)) {
+      note(format);
+      const items = f.id === '' ? [] : f.id.split(',');
+      const list = format === 'pjson_list_i64' ? items.map(BigInt) :
+        format === 'pjson_list_f64' ? items.map(Number) :
+        items.map(t => { const d = new DataView(new ArrayBuffer(4)); d.setFloat32(0, Number(t), true);
+                         return new PjsonFloat(BigInt(d.getUint32(0, true)), 2); });
+      assert.equal(hex(pjson.encode(list)), f.wire_hex, `[${f.id}]`);
+      assert.equal(pjson.validate(Buffer.from(f.wire_hex, 'hex')), true, `[${f.id}]`);
+      assert.equal(hex(pjson.encode(pjson.decode(Buffer.from(f.wire_hex, 'hex')))), f.wire_hex, `[${f.id}]`);
+    }
+  });
 test('pjson: minus zero keeps its sign; null has one byte value', () => {
   assert.deepEqual(pjson.encode(-0), Uint8Array.of(0x61, 0x00, 0x80));
   assert.deepEqual(pjson.encode(0), Uint8Array.of(0x20));
-  assert.deepEqual(pjson.encode([-0]), Uint8Array.from(Buffer.from('b000610080000100', 'hex')));
+  // (An array of numbers is a typed array: -0 in binary32.)
+  assert.deepEqual(pjson.encode([-0]), Uint8Array.from(Buffer.from('b9000000800100', 'hex')));
   for (const hex of ['01', '0f', 'b00001000100']) {
     assert.equal(pjson.validate(Buffer.from(hex, 'hex')), false, hex);
     assert.throws(() => pjson.decode(Buffer.from(hex, 'hex')), hex);

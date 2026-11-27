@@ -1,4 +1,3 @@
-#pragma once
 //
 // psio/pjson_view.hpp — zero-copy view over pjson bytes.
 //
@@ -11,8 +10,15 @@
 // `find()` / `at()`, computing each child's `(ptr, size)` from the
 // parent's slot table.
 
+// <psio/pjson.hpp> includes this header at its end (the canonical form is
+// written over the view), so the body has its own guard: whichever of the
+// two is included first, the view is defined after the core of pjson.hpp
+// and before what needs it.
 #include <psio/format.hpp>
 #include <psio/pjson.hpp>
+
+#ifndef PSIO_PJSON_VIEW_HPP
+#define PSIO_PJSON_VIEW_HPP
 
 #include <psio/detail/find_byte.hpp>  // psio::detail::find_byte — SWAR 8-byte scan
 
@@ -344,8 +350,8 @@ namespace psio {
          {
             switch (synth_param_)
             {
-               case tac_f32:
-               { float f;  std::memcpy(&f, data_, 4); return f; }
+               case tac_f32:   // through the number it stands for (pjson_number_model.hpp)
+               { float f;  std::memcpy(&f, data_, 4); return to_double(float_reads_as(f)); }
                case tac_f64:
                { double d; std::memcpy(&d, data_, 8); return d; }
                default:
@@ -366,9 +372,11 @@ namespace psio {
             }
             if (width_bits == ieee_width_f32)
             {
+               // A binary32 frame read as a double is the double nearest the
+               // number the float stands for: not a widening cast.
                float f;
                std::memcpy(&f, data_ + 1, 4);
-               return static_cast<double>(f);
+               return to_double(float_reads_as(f));
             }
             if (width_bits == ieee_width_f16)
             {
@@ -380,7 +388,52 @@ namespace psio {
             throw std::runtime_error(
                 "pjson_view::as_double: ieee_float width not supported");
          }
-         return as_number().to_double();
+         return to_double(number());
+      }
+
+      // The value as a binary32: the float nearest the number. A binary32
+      // frame or element gives its own bits back.
+      float as_float() const
+      {
+         using namespace pjson_detail;
+         if (form_ == form_typed_array_element && synth_param_ == tac_f32)
+         {
+            float f;
+            std::memcpy(&f, data_, 4);
+            return f;
+         }
+         if (form_ != form_typed_array_element)
+         {
+            scalar_ok_();
+            if ((data_[0] >> 4) == t_ieee_float && (data_[0] & ieee_width_mask) == ieee_width_f32)
+            {
+               float f;
+               std::memcpy(&f, data_ + 1, 4);
+               return f;
+            }
+         }
+         return to_float(number());
+      }
+
+      // The number this value is (psio/pjson_number_model.hpp): a decimal
+      // value or -0 / NaN / an infinity, whatever form carries it.
+      pjson_detail::number_value number() const
+      {
+         using namespace pjson_detail;
+         if (form_ == form_typed_array_element)
+            return typed_element_number(static_cast<std::uint8_t>(synth_param_), data_);
+         const auto k = type();
+         if (k != kind::integer && k != kind::decimal && k != kind::floating)
+            throw std::runtime_error("pjson_view::number: not a number");
+         scalar_ok_();
+         if (k == kind::decimal)
+         {
+            std::int32_t      scale;
+            const std::size_t bc = static_cast<std::size_t>(data_[0] & 0x0F) + 1;
+            if (read_varint62(data_ + 1 + bc, size_ - 1 - bc, scale) == 0)
+               throw std::runtime_error("pjson_view: bad decimal");
+         }
+         return frame_number(data_, size_);
       }
 
       pjson_number as_number() const
@@ -402,7 +455,15 @@ namespace psio {
             return pjson_number{zz128_decode(zz), scale};
          }
          if (k == kind::floating)
-            return pjson_number::from_double(as_double());
+         {
+            // The number the float stands for (pjson_number_model.hpp).
+            const auto n = number();
+            if (n.kind == number_kind::minus_zero) return pjson_number{0, 0};   // (a pjson_number has no sign of zero)
+            if (n.kind != number_kind::finite || (n.d.mag >> 127))
+               throw std::invalid_argument("pjson: NaN/Inf not representable");
+            const __int128 m = static_cast<__int128>(n.d.mag);
+            return pjson_number{n.d.neg ? -m : m, n.d.scale};
+         }
          throw std::runtime_error("pjson_view::as_number: not a number");
       }
 
@@ -617,7 +678,8 @@ namespace psio {
          switch (code)
          {
             case pjson_detail::tac_f32:
-            { float v;  std::memcpy(&v, eb, 4); return v; }
+            { float v;  std::memcpy(&v, eb, 4);
+              return pjson_detail::to_double(pjson_detail::float_reads_as(v)); }
             case pjson_detail::tac_f64:
             { double v; std::memcpy(&v, eb, 8); return v; }
             // Integer fall-throughs: explicit conversion to double.
@@ -1151,3 +1213,5 @@ namespace psio {
    using pjson_view = dynamic_view<pjson_format>;
 
 }  // namespace psio
+
+#endif  // PSIO_PJSON_VIEW_HPP

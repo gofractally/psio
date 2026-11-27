@@ -19,7 +19,8 @@ from psio import ir
 FX = fixture("cpp-golden.json")
 RUN = ("pssz", "key", "json")
 NOT_IN_PYTHON = (
-    "pjson", "pjson_f64", "pjson_extra", "pjson_typed", "pjson_invalid", "pjson_to_json", "ssz", "frac32", "frac16",
+    "pjson", "pjson_f64", "pjson_extra", "pjson_typed", "pjson_invalid", "pjson_to_json", "pjson_f32",
+    "pjson_list_i64", "pjson_list_f64", "pjson_list_f32", "ssz", "frac32", "frac16",
     "frac32_invalid_strings", "frac32_invalid_optionals", "bin", "borsh", "bincode", "avro", "capnp", "wit",
     "bson", "msgpack", "protobuf", "flatbuf",
 )
@@ -40,7 +41,7 @@ class CppGolden(unittest.TestCase):
             self.assertTrue(fmt in RUN or fmt in NOT_IN_PYTHON, f"unclassified format {fmt}")
         run = sum(counts[f] for f in RUN)
         print(f"cpp-golden.json: rows={len(FX)} run={run} not implemented in Python={len(FX) - run}")
-        self.assertEqual(len(FX), 391)
+        self.assertEqual(len(FX), 599)
         self.assertEqual(run, 6)
 
     def check(self, t: psio.SchemaType, values: dict) -> int:

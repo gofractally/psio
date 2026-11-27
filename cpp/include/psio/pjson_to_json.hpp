@@ -107,6 +107,26 @@ namespace psio {
          out.append(digits, nd);
       }
 
+      // Every number is printed from the value it is, so one value has one
+      // text whichever form carries it (and whichever language prints it).
+      inline void emit_number(std::string& out, const number_value& v)
+      {
+         switch (v.kind)
+         {
+            case number_kind::minus_zero: out.append("-0"); return;
+            case number_kind::finite: break;
+            default: throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
+         }
+         unsigned __int128 whole;
+         if (as_integer(v.d, whole))
+         {
+            if (v.d.neg && whole) out.push_back('-');
+            return emit_u128(out, whole);
+         }
+         const __int128 m = static_cast<__int128>(v.d.mag);
+         emit_decimal(out, v.d.neg ? -m : m, v.d.scale);
+      }
+
       inline void emit_base64(std::string& out, const std::uint8_t* p, std::size_t n)
       {
          static constexpr char alphabet[] =
@@ -290,36 +310,10 @@ namespace psio {
                // §4.6 width selector. JSON forbids NaN/Inf, so any
                // non-finite IEEE bit pattern raises (callers control
                // their input domain).
-               std::uint8_t width_bits = low & ieee_width_mask;
-               double d;
-               if (width_bits == ieee_width_f64)
-               {
-                  std::memcpy(&d, p + 1, 8);
-               }
-               else if (width_bits == ieee_width_f32)
-               {
-                  float f;
-                  std::memcpy(&f, p + 1, 4);
-                  d = static_cast<double>(f);
-               }
-               else if (width_bits == ieee_width_f16)
-               {
-                  std::uint16_t bits;
-                  std::memcpy(&bits, p + 1, 2);
-                  d = f16_bits_to_double(bits);
-               }
-               else
-               {
-                  throw std::runtime_error(
-                      "pjson_to_json: ieee_float width not supported");
-               }
-               // §7.3: JSON has no NaN or infinity. An error, never `inf`
-               // or `null` in their place.
-               if (!std::isfinite(d))
-                  throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
-               char tmp[32];
-               auto r = std::to_chars(tmp, tmp + sizeof(tmp), d);
-               out.append(tmp, r.ptr);
+               const std::uint8_t width_bits = low & ieee_width_mask;
+               if (width_bits < ieee_width_f16 || width_bits > ieee_width_f64)
+                  throw std::runtime_error("pjson_to_json: ieee_float width not supported");
+               emit_number(out, float_frame_number(width_bits, p + 1));
                return;
             }
             case t_string:
@@ -472,24 +466,12 @@ namespace psio {
                      }
                      case tac_f32:
                      {
-                        float v; std::memcpy(&v, eb, 4);
-                        if (!std::isfinite(v))
-                           throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
-                        char tmp[32];
-                        auto r =
-                            std::to_chars(tmp, tmp + sizeof(tmp), v);
-                        out.append(tmp, r.ptr);
+                        emit_number(out, typed_element_number(tac_f32, eb));
                         break;
                      }
                      case tac_f64:
                      {
-                        double v; std::memcpy(&v, eb, 8);
-                        if (!std::isfinite(v))
-                           throw std::runtime_error("pjson_to_json: NaN and infinity have no JSON form");
-                        char tmp[32];
-                        auto r =
-                            std::to_chars(tmp, tmp + sizeof(tmp), v);
-                        out.append(tmp, r.ptr);
+                        emit_number(out, typed_element_number(tac_f64, eb));
                         break;
                      }
                      default:
@@ -521,7 +503,7 @@ namespace psio {
                         if (!first) out.push_back(',');
                         first = false;
                         out.push_back('"');
-                        out.append(k);
+                        emit_string_escaping(out, k);
                         out.push_back('"');
                         out.push_back(':');
                         direct_pjson_to_json(out, field.data(), field.size());
@@ -574,11 +556,10 @@ namespace psio {
                          read_varuint62(entry, entry_size, excess);
                      klen = 0xFFu + static_cast<std::size_t>(excess);
                   }
-                  // Emit key (escape-form already in pjson bytes).
+                  // A member name is raw text: escaped as a string is.
                   out.push_back('"');
-                  out.append(reinterpret_cast<const char*>(
-                                 entry + klen_bytes),
-                             klen);
+                  emit_string_escaping(
+                     out, std::string_view{reinterpret_cast<const char*>(entry + klen_bytes), klen});
                   out.push_back('"');
                   out.push_back(':');
                   std::size_t value_off = klen_bytes + klen;
@@ -604,7 +585,7 @@ namespace psio {
       // The walker reads a frame without comparing anything: the bytes are
       // validated first, so it is never handed anything else. What the
       // validator accepts, this converts (gofractally/psio#17).
-      if (!pjson::validate(bytes))
+      if (!pjson_lazy::validate(bytes))
          throw std::runtime_error("pjson_to_json: the bytes are not a pjson value");
       std::string out;
       out.reserve(bytes.size());
@@ -616,7 +597,7 @@ namespace psio {
    inline void pjson_to_json(std::span<const std::uint8_t> bytes,
                              std::string&                  out)
    {
-      if (!pjson::validate(bytes))
+      if (!pjson_lazy::validate(bytes))
          throw std::runtime_error("pjson_to_json: the bytes are not a pjson value");
       out.clear();
       pjson_detail::direct_pjson_to_json(out, bytes.data(), bytes.size());

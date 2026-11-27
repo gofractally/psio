@@ -24,7 +24,7 @@
 //! behaviour-changing features (`arbitrary_precision`, `preserve_order`).
 
 use crate::json::{JsonCursor, JsonKind, TextCursor};
-use crate::pjson::{encode, obj_form, str_flag, tag, PjsonError, PjsonResult, Value};
+use crate::pjson::{obj_form, str_flag, tag, PjsonError, PjsonResult, Value};
 
 /// JSON text → pjson bytes.
 ///
@@ -34,7 +34,21 @@ use crate::pjson::{encode, obj_form, str_flag, tag, PjsonError, PjsonResult, Val
 /// wire-equivalent to what the C++ `pjson_json::from_json` produces for
 /// the same input (subject to format-detection differences — see
 /// `from_json_with` for the controllable level).
+///
+/// JSON text that is not a type. Two transcodes, and the caller says which:
+/// this one is the canonical pjson of the document (one encoding per value;
+/// row arrays and typed arrays where the values allow, so it looks at every
+/// array); [`from_json_lazy`] is the quick one, well-formed and NOT
+/// canonical.
 pub fn from_json(text: &str) -> PjsonResult<Vec<u8>> {
+    crate::pjson_canonical::canonical_of_valid(&from_json_lazy(text)?)
+}
+
+/// The quick transcode (`pjson::lazy`): what it parses is written as it
+/// comes, without a look at the values. The one writer that is not
+/// canonical; `pjson::canonicalize` turns its output into what
+/// [`from_json`] gives.
+pub fn from_json_lazy(text: &str) -> PjsonResult<Vec<u8>> {
     from_json_with(text, FromJsonOptions::default())
 }
 
@@ -53,7 +67,9 @@ pub fn from_json_with(text: &str, opts: FromJsonOptions) -> PjsonResult<Vec<u8>>
 /// walk appends the text.  A NaN, an infinity or a string that is not
 /// UTF-8 has no JSON form and is an error.
 pub fn to_json(buf: &[u8]) -> PjsonResult<String> {
-    crate::pjson::validate(buf)?;
+    // (Any well-formed frame has a JSON text: the canonical one and the
+    // lazy transcode's alike.)
+    crate::pjson::lazy::validate(buf)?;
     let mut out = String::new();
     out.reserve(buf.len() * 2 + 16);
     walk_to_json(buf, &mut out)?;
@@ -141,7 +157,7 @@ impl JValue {
 fn encode_jvalue(v: &JValue, opts: &FromJsonOptions) -> PjsonResult<Vec<u8>> {
     let val = jvalue_to_pjson_value(v, opts)?;
     let mut out = vec![];
-    encode(&val, &mut out);
+    crate::pjson::lazy::encode(&val, &mut out);
     Ok(out)
 }
 
@@ -364,43 +380,7 @@ fn walk_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
             push_u128_decimal(out, mag);
             Ok(())
         }
-        tag::IEEE_FLOAT => {
-            let width_bits = low & 0x07;
-            let sci = (low & 0x08) != 0;
-            let f = match width_bits {
-                1 => {
-                    // binary16 — software widen.
-                    if 1 + 2 != buf.len() {
-                        return Err(PjsonError("pjson_json: f16 size"));
-                    }
-                    let mut tmp = [0u8; 2];
-                    tmp.copy_from_slice(&buf[1..3]);
-                    let bits = u16::from_le_bytes(tmp);
-                    f16_bits_to_f64(bits)
-                }
-                2 => {
-                    if 1 + 4 != buf.len() {
-                        return Err(PjsonError("pjson_json: f32 size"));
-                    }
-                    let mut tmp = [0u8; 4];
-                    tmp.copy_from_slice(&buf[1..5]);
-                    f32::from_le_bytes(tmp) as f64
-                }
-                3 => {
-                    if 1 + 8 != buf.len() {
-                        return Err(PjsonError("pjson_json: f64 size"));
-                    }
-                    let mut tmp = [0u8; 8];
-                    tmp.copy_from_slice(&buf[1..9]);
-                    f64::from_le_bytes(tmp)
-                }
-                _ => {
-                    return Err(PjsonError("pjson_json: ieee_float width"));
-                }
-            };
-            push_f64_text(out, f, sci)?;
-            Ok(())
-        }
+        tag::IEEE_FLOAT => push_number(out, &crate::pjson_canonical::frame_number(buf)?),
         tag::DECIMAL => {
             // Render via mantissa × 10^scale → f64; not exact, but
             // matches view_to_json/pjson_to_json.
@@ -552,14 +532,10 @@ fn walk_typed_array_to_json(buf: &[u8], code: u8, out: &mut String) -> PjsonResu
                 push_u128_decimal(out, u64::from_le_bytes(t) as u128);
             }
             tac::F32 => {
-                let mut t = [0u8; 4];
-                t.copy_from_slice(chunk);
-                push_f64_text(out, f32::from_le_bytes(t) as f64, false)?;
+                push_number(out, &crate::pjson_canonical::typed_element_number(tac::F32, chunk))?;
             }
             tac::F64 => {
-                let mut t = [0u8; 8];
-                t.copy_from_slice(chunk);
-                push_f64_text(out, f64::from_le_bytes(t), false)?;
+                push_number(out, &crate::pjson_canonical::typed_element_number(tac::F64, chunk))?;
             }
             _ => return Err(PjsonError("pjson_json: typed_array code")),
         }
@@ -631,7 +607,7 @@ fn walk_row_array_to_json(buf: &[u8], out: &mut String) -> PjsonResult<()> {
     // since row_array is the schema-shared shape and the walker is
     // 100+ lines.  Round-trip correctness is preserved via the
     // canonical Value-tree path.
-    let v = crate::pjson::decode(buf)?;
+    let v = crate::pjson::lazy::decode(buf)?;
     write_value_as_json(&v, out)
 }
 
@@ -659,26 +635,12 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
             Ok(())
         }
         Value::Float { width_log2, bits } => {
-            let f = match *width_log2 {
-                1 => f16_bits_to_f64(*bits as u16),
-                2 => f32::from_bits(*bits as u32) as f64,
-                3 => f64::from_bits(*bits as u64),
-                4 => {
-                    // binary128 → f64 widening for JSON display is
-                    // lossy. Emit the full hex via numeric_string
-                    // wrap rather than truncate silently.
-                    return Err(PjsonError(
-                        "pjson_json: f128 → JSON not yet supported"));
-                }
-                _ => return Err(PjsonError("pjson_json: float width")),
-            };
-            push_f64_text(out, f, false)?;
-            Ok(())
+            if !(1..=3).contains(width_log2) {
+                return Err(PjsonError("pjson_json: float width"));
+            }
+            push_number(out, &crate::pjson_canonical::float_frame_number(*width_log2, &bits.to_le_bytes()))
         }
-        Value::FloatSci(f) => {
-            push_f64_text(out, *f, true)?;
-            Ok(())
-        }
+        Value::FloatSci(f) => push_number(out, &crate::pjson_canonical::f64_reads_as(*f)),
         Value::Str(b, fl) => {
             out.push('"');
             if *fl == str_flag::ESCAPE_FORM {
@@ -757,14 +719,10 @@ fn write_value_as_json<'a>(v: &Value<'a>, out: &mut String) -> PjsonResult<()> {
                         push_u128_decimal(out, u64::from_le_bytes(t) as u128);
                     }
                     tac::F32 => {
-                        let mut t = [0u8; 4];
-                        t.copy_from_slice(chunk);
-                        push_f64_text(out, f32::from_le_bytes(t) as f64, false)?;
+                        push_number(out, &crate::pjson_canonical::typed_element_number(tac::F32, chunk))?;
                     }
                     tac::F64 => {
-                        let mut t = [0u8; 8];
-                        t.copy_from_slice(chunk);
-                        push_f64_text(out, f64::from_le_bytes(t), false)?;
+                        push_number(out, &crate::pjson_canonical::typed_element_number(tac::F64, chunk))?;
                     }
                     _ => return Err(PjsonError("pjson_json: typed_array code")),
                 }
@@ -854,35 +812,28 @@ fn push_i64_decimal(out: &mut String, v: i64) {
     }
 }
 
-/// Emit an f64 in JSON-compatible text. If `sci` is true, force
-/// scientific notation regardless of magnitude.
-fn push_f64_text(out: &mut String, f: f64, sci: bool) -> PjsonResult<()> {
-    // §7.3: JSON has no NaN or infinity. An error, never `null` in their
-    // place.
-    if !f.is_finite() {
-        return Err(PjsonError("pjson_json: NaN and infinity have no JSON form"));
-    }
-    if f == 0.0 && f.is_sign_negative() {
-        out.push_str("-0");
+/// A number as JSON text, from the value it is: one value has one text
+/// whichever form carries it (C++ `pjson_detail::emit_number`). §7.3: JSON
+/// has no NaN or infinity — an error, never `null` in their place.
+fn push_number(out: &mut String, v: &crate::pjson_canonical::Number) -> PjsonResult<()> {
+    use crate::pjson_canonical::Number;
+    let d = match v {
+        Number::MinusZero => {
+            out.push_str("-0");
+            return Ok(());
+        }
+        Number::Finite(d) => d,
+        _ => return Err(PjsonError("pjson_json: NaN and infinity have no JSON form")),
+    };
+    if let Some(whole) = d.as_integer() {
+        if d.neg && whole != 0 {
+            out.push('-');
+        }
+        push_u128_decimal(out, whole);
         return Ok(());
     }
-    if sci {
-        // Force scientific notation via the `{:e}` formatter then
-        // tidy up the result so it's valid JSON (Rust's `{:e}` emits
-        // forms like `1.5e10` which JSON accepts).
-        let formatted = format!("{:e}", f);
-        out.push_str(&formatted);
-    } else {
-        // Default emission — use Rust's Display, which avoids
-        // scientific notation for moderate values.
-        let s = if f.fract() == 0.0 && f.abs() < 1e16 {
-            format!("{}", f as i64)
-        } else {
-            // Use Rust's `Display` which is shortest round-trippable.
-            format!("{}", f)
-        };
-        out.push_str(&s);
-    }
+    let mantissa = d.mag as i128;
+    push_decimal(out, if d.neg { -mantissa } else { mantissa }, d.scale as i64);
     Ok(())
 }
 
@@ -1051,29 +1002,15 @@ mod tests {
     }
 
     #[test]
-    fn sci_notation_preserved() {
-        // 1.5e10 should round-trip with scientific notation.
+    fn sci_notation_is_a_spelling_not_a_value() {
+        // 1.5e10 is 15000000000: the canonical form holds the value, and
+        // its text is the value's. The lazy transcode keeps the hint bit.
         let json = r#"{"x":1.5e10}"#;
-        let pjson = from_json(json).unwrap();
-        let json2 = to_json(&pjson).unwrap();
-        // The output should contain 'e' (scientific notation).
-        assert!(
-            json2.bytes().any(|b| b == b'e' || b == b'E'),
-            "sci flag lost: {}",
-            json2
-        );
-        // Parsed value still equal.
-        let a: JValue = serde_json::from_str(json).unwrap();
-        let b: JValue = serde_json::from_str(&json2).unwrap();
-        // Numbers compare via their f64 value.
-        let a_n = a["x"].as_f64().unwrap();
-        let b_n = b["x"].as_f64().unwrap();
-        assert!(
-            (a_n - b_n).abs() < 1e-6,
-            "value mismatch: {} vs {}",
-            a_n,
-            b_n
-        );
+        assert_eq!(to_json(&from_json(json).unwrap()).unwrap(), r#"{"x":15000000000}"#);
+        let lazy = from_json_lazy(json).unwrap();
+        assert_ne!(lazy, from_json(json).unwrap());
+        assert_eq!(crate::pjson::canonicalize(&lazy).unwrap(), from_json(json).unwrap());
+        assert_eq!(to_json(&lazy).unwrap(), r#"{"x":15000000000}"#);
     }
 
     #[test]

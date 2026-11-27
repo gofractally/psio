@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { createXXHash3 } from 'hash-wasm';
-import { PjsonError, pjsonDecode, pjsonEncode, pjsonValidate } from '../index.js';
+import { PjsonError, pjsonCanonicalize, pjsonDecode, pjsonEncode, pjsonLazy, pjsonValidate } from '../index.js';
 import { xxh3 } from '../xxh3.js';
 
 function prng(seed: number): () => number {
@@ -83,7 +83,7 @@ const DRAFT_ONLY_REJECT: { [id: string]: string } = {
 };
 
 test('pjson corpus: conformance/fixtures and conformance/fixtures-reject', () => {
-  const count = { fixtures: 0, decoded: 0, reencodedSameBytes: 0, draftOnly: 0, rejects: 0, rejected: 0, draftOnlyReject: 0 };
+  const count = { fixtures: 0, decoded: 0, reencodedSameBytes: 0, draftOnly: 0, noCanonicalForm: 0, rejects: 0, rejected: 0, draftOnlyReject: 0 };
   const draftOnly: string[] = [];
   for (const file of files(new URL('fixtures/', corpus))) {
     const fx: Fixture = JSON.parse(readFileSync(file, 'utf8'));
@@ -91,20 +91,24 @@ test('pjson corpus: conformance/fixtures and conformance/fixtures-reject', () =>
     ++count.fixtures;
     if (fx.id in DRAFT_ONLY) {
       // Unsupported in revision 2: refused with a typed error.
-      assert.equal(pjsonValidate(bytes), false, fx.id);
-      assert.throws(() => pjsonDecode(bytes), PjsonError, fx.id);
+      assert.equal(pjsonLazy.validate(bytes), false, fx.id);
+      assert.throws(() => pjsonLazy.decode(bytes), PjsonError, fx.id);
       draftOnly.push(fx.id);
       ++count.draftOnly;
       continue;
     }
-    assert.equal(pjsonValidate(bytes), true, fx.id);
-    const value = pjsonDecode(bytes);
+    assert.equal(pjsonLazy.validate(bytes), true, fx.id);
+    const value = pjsonLazy.decode(bytes);
     ++count.decoded;
     // What decodes re-encodes to bytes that decode again (the draft's
     // canonical-form rules are not revision 2's: equal bytes are counted).
-    const again = pjsonEncode(value);
-    assert.equal(pjsonValidate(again), true, fx.id);
-    if (hex(again) === fx.wire_hex) ++count.reencodedSameBytes;
+    // (A draft string that is not text has no canonical form.)
+    let again: Uint8Array | undefined;
+    try { again = pjsonEncode(value); } catch (e) { assert.ok(e instanceof PjsonError, fx.id); ++count.noCanonicalForm; }
+    if (again) {
+      assert.equal(pjsonValidate(again), true, fx.id);
+      if (hex(again) === fx.wire_hex) ++count.reencodedSameBytes;
+    }
   }
   const draftOnlyReject: string[] = [];
   for (const file of files(new URL('fixtures-reject/', corpus))) {
@@ -112,13 +116,13 @@ test('pjson corpus: conformance/fixtures and conformance/fixtures-reject', () =>
     const bytes = Uint8Array.from(Buffer.from(fx.wire_hex, 'hex'));
     ++count.rejects;
     if (fx.id in DRAFT_ONLY_REJECT) {
-      assert.equal(pjsonValidate(bytes), true, fx.id);
+      assert.equal(pjsonLazy.validate(bytes), true, fx.id);
       draftOnlyReject.push(fx.id);
       ++count.draftOnlyReject;
       continue;
     }
-    assert.equal(pjsonValidate(bytes), false, fx.id);
-    assert.throws(() => pjsonDecode(bytes), PjsonError, fx.id);
+    assert.equal(pjsonLazy.validate(bytes), false, fx.id);
+    assert.throws(() => pjsonLazy.decode(bytes), PjsonError, fx.id);
     ++count.rejected;
   }
   console.log('pjson draft corpus:', JSON.stringify({ ...count, draftOnlyReasons: DRAFT_ONLY, draftOnlyRejectReasons: DRAFT_ONLY_REJECT }));
@@ -136,21 +140,39 @@ test('pjson: truncated and mutated bytes fail only with a PjsonError', () => {
   for (const file of files(new URL('fixtures/', corpus)))
     sources.push(Uint8Array.from(Buffer.from((JSON.parse(readFileSync(file, 'utf8')) as Fixture).wire_hex, 'hex')));
   sources.push(pjsonEncode({ id: 42n, name: 'Alice', tags: ['a', 'b'], nested: { 'a.b': [1.5, null, true] } }));
-  const stats = { frames: 0, accepted: 0, rejected: 0 };
+  const stats = { frames: 0, accepted: 0, rejected: 0, canonical: 0 };
   const check = (bytes: Uint8Array, what: string) => {
     ++stats.frames;
-    const valid = pjsonValidate(bytes);
+    // `valid`: a well-formed frame (the lazy tag). `canonical`: the one
+    // encoding of its value (pjson).
+    const valid = pjsonLazy.validate(bytes), canonical = pjsonValidate(bytes);
+    assert.ok(!canonical || valid, `${what}: canonical and not well-formed`);
+    let decodes = true;
+    try { pjsonDecode(bytes); } catch (e) { decodes = false; assert.ok(e instanceof PjsonError, `${what}: threw ${String(e)}`); }
+    assert.equal(decodes, canonical, `${what}: validate and decode disagree`);
     try {
-      const value = pjsonDecode(bytes);
+      pjsonLazy.decode(bytes);
       assert.ok(valid, `${what}: validate rejects, decode accepts`);
-      // What decodes can be written, and that reads back.
-      assert.ok(pjsonValidate(pjsonEncode(value)), what);
       ++stats.accepted;
     } catch (e) {
       assert.ok(e instanceof PjsonError, `${what}: threw ${String(e)}`);
       assert.ok(!valid, `${what}: validate accepts, decode rejects`);
       ++stats.rejected;
+      return;
     }
+    // The canonical form of a well-formed frame: it exists unless the frame
+    // holds text that is not text; it is canonical and its own canonical
+    // form; and it is the frame itself exactly when the frame is canonical.
+    let made: Uint8Array;
+    try { made = pjsonCanonicalize(bytes); } catch (e) {
+      assert.ok(e instanceof PjsonError, `${what}: threw ${String(e)}`);
+      assert.ok(!canonical, `${what}: a canonical frame with no canonical form`);
+      return;
+    }
+    assert.ok(pjsonValidate(made), `${what}: the canonical form is not canonical`);
+    assert.equal(hex(pjsonCanonicalize(made)), hex(made), what);
+    assert.equal(hex(made) === hex(bytes), canonical, what);
+    stats.canonical += canonical ? 1 : 0;
   };
   sources.forEach((good, n) => {
     check(good, `source ${n}`);

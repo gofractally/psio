@@ -152,6 +152,16 @@ namespace psio {
             // as a string_view directly into the JSON buffer — zero
             // copy, zero unescape pass.
             std::string_view k = field.escaped_key();
+            // A member name is stored as raw text (there is no flag to say
+            // otherwise): the rare name that carries an escape is unescaped
+            // here, in the lazy transcode too.
+            std::vector<std::uint8_t> key_text;
+            if (std::memchr(k.data(), '\\', k.size()) != nullptr)
+            {
+               if (!append_unescaped(key_text, reinterpret_cast<const std::uint8_t*>(k.data()), k.size()))
+                  throw std::runtime_error("pjson_json: a member name is not text (a lone surrogate)");
+               k = std::string_view{reinterpret_cast<const char*>(key_text.data()), key_text.size()};
+            }
             simdjson::ondemand::value v = field.value();
             if (N == cap)
             {
@@ -484,6 +494,21 @@ namespace psio {
 
    }  // namespace pjson_detail
 
+   // JSON text that is not a type -> pjson. Two transcodes, and the caller
+   // says which:
+   //
+   //   from_json       the canonical pjson of the document (psio::pjson):
+   //                   one encoding per value, row arrays and typed arrays
+   //                   where the values allow. It looks at every array.
+   //   from_json_lazy  the quick transcode (psio::pjson_lazy): what it
+   //                   parses is copied as it comes — strings in escape
+   //                   form, arrays generic, numbers as spelled where that
+   //                   is exact. Well-formed, NOT canonical; the one writer
+   //                   that is not. `psio::pjson::canonicalize` turns its
+   //                   output into what from_json gives.
+   //
+   // (JSON text of a known type is not either of these: it is read as the
+   // type and encoded by the typed encoder.)
    struct pjson_json
    {
       static std::vector<std::uint8_t> from_json(std::string_view text)
@@ -493,6 +518,20 @@ namespace psio {
       }
       static std::vector<std::uint8_t>
       from_json(simdjson::ondemand::parser& parser, std::string_view text)
+      {
+         const auto lazy = from_json_lazy(parser, text);
+         std::vector<std::uint8_t> out;
+         out.reserve(lazy.size());
+         pjson_detail::append_canonical(out, lazy);
+         return out;
+      }
+      static std::vector<std::uint8_t> from_json_lazy(std::string_view text)
+      {
+         simdjson::ondemand::parser parser;
+         return from_json_lazy(parser, text);
+      }
+      static std::vector<std::uint8_t>
+      from_json_lazy(simdjson::ondemand::parser& parser, std::string_view text)
       {
          simdjson::padded_string padded(text);
          simdjson::ondemand::document doc;

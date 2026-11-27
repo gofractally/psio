@@ -205,12 +205,20 @@ namespace psio {
             // The wire integer is up to 128 bits; the member is F. A value
             // F cannot hold is an error, not a wrapped one (and a uint64_t
             // above 2^63 is read as what it is).
-            const __int128 x = v.is_integer() ? v.as_int128() : static_cast<__int128>(v.as_int64());
-            if (x < static_cast<__int128>(std::numeric_limits<F>::min()) ||
-                x > static_cast<__int128>(std::numeric_limits<F>::max()))
+            // Any form that carries an integer is one: 5 is 5.
+            const auto        n = v.number();
+            unsigned __int128 whole;
+            if (n.kind != pjson_detail::number_kind::finite || !pjson_detail::as_integer(n.d, whole))
+               throw std::runtime_error("pjson: a number that is not an integer where the member is one");
+            const bool negative = n.d.neg && whole != 0;
+            if (negative ? (!std::is_signed_v<F> ||
+                            whole > static_cast<unsigned __int128>(std::numeric_limits<F>::max()) + 1)
+                         : whole > static_cast<unsigned __int128>(std::numeric_limits<F>::max()))
                throw std::out_of_range("pjson: an integer does not fit the member's type");
-            return static_cast<F>(x);
+            return negative ? static_cast<F>(0 - static_cast<std::make_unsigned_t<F>>(whole)) : static_cast<F>(whole);
          }
+         else if constexpr (std::is_same_v<F, float>)
+            return v.as_float();
          else if constexpr (std::is_floating_point_v<F>)
             return static_cast<F>(v.as_double());
          else if constexpr (std::is_same_v<F, std::string>)
@@ -414,11 +422,10 @@ namespace psio {
          }
          else if constexpr (std::is_floating_point_v<F>)
          {
-            if (!std::isfinite(v)) return 9;
-            if (v == 0 && std::signbit(v)) return 3;  // -0.0: binary16
-            pjson_number n   = pjson_number::from_double(static_cast<double>(v));
-            std::size_t  dec = number_size(n);
-            return dec < 9 ? dec : 9;
+            // The number the float stands for, in its one canonical form
+            // (psio/pjson_number_model.hpp).
+            std::uint8_t buf[max_number_size + 8];
+            return canonical_number_bytes(native_number(v), buf);
          }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
@@ -441,8 +448,9 @@ namespace psio {
             }
             else if constexpr (is_typed_array_elem_<E>)
             {
-               // Typed-array body: 1 tag + N*sizeof(E) + 2 count.
-               return 1u + v.size() * sizeof(E) + 2u;
+               // A list of numbers: the form its values give it.
+               const std::span<const E> list{v.data(), v.size()};
+               return typed_list_size(typed_list_code(list), list.size());
             }
             else if constexpr (Reflected<E>)
             {
@@ -450,6 +458,7 @@ namespace psio {
                // shared across records (compile-time-known from
                // reflect<E>); two passes over records to size and pick
                // adaptive widths.
+               if (v.empty()) return 4;   // the empty array has one form
                return typed_row_array_size<E>(
                   std::span<const E>{v.data(), v.size()});
             }
@@ -503,10 +512,20 @@ namespace psio {
                                        static_cast<std::uint64_t>(v));
          }
          else if constexpr (std::is_floating_point_v<F>)
-            return encode_double_at(dst, pos, static_cast<double>(v));
+         {
+            std::uint8_t buf[max_number_size + 8];
+            const auto   n = canonical_number_bytes(native_number(v), buf);
+            std::memcpy(dst + pos, buf, n);
+            return n;
+         }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
-            return encode_string_at(dst, pos, std::string_view(v));
+         {
+            const std::string_view text(v);
+            if (!is_utf8(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()))
+               throw std::runtime_error("pjson: a string is not UTF-8: it has no pjson form");
+            return encode_string_at(dst, pos, text);
+         }
          else if constexpr (typed_is_optional_<F>::value)
          {
             if (!v.has_value())
@@ -536,11 +555,11 @@ namespace psio {
             }
             else if constexpr (is_typed_array_elem_<E>)
             {
-               // Bulk typed-array fast path — single memcpy per
-               // vector regardless of length.
-               return encode_typed_array_at<E>(
-                  dst, pos,
-                  std::span<const E>{v.data(), v.size()});
+               // The narrowest typed array that holds every element (one
+               // memcpy when that is E's own width); the generic empty
+               // array for an empty list.
+               const std::span<const E> list{v.data(), v.size()};
+               return encode_typed_list_at<E>(dst, pos, list, typed_list_code(list));
             }
             else if constexpr (Reflected<E>)
             {
@@ -548,6 +567,12 @@ namespace psio {
                // us homogeneity for free: every element has the same K
                // fields in the same order, so the schema hoists out of
                // each record by construction.
+               if (v.empty())
+               {
+                  dst[pos] = static_cast<std::uint8_t>(t_array << 4);
+                  dst[pos + 1] = dst[pos + 2] = dst[pos + 3] = 0;
+                  return 4;
+               }
                return encode_typed_row_array_at<E>(
                   dst, pos,
                   std::span<const E>{v.data(), v.size()});
@@ -800,22 +825,23 @@ namespace psio {
       std::size_t           start = pos;
       dst[pos++] =
          static_cast<std::uint8_t>(pjson_detail::t_object << 4);
-      // value_data size derives from total - constant overhead. Use it
-      // to pick the slot_w_code, then emit the width byte.
-      std::size_t value_data_size  =
-         total - 1 /*tag*/ - 1 /*width*/ - N /*hash*/ - 2 /*count*/;
-      // Solve for slot_w by trying each width: total = 1+1+vd+N+(slot_w+1)*N+2,
-      // so (slot_w+1)*N = total - 4 - vd - N, thus slot_w = (total - 4 - vd - N)/N - 1.
-      // But pjson_encoded_size already picked slot_w from value_data_size.
-      // Recompute consistently here.
-      std::uint8_t slot_w_code =
-         pjson_detail::width_code_for(value_data_size);
-      std::size_t  slot_w      = pjson_detail::width_bytes(slot_w_code);
-      // Adjust value_data_size given the picked slot_w (the size formula
-      // depends on slot_w). pjson_encoded_size used the same formula so
-      // the totals agree; recompute vd from the remainder.
-      value_data_size =
-         total - 1 - 1 - N - (slot_w + 1) * N - 2;
+      // The slot width is the one pjson_encoded_size picked from the size of
+      // the value data, and that size is what is left of `total` once the
+      // slot table — which the width sizes — is taken away. So: the width
+      // whose own remainder asks for it. (Taking the width from `total`
+      // less the constant parts only, as this did, picks two-byte slots for
+      // value data of 256 - 2N .. 255 bytes and writes a frame whose parts
+      // do not add up.)
+      std::uint8_t slot_w_code     = 0;
+      std::size_t  slot_w          = 1;
+      std::size_t  value_data_size = 0;
+      for (;; ++slot_w_code)
+      {
+         slot_w          = pjson_detail::width_bytes(slot_w_code);
+         value_data_size = total - 1 - 1 - N - (slot_w + 1) * N - 2;
+         if (slot_w_code == 3 || pjson_detail::width_code_for(value_data_size) == slot_w_code)
+            break;
+      }
       dst[pos++] = slot_w_code;  // width byte
       std::size_t value_data_start = pos;
       std::size_t hash_table_pos   = value_data_start + value_data_size;

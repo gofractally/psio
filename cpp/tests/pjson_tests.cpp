@@ -25,6 +25,7 @@
 #include <vector>
 
 using psio::pjson;
+using psio::pjson_lazy;
 using psio::pjson_array;
 using psio::pjson_bytes;
 using psio::pjson_null;
@@ -267,8 +268,9 @@ TEST_CASE("pjson wire: ieee_float emits binary64 with width selector",
    // forced to the IEEE path: NaN.
    auto nan_b = pjson::encode(pjson_value{
        std::numeric_limits<double>::quiet_NaN()});
-   REQUIRE(nan_b.size() == 9);
-   CHECK(nan_b[0] == 0x63);  // (t_ieee_float << 4) | ieee_width_f64
+   // NaN is binary16, the smallest float that has one (§15.2.1).
+   REQUIRE(nan_b.size() == 3);
+   CHECK(nan_b[0] == 0x61);  // (t_ieee_float << 4) | ieee_width_f16
 }
 
 TEST_CASE("pjson wire: NaN canonicalized to quiet-NaN-zero-payload",
@@ -286,11 +288,12 @@ TEST_CASE("pjson wire: NaN canonicalized to quiet-NaN-zero-payload",
    REQUIRE(std::isnan(weird_nan));
 
    auto b = pjson::encode(pjson_value{weird_nan});
-   REQUIRE(b.size() == 9);
-   CHECK(b[0] == 0x63);
-   std::uint64_t got;
-   std::memcpy(&got, b.data() + 1, 8);
-   CHECK(got == 0x7FF8000000000000ull);
+   // One NaN: the quiet one, in binary16.
+   REQUIRE(b.size() == 3);
+   CHECK(b[0] == 0x61);
+   std::uint16_t got;
+   std::memcpy(&got, b.data() + 1, 2);
+   CHECK(got == 0x7E00);
 }
 
 TEST_CASE("pjson wire: ieee_float decode accepts binary32",
@@ -302,8 +305,8 @@ TEST_CASE("pjson wire: ieee_float decode accepts binary32",
    std::uint8_t buf[5];
    buf[0] = 0x62;  // (t_ieee_float << 4) | ieee_width_f32
    std::memcpy(buf + 1, &f, 4);
-   REQUIRE(pjson::validate({buf, 5}));
-   auto d = pjson::decode({buf, 5});
+   REQUIRE(pjson_lazy::validate({buf, 5}));
+   auto d = pjson_lazy::decode({buf, 5});
    REQUIRE(d.holds<double>());
    CHECK(d.as<double>() == -1.5);
 }
@@ -315,16 +318,16 @@ TEST_CASE("pjson wire: ieee_float decodes binary16, defers binary128",
    {
       // 1.5 in binary16 = 0x3E00.
       std::uint8_t buf[3] = {0x61, 0x00, 0x3E};
-      REQUIRE(pjson::validate({buf, 3}));
-      auto v = pjson::decode({buf, 3});
+      REQUIRE(pjson_lazy::validate({buf, 3}));
+      auto v = pjson_lazy::decode({buf, 3});
       REQUIRE(v.holds<double>());
       CHECK(v.as<double>() == 1.5);
    }
    {
       // ±0 in binary16.
       std::uint8_t buf[3] = {0x61, 0x00, 0x00};
-      REQUIRE(pjson::validate({buf, 3}));
-      auto v = pjson::decode({buf, 3});
+      REQUIRE(pjson_lazy::validate({buf, 3}));
+      auto v = pjson_lazy::decode({buf, 3});
       REQUIRE(v.holds<double>());
       CHECK(v.as<double>() == 0.0);
    }
@@ -332,17 +335,17 @@ TEST_CASE("pjson wire: ieee_float decodes binary16, defers binary128",
    // float128 codec inline yet).
    {
       std::uint8_t bad[17] = {0x64};
-      CHECK_FALSE(pjson::validate({bad, 17}));
+      CHECK_FALSE(pjson_lazy::validate({bad, 17}));
    }
    // Width 0b000 reserved.
    {
       std::uint8_t bad[2] = {0x60, 0x00};
-      CHECK_FALSE(pjson::validate({bad, 2}));
+      CHECK_FALSE(pjson_lazy::validate({bad, 2}));
    }
    // Width 0b101 reserved.
    {
       std::uint8_t bad[5] = {0x65, 0, 0, 0, 0};
-      CHECK_FALSE(pjson::validate({bad, 5}));
+      CHECK_FALSE(pjson_lazy::validate({bad, 5}));
    }
 }
 
@@ -353,8 +356,8 @@ TEST_CASE("pjson wire: uint past i64 surfaces as pjson_number",
    // pjson_number rather than narrowing.
    std::uint8_t buf[9] = {0x47, 0xFF, 0xFF, 0xFF, 0xFF,
                           0xFF, 0xFF, 0xFF, 0xFF};
-   REQUIRE(pjson::validate({buf, 9}));
-   auto v = pjson::decode({buf, 9});
+   REQUIRE(pjson_lazy::validate({buf, 9}));
+   auto v = pjson_lazy::decode({buf, 9});
    REQUIRE(v.holds<pjson_number>());
    CHECK(v.as<pjson_number>().mantissa ==
          static_cast<__int128>(std::numeric_limits<std::uint64_t>::max()));
@@ -370,8 +373,8 @@ TEST_CASE("pjson wire: 16-byte negint encodes large negative __int128",
    // Tag = (t_negint << 4) | (bc-1). 2^100 = 13 bytes (since 100/8 +
    // 1 = 13).
    CHECK(b[0] == ((0x05 << 4) | (13 - 1)));
-   REQUIRE(pjson::validate({b.data(), b.size()}));
-   auto d = pjson::decode({b.data(), b.size()});
+   REQUIRE(pjson_lazy::validate({b.data(), b.size()}));
+   auto d = pjson_lazy::decode({b.data(), b.size()});
    REQUIRE(d.holds<pjson_number>());
    CHECK(d.as<pjson_number>().mantissa == v);
 }
@@ -398,8 +401,8 @@ TEST_CASE("pjson typed: u64 with high bit set encodes as uint, not negint",
    U64Holder h{high_bit_set};
    auto bytes = psio::from_struct(h);
 
-   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
-   auto v = pjson::decode({bytes.data(), bytes.size()});
+   REQUIRE(pjson_lazy::validate({bytes.data(), bytes.size()}));
+   auto v = pjson_lazy::decode({bytes.data(), bytes.size()});
    const auto& obj = v.as<pjson_object>();
    REQUIRE(obj.size() == 1);
    REQUIRE(obj[0].first == "v");
@@ -424,8 +427,8 @@ TEST_CASE("pjson typed: full u64::MAX round-trips through uint",
    using pjson_uint64_typed_test::U64Holder;
    U64Holder h{std::numeric_limits<std::uint64_t>::max()};
    auto bytes = psio::from_struct(h);
-   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
-   auto v = pjson::decode({bytes.data(), bytes.size()});
+   REQUIRE(pjson_lazy::validate({bytes.data(), bytes.size()}));
+   auto v = pjson_lazy::decode({bytes.data(), bytes.size()});
    const auto& obj = v.as<pjson_object>();
    REQUIRE(obj.size() == 1);
    REQUIRE(obj[0].first == "v");
@@ -446,8 +449,8 @@ TEST_CASE("pjson wire: ieee_float sci-source-bit ignored on decode",
    std::uint8_t buf[9];
    buf[0] = 0x6B;
    std::memcpy(buf + 1, &d, 8);
-   REQUIRE(pjson::validate({buf, 9}));
-   auto v = pjson::decode({buf, 9});
+   REQUIRE(pjson_lazy::validate({buf, 9}));
+   auto v = pjson_lazy::decode({buf, 9});
    CHECK(v.as<double>() == 1.5);
 }
 
@@ -838,12 +841,12 @@ TEST_CASE("pjson typed_array: validate/round-trip", "[pjson][typed_array]")
 {
    std::int64_t in[] = {1, 2, 3, 4, 5};
    auto bytes = make_typed_array<std::int64_t>(in);
-   REQUIRE(pjson::validate({bytes.data(), bytes.size()}));
+   REQUIRE(pjson_lazy::validate({bytes.data(), bytes.size()}));
    // Decode produces a regular pjson_array; encode of THAT will
    // produce a regular t_array (not a typed_array), since
    // pjson_value can't carry the typed-ness. That's expected — typed
    // array bytes are produced only by direct encoder paths.
-   auto v = pjson::decode({bytes.data(), bytes.size()});
+   auto v = pjson_lazy::decode({bytes.data(), bytes.size()});
    auto& a = v.as<pjson_array>();
    REQUIRE(a.size() == 5);
    for (std::size_t i = 0; i < 5; ++i)
@@ -913,7 +916,7 @@ TEST_CASE("pjson typed_array: nested in object value",
    out[count_pos]     = 1;
    out[count_pos + 1] = 0;
 
-   REQUIRE(pjson::validate({out.data(), out.size()}));
+   REQUIRE(pjson_lazy::validate({out.data(), out.size()}));
    pjson_view v{out.data(), out.size()};
    REQUIRE(v.is_object());
    auto child = v["s"];

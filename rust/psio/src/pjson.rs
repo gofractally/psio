@@ -222,11 +222,11 @@ pub fn varscale_byte_count(scale: i32) -> usize {
     varuint_byte_count(zigzag_encode_i32(scale))
 }
 
-fn write_varscale(dst: &mut [u8], pos: usize, scale: i32) -> usize {
+pub(crate) fn write_varscale(dst: &mut [u8], pos: usize, scale: i32) -> usize {
     write_varuint(dst, pos, zigzag_encode_i32(scale))
 }
 
-fn read_varscale(buf: &[u8]) -> PjsonResult<(i32, usize)> {
+pub(crate) fn read_varscale(buf: &[u8]) -> PjsonResult<(i32, usize)> {
     let (zz, n) = read_varuint(buf)?;
     Ok((zigzag_decode_i32(zz), n))
 }
@@ -336,8 +336,45 @@ impl<'a> Value<'a> {
 // ── Public top-level API ────────────────────────────────────────────────────
 
 /// Top-level decode entry point — parses a complete pjson document.
+/// Decodes a pjson value: the canonical frame of its value, nothing else
+/// (see [`validate`]). [`lazy::decode`] reads any well-formed frame.
 pub fn decode(bytes: &[u8]) -> PjsonResult<Value<'_>> {
+    validate(bytes)?;
     parse_value(bytes, bytes.len())
+}
+
+/// `psio::pjson_lazy` (C++): any well-formed frame. It is the one
+/// non-canonical path: its writer is the quick JSON transcode
+/// (`pjson_json::from_json_lazy`), and [`canonicalize`] turns such a frame
+/// into the pjson one.
+pub mod lazy {
+    use super::{Pjson, PjsonResult, Value};
+
+    /// Structural: tags, sizes, counts, offsets and depth.
+    pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
+        super::validate_value_depth(bytes, bytes.len(), 0)
+    }
+    /// Decodes any well-formed frame.
+    pub fn decode(bytes: &[u8]) -> PjsonResult<Value<'_>> {
+        super::parse_value(bytes, bytes.len())
+    }
+    /// Writes `value` as it is given: the forms its variants name, not
+    /// the canonical one.
+    pub fn encode(value: &Value<'_>, out: &mut Vec<u8>) -> usize {
+        super::encode_raw(value, out)
+    }
+    /// The typed read of any well-formed frame.
+    pub fn from_pjson<T: Pjson>(bytes: &[u8]) -> PjsonResult<T> {
+        validate(bytes)?;
+        T::pjson_decode(bytes)
+    }
+}
+
+/// The canonical frame of a well-formed one. An error when `bytes` are not
+/// a frame, or hold what has no canonical form (text that is not UTF-8).
+pub fn canonicalize(bytes: &[u8]) -> PjsonResult<Vec<u8>> {
+    lazy::validate(bytes)?;
+    crate::pjson_canonical::canonical_of_valid(bytes)
 }
 
 /// Hard cap on recursion depth for `validate()`. Mirrors the C++
@@ -351,8 +388,17 @@ pub const K_MAX_VALIDATION_DEPTH: usize = 64;
 /// every internal invariant while parsing values, and
 /// rejecting any buffer whose container nesting exceeds
 /// `K_MAX_VALIDATION_DEPTH`.
+///
+/// `psio::pjson` is one encoding per value (the canonical form,
+/// `pjson_canonical`; docs/pjson-spec.md §15): a well-formed frame that is
+/// not the canonical encoding of its value is refused here and accepted by
+/// [`lazy::validate`].
 pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
-    validate_value_depth(bytes, bytes.len(), 0)
+    lazy::validate(bytes)?;
+    if crate::pjson_canonical::canonical_of_valid(bytes)? != bytes {
+        return Err(PjsonError("pjson: a well-formed frame that is not the canonical encoding of its value"));
+    }
+    Ok(())
 }
 
 // ── Parser ──────────────────────────────────────────────────────────────────
@@ -737,7 +783,20 @@ fn validate_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<()
 
 /// Single-pass forward-write encoder for `Value`. Returns total bytes
 /// appended to `out`.
+/// Encodes `value` in the canonical form of the value it is: an array of
+/// numbers is a typed array, a string given in escape form is its text, and
+/// so on, whichever variants `value` was built from. Panics when the value
+/// has no pjson form (a string that is not UTF-8), as every fast write does
+/// for what its format cannot represent.
 pub fn encode(value: &Value<'_>, out: &mut Vec<u8>) -> usize {
+    let mut raw = Vec::new();
+    encode_raw(value, &mut raw);
+    let canonical = crate::pjson_canonical::canonical_of_valid(&raw).expect("pjson: the value has no pjson form");
+    out.extend_from_slice(&canonical);
+    canonical.len()
+}
+
+pub(crate) fn encode_raw(value: &Value<'_>, out: &mut Vec<u8>) -> usize {
     let pos = out.len();
     let n = value_size(value);
     out.resize(pos + n, 0);
@@ -1256,12 +1315,17 @@ pub trait Pjson: Sized {
 
 /// One-shot encode entry point — allocates a `Vec<u8>` exactly sized
 /// for the encoded form.
+///
+/// The bytes are the canonical form of the value (one encoding per value:
+/// `pjson_canonical`). The per-type encoders write a well-formed frame of
+/// the value and it is brought to canonical form here; a type whose own
+/// encoding is already canonical pays one comparison pass.
 pub fn to_pjson<T: Pjson>(value: &T) -> Vec<u8> {
     let n = value.pjson_size();
     let mut out = vec![0u8; n];
     let written = value.pjson_encode_at(&mut out, 0);
     debug_assert_eq!(written, n);
-    out
+    crate::pjson_canonical::canonical_of_valid(&out).expect("pjson: the value has no pjson form")
 }
 
 /// One-shot decode entry point: the VALIDATING read. The bytes are held
@@ -1328,16 +1392,11 @@ macro_rules! impl_pjson_uint {
                 encode_uint_at(dst, pos, *self as u128)
             }
             fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
-                let v = parse_value(bytes, bytes.len())?;
-                match v {
-                    Value::UInt(u) => {
-                        if u > <$ty>::MAX as u128 {
-                            return Err(err("pjson: uint overflow on decode"));
-                        }
-                        Ok(u as $ty)
-                    }
-                    _ => Err(err("pjson: expected uint")),
+                let (negative, u) = frame_integer(bytes)?;
+                if negative || u > <$ty>::MAX as u128 {
+                    return Err(err("pjson: uint overflow on decode"));
                 }
+                Ok(u as $ty)
             }
         }
     )*};
@@ -1361,113 +1420,65 @@ macro_rules! impl_pjson_int {
                 encode_int_at(dst, pos, *self as i128)
             }
             fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
-                let v = parse_value(bytes, bytes.len())?;
-                match v {
-                    Value::UInt(u) => {
-                        if u > <$ty>::MAX as u128 {
-                            return Err(err("pjson: int overflow on decode"));
-                        }
-                        Ok(u as $ty)
+                let (negative, mag) = frame_integer(bytes)?;
+                if !negative {
+                    if mag > <$ty>::MAX as u128 {
+                        return Err(err("pjson: int overflow on decode"));
                     }
-                    Value::NegInt(mag) => {
-                        // mag <= i128::MIN.unsigned_abs() etc. — for
-                        // narrower targets check fit.
-                        if mag > (1u128 << (<$ty>::BITS - 1)) {
-                            return Err(err("pjson: negint magnitude overflow"));
-                        }
-                        // Recover signed value via wrapping negate.
-                        let signed = (mag as i128).wrapping_neg();
-                        if signed < <$ty>::MIN as i128 || signed > <$ty>::MAX as i128 {
-                            return Err(err("pjson: int range on decode"));
-                        }
-                        Ok(signed as $ty)
-                    }
-                    _ => Err(err("pjson: expected int")),
+                    return Ok(mag as $ty);
                 }
+                if mag > (1u128 << (<$ty>::BITS - 1)) {
+                    return Err(err("pjson: negint magnitude overflow"));
+                }
+                Ok((mag as i128).wrapping_neg() as $ty)
             }
         }
     )*};
 }
 impl_pjson_int!(i8, i16, i32, i64, i128, isize);
 
-// C++ to_chars chooses the shortest fixed/scientific spelling, counting
-// the exponent sign and its minimum two digits. Keep this choice in the
-// wire contract: 1000000 is shorter as 1e+06 and encodes as a decimal.
-fn compact_double(value: f64) -> Option<Value<'static>> {
-    if !value.is_finite() { return None; }
-    let fixed = value.to_string();
-    let scientific = format!("{value:e}");
-    let (digits, exp) = scientific.split_once('e')?;
-    let exponent: i32 = exp.parse().ok()?;
-    let scientific_len = digits.len() + 2 + exponent.unsigned_abs().to_string().len().max(2);
-    let (digits, exponent) = if fixed.len() <= scientific_len {
-        (fixed.as_str(), 0)
-    } else { (digits, exponent) };
-    let decimals = digits.find('.').map(|p| digits.len() - p - 1).unwrap_or(0);
-    let mantissa: i128 = digits.replace('.', "").parse().ok()?;
-    let scale = exponent - decimals as i32;
-    let result = if scale == 0 {
-        if mantissa < 0 { Value::NegInt(mantissa.unsigned_abs()) }
-        else { Value::UInt(mantissa as u128) }
-    } else { Value::Decimal { mantissa, scale } };
-    (value_size(&result) < 9).then_some(result)
+// A float is the number it stands for, in that number's one canonical
+// form (pjson_canonical: the float model lives there and nowhere else).
+fn number_frame(v: &crate::pjson_canonical::Number) -> Vec<u8> {
+    let mut out = Vec::with_capacity(17);
+    crate::pjson_canonical::push_canonical_number(&mut out, v).expect("a float has a canonical form");
+    out
 }
 
-#[inline]
-fn is_minus_zero(f: f64) -> bool {
-    f == 0.0 && f.is_sign_negative()
+/// The integer a numeric frame holds, whatever form carries it: 5 is 5.
+fn frame_integer(bytes: &[u8]) -> PjsonResult<(bool, u128)> {
+    crate::pjson_canonical::frame_number(bytes)?
+        .as_integer()
+        .ok_or(err("pjson: a number that is not an integer where the type is one"))
 }
 
 impl Pjson for f64 {
     fn pjson_size(&self) -> usize {
-        if is_minus_zero(*self) {
-            return 3;
-        }
-        compact_double(*self).map(|v| value_size(&v)).unwrap_or(9)
+        number_frame(&crate::pjson_canonical::f64_reads_as(*self)).len()
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
-        // Minus zero keeps its sign: binary16 `61 00 80`, the form every
-        // codec writes for it (gofractally/psio#17).
-        if is_minus_zero(*self) {
-            return encode_ieee_float_at(dst, pos, 1, 0x8000);
-        }
-        match compact_double(*self) {
-            Some(value) => encode_value_at(dst, pos, &value),
-            None => encode_ieee_float_at(dst, pos, 3, self.to_bits() as u128),
-        }
+        let frame = number_frame(&crate::pjson_canonical::f64_reads_as(*self));
+        dst[pos..pos + frame.len()].copy_from_slice(&frame);
+        frame.len()
     }
     fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
-        let v = parse_value(bytes, bytes.len())?;
-        match v {
-            Value::Float { width_log2, bits } => match width_log2 {
-                1 => Ok(crate::pjson_json::f16_bits_to_f64(bits as u16)),
-                2 => Ok(f32::from_bits(bits as u32) as f64),
-                3 => Ok(f64::from_bits(bits as u64)),
-                4 => Err(err("pjson: binary128 → f64 narrowing not supported")),
-                _ => Err(err("pjson: ieee_float reserved width")),
-            },
-            // Allow integer-typed sources to decode as f64 too — the
-            // canonical encoder may have chosen uint / decimal.
-            Value::UInt(u) => Ok(u as f64),
-            Value::NegInt(mag) => Ok(-(mag as f64)),
-            Value::FloatSci(value) => Ok(value),
-            Value::Decimal { mantissa, scale } => format!("{mantissa}e{scale}")
-                .parse().map_err(|_| err("pjson: decimal conversion failed")),
-            _ => Err(err("pjson: expected float")),
-        }
+        // The f64 nearest the number, whatever form carries it (a binary32
+        // frame goes through the number it stands for, not a widening cast).
+        Ok(crate::pjson_canonical::frame_number(bytes)?.to_f64())
     }
 }
 
 impl Pjson for f32 {
     fn pjson_size(&self) -> usize {
-        (*self as f64).pjson_size()
+        number_frame(&crate::pjson_canonical::f32_reads_as(*self)).len()
     }
     fn pjson_encode_at(&self, dst: &mut [u8], pos: usize) -> usize {
-        (*self as f64).pjson_encode_at(dst, pos)
+        let frame = number_frame(&crate::pjson_canonical::f32_reads_as(*self));
+        dst[pos..pos + frame.len()].copy_from_slice(&frame);
+        frame.len()
     }
     fn pjson_decode(bytes: &[u8]) -> PjsonResult<Self> {
-        let v: f64 = <f64 as Pjson>::pjson_decode(bytes)?;
-        Ok(v as f32)
+        Ok(crate::pjson_canonical::frame_number(bytes)?.to_f32())
     }
 }
 
@@ -1517,6 +1528,11 @@ pub trait PjsonTypedArrayElem: Pjson {
     /// Only called when TAC.is_some().
     fn pjson_decode_typed_elem(_bytes: &[u8]) -> PjsonResult<Self> {
         Err(err("pjson: typed-array decode invoked on non-typed elem"))
+    }
+    /// The value from a number carried by another form (a typed array of
+    /// another element code): by way of that number's canonical frame.
+    fn pjson_from_number(number: &crate::pjson_canonical::Number) -> PjsonResult<Self> {
+        Self::pjson_decode(&number_frame(number))
     }
 }
 
@@ -1617,7 +1633,7 @@ impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
             Value::EmptyRowArray(_) if T::ROW_KEYS.is_some() => Ok(Vec::new()),
             Value::RowArray(records) if T::ROW_KEYS.is_some() => {
                 records.into_iter().map(|fields| {
-                    let mut bytes = Vec::new(); encode(&Value::Object(fields), &mut bytes);
+                    let mut bytes = Vec::new(); encode_raw(&Value::Object(fields), &mut bytes);
                     T::pjson_decode(&bytes)
                 }).collect()
             }
@@ -1626,11 +1642,17 @@ impl<T: Pjson + PjsonTypedArrayElem> Pjson for Vec<T> {
                 elements,
                 count,
             } => {
-                if Some(code) != T::TAC {
-                    return Err(err("pjson: typed_array element code mismatch"));
-                }
                 let elem_size = typed_array_elem_size(code);
                 let mut out = Vec::with_capacity(count);
+                if Some(code) != T::TAC {
+                    // The array's form is its values', not T's: a list of
+                    // u16 holding small numbers is a u8 array, a list of
+                    // f64 holding integers an integer one.
+                    for element in elements.chunks_exact(elem_size) {
+                        out.push(T::pjson_from_number(&crate::pjson_canonical::typed_element_number(code, element))?);
+                    }
+                    return Ok(out);
+                }
                 for i in 0..count {
                     out.push(T::pjson_decode_typed_elem(
                         &elements[i * elem_size..(i + 1) * elem_size],
@@ -1826,12 +1848,9 @@ pub mod format {
 
 impl<T: Pjson> crate::Encode<format::Pjson> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, PjsonError> {
-        let n = self.pjson_size();
-        let pos = out.len();
-        out.resize(pos + n, 0);
-        let written = self.pjson_encode_at(out, pos);
-        debug_assert_eq!(written, n);
-        Ok(written)
+        let bytes = to_pjson(self);
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
     }
 }
 
@@ -1964,11 +1983,8 @@ mod tests {
         let f = f64::from_bits(0x7FFF_DEAD_BEEF_0000); // arbitrary NaN
         assert!(f.is_nan());
         let b = to_pjson(&f);
-        // The 8 payload bytes should be the canonical pattern.
-        assert_eq!(
-            &b[1..],
-            &CANONICAL_NAN_F64_BITS.to_le_bytes()[..]
-        );
+        // One NaN: the quiet one, in binary16 (§15.2.1).
+        assert_eq!(b, [0x61, 0x00, 0x7E]);
     }
 
     #[test]
@@ -2005,8 +2021,11 @@ mod tests {
     fn typed_array_i32_round_trip() {
         let v: Vec<i32> = vec![-100, 0, 100];
         let b = to_pjson(&v);
-        assert_eq!(b[0], 0xB3); // typed_array, code i32 = 2, low_nibble = 3
-        assert_eq!(b.len(), 1 + 12 + 2);
+        // The form is the values': the narrowest signed code that holds
+        // -100..100 is i8.
+        assert_eq!(b[0], 0xB1);
+        assert_eq!(b.len(), 1 + 3 + 2);
+        assert_eq!(to_pjson(&vec![-100i64, 0, 100]), b);
         assert_eq!(from_pjson::<Vec<i32>>(&b).unwrap(), v);
     }
 
@@ -2014,7 +2033,11 @@ mod tests {
     fn typed_array_f64_round_trip() {
         let v: Vec<f64> = vec![1.0, 2.5, -3.14];
         let b = to_pjson(&v);
-        assert_eq!(b[0], 0xBA); // typed_array, code f64 = 9, low_nibble = 10
+        // binary32 carries 1, 2.5 and -3.14: a typed f32 array, as a
+        // Vec<f32> of the same numbers is.
+        assert_eq!(b[0], 0xB9);
+        assert_eq!(to_pjson(&vec![1.0f32, 2.5, -3.14]), b);
+        assert_eq!(to_pjson(&vec![1.0f64 / 3.0])[0], 0xBA);
         assert_eq!(from_pjson::<Vec<f64>>(&b).unwrap(), v);
     }
 
@@ -2096,8 +2119,8 @@ mod tests {
             Value::Str(b"hi", str_flag::RAW_TEXT),
         ]);
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2108,14 +2131,14 @@ mod tests {
             (b"b".as_slice(), Value::Str(b"two", str_flag::RAW_TEXT)),
         ]);
         let mut out = vec![];
-        encode(&v, &mut out);
+        lazy::encode(&v, &mut out);
         // Per §5.2 (adaptive width): tag(1) + width(1) + vd(7) +
         // hash[2](2) + slot[2]@(slot_w=1)+key_size = 2*(1+1) = 4 +
         // count(2) = 17 bytes. Appendix B in the spec uses an older
         // 4-byte slot layout and is stale relative to §5.2 — see the
         // open spec issue noted in the implementation summary.
         assert_eq!(out.len(), 17);
-        let parsed = decode(&out).unwrap();
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2125,8 +2148,8 @@ mod tests {
         let key = vec![b'k'; 256];
         let v = Value::Object(vec![(key.as_slice(), Value::UInt(1))]);
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         if let Value::Object(entries) = parsed {
             assert_eq!(entries.len(), 1);
             assert_eq!(entries[0].0, key.as_slice());
@@ -2158,15 +2181,15 @@ mod tests {
         ];
         let v = Value::RowArray(recs);
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
     #[test]
     fn validate_rejects_truncated_buffer() {
         let buf = [0x40]; // uint with bc=1 but no payload
-        assert!(validate(&buf).is_err());
+        assert!(lazy::validate(&buf).is_err());
     }
 
     /// End-to-end test of the format-tagged CPO. Calls
@@ -2223,8 +2246,8 @@ mod tests {
             (b"b".as_slice(), Value::Str(b"two", str_flag::RAW_TEXT)),
         ]);
         let mut out = vec![];
-        encode(&v, &mut out);
-        validate(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        lazy::validate(&out).unwrap();
     }
 
     #[test]
@@ -2237,8 +2260,8 @@ mod tests {
             v = Value::Array(vec![v]);
         }
         let mut out = vec![];
-        encode(&v, &mut out);
-        let err = validate(&out).unwrap_err();
+        lazy::encode(&v, &mut out);
+        let err = lazy::validate(&out).unwrap_err();
         assert!(
             err.0.contains("max validation depth"),
             "expected depth error, got: {}",
@@ -2255,18 +2278,18 @@ mod tests {
             v = Value::Array(vec![v]);
         }
         let mut out = vec![];
-        encode(&v, &mut out);
-        validate(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        lazy::validate(&out).unwrap();
     }
 
     #[test]
     fn empty_array_value() {
         let v: Value = Value::Array(vec![]);
         let mut out = vec![];
-        encode(&v, &mut out);
+        lazy::encode(&v, &mut out);
         // tag(1) + width(1) + count(2) = 4
         assert_eq!(out.len(), 4);
-        let parsed = decode(&out).unwrap();
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2274,9 +2297,9 @@ mod tests {
     fn empty_object_value() {
         let v: Value = Value::Object(vec![]);
         let mut out = vec![];
-        encode(&v, &mut out);
+        lazy::encode(&v, &mut out);
         assert_eq!(out.len(), 4);
-        let parsed = decode(&out).unwrap();
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2298,8 +2321,8 @@ mod tests {
             scale: -2,
         };
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2307,9 +2330,9 @@ mod tests {
     fn bytes_round_trip() {
         let v = Value::Bytes(&[0xDE, 0xAD, 0xBE, 0xEF], 0);
         let mut out = vec![];
-        encode(&v, &mut out);
+        lazy::encode(&v, &mut out);
         assert_eq!(out[0], 0xA0);
-        let parsed = decode(&out).unwrap();
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2345,8 +2368,8 @@ mod tests {
         // Negative magnitude beyond i64.
         let v = Value::NegInt(u128::MAX); // logical = -(u128::MAX), well-formed neg
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 
@@ -2374,8 +2397,8 @@ mod tests {
             ]),
         )]);
         let mut out = vec![];
-        encode(&v, &mut out);
-        let parsed = decode(&out).unwrap();
+        lazy::encode(&v, &mut out);
+        let parsed = lazy::decode(&out).unwrap();
         assert_eq!(parsed, v);
     }
 

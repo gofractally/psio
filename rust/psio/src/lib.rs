@@ -283,6 +283,8 @@ pub mod protobuf;
 #[cfg(feature = "pjson")]
 pub mod pjson;
 #[cfg(feature = "pjson")]
+pub mod pjson_canonical;
+#[cfg(feature = "pjson")]
 #[macro_use]
 pub mod pjson_derive;
 #[cfg(feature = "pjson")]

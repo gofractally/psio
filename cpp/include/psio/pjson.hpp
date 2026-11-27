@@ -633,6 +633,9 @@ namespace psio {
       }
 
       // ── value sizing (recursion over pjson_value) ─────────────────────
+      // The canonical frame of a native double (psio/pjson_number_model.hpp).
+      inline std::size_t canonical_double_bytes(double d, std::uint8_t* buf);
+
       inline std::size_t value_size(const pjson_value& v) noexcept;
 
       // Byte count of a u64 magnitude as raw LE unsigned bytes.
@@ -775,11 +778,10 @@ namespace psio {
                    return int_size(x);
                 else if constexpr (std::is_same_v<T, double>)
                 {
-                   if (!std::isfinite(x)) return 9;
-                   if (x == 0 && std::signbit(x)) return 3;  // -0.0: binary16
-                   pjson_number n   = pjson_number::from_double(x);
-                   std::size_t  dec = number_size(n);
-                   return dec < 9 ? dec : 9;
+                   // The number the double stands for, in its one form
+                   // (psio/pjson_number_model.hpp).
+                   std::uint8_t buf[32];
+                   return canonical_double_bytes(x, buf);
                 }
                 else if constexpr (std::is_same_v<T, pjson_number>)
                    return number_size(x);
@@ -1318,7 +1320,12 @@ namespace psio {
                 else if constexpr (std::is_same_v<T, std::int64_t>)
                    return encode_int64_at(dst, pos, x);
                 else if constexpr (std::is_same_v<T, double>)
-                   return encode_double_at(dst, pos, x);
+                {
+                   std::uint8_t buf[32];
+                   const auto   n = canonical_double_bytes(x, buf);
+                   std::memcpy(dst + pos, buf, n);
+                   return n;
+                }
                 else if constexpr (std::is_same_v<T, pjson_number>)
                    return encode_number_at(dst, pos, x);
                 else if constexpr (std::is_same_v<T, std::string>)
@@ -1858,6 +1865,10 @@ namespace psio {
          return true;
       }
 
+      // The double a binary32 frame reads as (psio/pjson_number_model.hpp:
+      // through the number the float stands for).
+      double binary32_as_double(float f);
+
       inline bool decode_value(const std::uint8_t* p,
                                std::size_t         size,
                                pjson_value&        out)
@@ -2017,7 +2028,7 @@ namespace psio {
                   if (size != 5) return false;
                   float f;
                   std::memcpy(&f, p + 1, 4);
-                  out = pjson_value{static_cast<double>(f)};
+                  out = pjson_value{binary32_as_double(f)};
                   return true;
                }
                if (width_bits == ieee_width_f16)
@@ -2324,27 +2335,36 @@ namespace psio {
       return pjson_number{n.neg ? -mant : mant, n.scale};
    }
 
+}  // namespace psio
+
+#include <psio/pjson_number_model.hpp>
+#include <psio/pjson_view.hpp>
+#include <psio/pjson_canonical.hpp>
+
+namespace psio {
+
    // ── public façade ────────────────────────────────────────────────────
+   //
+   // `psio::pjson` is the format: one encoding per value (the canonical
+   // form, psio/pjson_canonical.hpp, docs/pjson-spec.md §15). Every encoder
+   // writes it, and `validate` / `decode` accept nothing else, so equal
+   // values are equal bytes.
+   //
+   // `psio::pjson_lazy` is the one non-canonical path: any well-formed
+   // frame. Its writer is the quick JSON transcode
+   // (`pjson_json::from_json_lazy`), which copies what it parses — escaped
+   // strings, generic arrays, numbers as spelled — without looking at the
+   // values. `pjson::canonicalize` turns such a frame into the pjson one.
 
-   struct pjson
+   struct pjson_lazy
    {
-      static std::vector<std::uint8_t> encode(const pjson_value& v)
+      // Structural: tags, sizes, counts, offsets and depth.
+      static bool validate(std::span<const std::uint8_t> bytes) noexcept
       {
-         std::size_t total = pjson_detail::value_size(v);
-         std::vector<std::uint8_t> out(total);
-         pjson_detail::encode_value_at(out.data(), 0, v);
-         return out;
+         return pjson_detail::skip_value(bytes.data(), bytes.size(), 0);
       }
-
-      static std::size_t encoded_size(const pjson_value& v) noexcept
+      static std::optional<pjson_value> try_decode(std::span<const std::uint8_t> bytes)
       {
-         return pjson_detail::value_size(v);
-      }
-
-      static std::optional<pjson_value>
-      try_decode(std::span<const std::uint8_t> bytes)
-      {
-         // Bound recursion and reject malformed offsets before materializing.
          if (!validate(bytes)) return std::nullopt;
          pjson_value v;
          if (!pjson_detail::decode_value(bytes.data(), bytes.size(), v))
@@ -2358,14 +2378,67 @@ namespace psio {
             throw std::runtime_error("pjson: invalid buffer");
          return std::move(*v);
       }
+   };
+
+   struct pjson
+   {
+      // The canonical frame of a well-formed one. Throws std::runtime_error
+      // when `bytes` are not a frame, or hold what has no canonical form
+      // (a string that is not UTF-8).
+      static std::vector<std::uint8_t> canonicalize(std::span<const std::uint8_t> bytes)
+      {
+         if (!pjson_lazy::validate(bytes))
+            throw std::runtime_error("pjson: the bytes are not a pjson value");
+         std::vector<std::uint8_t> out;
+         out.reserve(bytes.size());
+         pjson_detail::append_canonical(out, bytes);
+         return out;
+      }
+
+      static std::vector<std::uint8_t> encode(const pjson_value& v)
+      {
+         std::size_t total = pjson_detail::value_size(v);
+         std::vector<std::uint8_t> out(total);
+         pjson_detail::encode_value_at(out.data(), 0, v);
+         return canonicalize(out);
+      }
+
+      static std::size_t encoded_size(const pjson_value& v) { return encode(v).size(); }
+
+      // Canonical frames only.
       static bool validate(std::span<const std::uint8_t> bytes) noexcept
       {
-         //  Structural walker — the same bounds-check + tag-walk
-         //  discipline as decode_value, but never materialises a
-         //  pjson_value tree, allocates containers, or copies string
-         //  bytes. Threads kMaxValidationDepth through every
-         //  container nesting level.
-         return pjson_detail::skip_value(bytes.data(), bytes.size(), 0);
+         if (!pjson_lazy::validate(bytes)) return false;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+         try
+         {
+#endif
+            std::vector<std::uint8_t> out;
+            out.reserve(bytes.size());
+            pjson_detail::append_canonical(out, bytes);
+            return out.size() == bytes.size() && std::memcmp(out.data(), bytes.data(), out.size()) == 0;
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+         }
+         catch (...)
+         {
+            return false;
+         }
+#endif
+      }
+      static std::optional<pjson_value> try_decode(std::span<const std::uint8_t> bytes)
+      {
+         if (!validate(bytes)) return std::nullopt;
+         pjson_value v;
+         if (!pjson_detail::decode_value(bytes.data(), bytes.size(), v))
+            return std::nullopt;
+         return v;
+      }
+      static pjson_value decode(std::span<const std::uint8_t> bytes)
+      {
+         auto v = try_decode(bytes);
+         if (!v)
+            throw std::runtime_error("pjson: invalid buffer");
+         return std::move(*v);
       }
    };
 

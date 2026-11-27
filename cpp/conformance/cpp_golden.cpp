@@ -46,9 +46,12 @@ PSIO_REFLECT(InteropEnvelope, head, rows, note, choice)
 
 bool first_fixture = true;
 
-// A row that also carries a JSON text ("json"), escaped.
+// A row that also carries a JSON text ("json"), escaped, and the canonical
+// frame of the same value ("canonical_hex": the row's own bytes when they
+// are canonical).
 template <typename Bytes>
-void emit_json(std::string_view format, std::string_view id, const Bytes& bytes, std::string_view json) {
+void emit_json(std::string_view format, std::string_view id, const Bytes& bytes, std::string_view json,
+               const std::vector<std::uint8_t>* canonical = nullptr) {
    if (!first_fixture) std::cout << ",\n";
    first_fixture = false;
    std::cout << "  {\"format\":\"" << format << "\",\"id\":\"" << id << "\",\"wire_hex\":\"";
@@ -64,7 +67,13 @@ void emit_json(std::string_view format, std::string_view id, const Bytes& bytes,
          std::cout << "\\u00" << digits[static_cast<unsigned char>(c) >> 4] << digits[c & 15];
       else std::cout << c;
    }
-   std::cout << "\"}";
+   std::cout << "\"";
+   if (canonical) {
+      std::cout << ",\"canonical_hex\":\"";
+      for (auto byte : *canonical) std::cout << digits[byte >> 4] << digits[byte & 15];
+      std::cout << "\"";
+   }
+   std::cout << "}";
 }
 
 template <typename Bytes>
@@ -84,6 +93,7 @@ void emit(std::string_view format, std::string_view id, const Bytes& bytes) {
 template <typename T>
 void typed_fixture(std::string_view id, const T& value) {
    auto bytes = psio::from_struct(value);
+   // Every typed encoder writes the canonical form.
    if (!psio::pjson::validate(bytes)) throw std::runtime_error(std::string(id));
    emit("pjson_typed", id, bytes);
 }
@@ -162,16 +172,85 @@ int main() {
          1e-4, 1e-5, 1e6, 1e15, 1e20, 1e38, 1.5e308, 5e-324,
          std::numeric_limits<double>::infinity(), -std::numeric_limits<double>::infinity(),
          std::numeric_limits<double>::quiet_NaN()};
-      for (auto value : numbers) {
-         auto bits = std::bit_cast<std::uint64_t>(value);
-         emit("pjson_f64", std::to_string(bits), psio::pjson::encode(psio::pjson_value{value}));
-      }
+      // The number of a native double, in its canonical form: the dynamic
+      // encoder and the typed one give the same bytes.
+      const auto f64_row = [](double value) {
+         const auto bytes = psio::pjson::encode(psio::pjson_value{value});
+         std::uint8_t buf[32];
+         const auto   n = psio::pjson_detail::canonical_number_bytes(psio::pjson_detail::native_number(value), buf);
+         if (bytes != std::vector<std::uint8_t>(buf, buf + n) || !psio::pjson::validate(bytes))
+            throw std::runtime_error("pjson_f64: the dynamic and the typed encoder disagree");
+         emit("pjson_f64", std::to_string(std::bit_cast<std::uint64_t>(value)), bytes);
+      };
+      for (auto value : numbers) f64_row(value);
       // A deterministic sample exercises shortest-decimal choices across the exponent range.
       std::uint64_t bits = 0x123456789abcdef0ULL;
       for (unsigned i = 0; i < 256; ++i) {
          bits ^= bits << 13; bits ^= bits >> 7; bits ^= bits << 17;
-         emit("pjson_f64", std::to_string(bits),
-              psio::pjson::encode(psio::pjson_value{std::bit_cast<double>(bits)}));
+         f64_row(std::bit_cast<double>(bits));
+      }
+      // The same for a native float: what a binary32 stands for (the float
+      // model, psio/pjson_number_model.hpp; gofractally/psio#17). The id is
+      // the float's bits.
+      {
+         const auto f32_row = [](float value) {
+            std::uint8_t buf[32];
+            const auto   n = psio::pjson_detail::canonical_number_bytes(psio::pjson_detail::native_number(value), buf);
+            emit("pjson_f32", std::to_string(std::bit_cast<std::uint32_t>(value)), std::vector<std::uint8_t>(buf, buf + n));
+         };
+         for (float value : {0.0f, -0.0f, 1.0f, -1.5f, 0.1f, 0.2f, 0.5f, 1.0f / 3, 3.14f, 1e-4f, 1e10f, 3e9f, 16777216.0f,
+                             16777218.0f, 3.4028235e38f, 1e-45f, 1.17549435e-38f,
+                             // Powers of two: below one the decimals that read back lie lopsided.
+                             0x1p-100f, 0x1p-60f, 0x1p-27f, 0x1p-10f, 0x1p60f, 0x1p90f, 0x1p100f, 0x1p-126f,
+                             -0x1p-77f, 0x1p-40f, 0x1p33f, 0x1.fffffep-1f, std::numeric_limits<float>::infinity(),
+                             -std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()})
+            f32_row(value);
+         std::uint32_t f32_bits = 0x9abcdef1u;
+         for (unsigned i = 0; i < 128; ++i) {
+            f32_bits ^= f32_bits << 13; f32_bits ^= f32_bits >> 17; f32_bits ^= f32_bits << 5;
+            f32_row(std::bit_cast<float>(f32_bits));
+         }
+      }
+      // Lists of numbers of one native type: the form is the values', not
+      // the type's. The id is the list (a float as its shortest text).
+      {
+         const auto list_row = [](std::string_view format, std::string_view id, const auto& list) {
+            using E = typename std::remove_cvref_t<decltype(list)>::value_type;
+            const std::span<const E> view{list.data(), list.size()};
+            const auto               code = psio::pjson_detail::typed_list_code(view);
+            std::vector<std::uint8_t> bytes(psio::pjson_detail::typed_list_size(code, view.size()));
+            psio::pjson_detail::encode_typed_list_at(bytes.data(), 0, view, code);
+            if (!psio::pjson::validate(bytes)) throw std::runtime_error("a typed list is not canonical: " + std::string(id));
+            emit(format, id, bytes);
+         };
+         using I = std::vector<std::int64_t>;
+         list_row("pjson_list_i64", "", I{});
+         list_row("pjson_list_i64", "1,2,3", I{1, 2, 3});
+         list_row("pjson_list_i64", "0,255", I{0, 255});
+         list_row("pjson_list_i64", "0,256", I{0, 256});
+         list_row("pjson_list_i64", "65536", I{65536});
+         list_row("pjson_list_i64", "4294967296", I{4294967296});
+         list_row("pjson_list_i64", "-1,127", I{-1, 127});
+         list_row("pjson_list_i64", "-128,128", I{-128, 128});
+         list_row("pjson_list_i64", "-32769,5", I{-32769, 5});
+         list_row("pjson_list_i64", "-2147483649,5", I{-2147483649ll, 5});
+         list_row("pjson_list_i64", "9223372036854775807,-9223372036854775808",
+                  I{9223372036854775807ll, -9223372036854775807ll - 1});
+         using D = std::vector<double>;
+         list_row("pjson_list_f64", "", D{});
+         list_row("pjson_list_f64", "1,2,300", D{1, 2, 300});
+         list_row("pjson_list_f64", "0.1,0.2", D{0.1, 0.2});
+         list_row("pjson_list_f64", "1,0.5", D{1, 0.5});
+         list_row("pjson_list_f64", "0.3333333333333333", D{1.0 / 3});
+         list_row("pjson_list_f64", "0.1,0.3333333333333333", D{0.1, 1.0 / 3});
+         list_row("pjson_list_f64", "-0,1", D{-0.0, 1});
+         list_row("pjson_list_f64", "19.99,5,1e300", D{19.99, 5, 1e300});
+         list_row("pjson_list_f64", "1e300", D{1e300});
+         list_row("pjson_list_f64", "-1,2", D{-1, 2});
+         using F = std::vector<float>;
+         list_row("pjson_list_f32", "0.1,0.2", F{0.1f, 0.2f});
+         list_row("pjson_list_f32", "1,2,300", F{1, 2, 300});
+         list_row("pjson_list_f32", "0.33333334,16777216", F{1.0f / 3, 16777216.0f});
       }
       psio::pjson_array boundaries;
       for (std::int64_t n = -16; n <= 16; ++n) boundaries.emplace_back(n);
@@ -208,13 +287,17 @@ int main() {
          {"null_low_nibble_1", {0x01}}, {"null_low_nibble_15", {0x0f}},
          {"null_low_nibble_in_array", {0xb0,0x00,0x01,0x00,0x01,0x00}}
       }) {
-         if (psio::pjson::validate(bytes) || psio::pjson::try_decode(bytes))
+         // Not a frame at all: refused by the lazy tag too.
+         if (psio::pjson_lazy::validate(bytes) || psio::pjson_lazy::try_decode(bytes) || psio::pjson::validate(bytes))
             throw std::runtime_error("Accepted invalid pjson: " + id);
          emit("pjson_invalid", id, bytes);
       }
-      // pjson bytes and the JSON text every codec must give for them
-      // (gofractally/psio#17): what a validator accepts converts to JSON,
-      // exactly. The text is in the row ("json"); the id names the case.
+      // Well-formed pjson frames, the JSON text every codec must give for
+      // them, and the canonical frame of the same value (gofractally/
+      // psio#17). "wire_hex" is accepted by the lazy tag; it is accepted by
+      // psio::pjson exactly when it equals "canonical_hex", which is also
+      // what canonicalizing it — and what the canonical transcode of "json"
+      // (ids not starting "bytes") — must give.
       for (const auto& [id, bytes, json] : std::vector<std::tuple<std::string, std::vector<std::uint8_t>, std::string>>{
          {"uint_inline", {0x25}, "5"},
          {"nint_inline", {0x35}, "-5"},
@@ -247,18 +330,56 @@ int main() {
          // holding a typed array.
          {"typed_array_in_object", {0xc0,0x00,0x76,0x61,0x6c,0x75,0x65,0x73,0xb7,0x01,0x00,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
                                     0x00,0x01,0x00,0x03,0x00,0xaf,0x00,0x06,0x01,0x00},
-          "{\"values\":[1,256,65536]}"}
+          "{\"values\":[1,256,65536]}"},
+         // Valid, not canonical: each has one canonical frame.
+         {"binary64_tenth", {0x63,0x9a,0x99,0x99,0x99,0x99,0x99,0xb9,0x3f}, "0.1"},
+         {"binary64_one", {0x63,0x00,0x00,0x00,0x00,0x00,0x00,0xf0,0x3f}, "1"},
+         {"binary64_sci_hint", {0x6b,0x00,0x00,0x00,0x00,0x00,0x00,0xf8,0x3f}, "1.5"},
+         {"binary32_third", {0x62,0xab,0xaa,0xaa,0x3e}, "0.33333334"},
+         {"binary32_tenth", {0x62,0xcd,0xcc,0xcc,0x3d}, "0.1"},
+         {"binary64_of_binary32_tenth", {0x63,0x00,0x00,0x00,0xa0,0x99,0x99,0xb9,0x3f}, "0.10000000149011612"},
+         {"binary64_third", {0x63,0x55,0x55,0x55,0x55,0x55,0x55,0xd5,0x3f}, "0.3333333333333333"},
+         {"uint_wider_than_needed", {0x41,0x05,0x00}, "5"},
+         {"decimal_integer", {0x70,0x0a,0x00}, "5"},
+         {"decimal_33333334", {0x73,0xac,0x40,0xf9,0x03,0x0f}, "0.33333334"},
+         {"typed_i64_small", {0xb4,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0x00}, "[1]"},
+         {"typed_i8_negative", {0xb1,0xff,0x02,0x02,0x00}, "[-1,2]"},
+         {"typed_f64_tenths", {0xba,0x9a,0x99,0x99,0x99,0x99,0x99,0xb9,0x3f,0x9a,0x99,0x99,0x99,0x99,0x99,0xc9,0x3f,0x02,0x00},
+          "[0.1,0.2]"},
+         {"typed_f32_tenths", {0xb9,0xcd,0xcc,0xcc,0x3d,0xcd,0xcc,0x4c,0x3e,0x02,0x00}, "[0.1,0.2]"},
+         {"typed_f64_integers", {0xba,0x00,0x00,0x00,0x00,0x00,0x00,0xf0,0x3f,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x02,0x00},
+          "[1,2]"},
+         {"typed_empty", {0xb5,0x00,0x00}, "[]"},
+         {"array_mixed_numbers", {0xb0,0x00,0x21,0x70,0x0a,0x01,0x00,0x01,0x02,0x00}, "[1,0.5]"},
+         {"array_number_and_string", {0xb0,0x00,0x21,0x90,0x61,0x00,0x01,0x02,0x00}, "[1,\"a\"]"},
+         {"array_of_same_shape_objects",
+          {0xb0,0x00,0xc0,0x00,0x78,0x21,0x79,0x22,0x11,0xe5,0x00,0x01,0x02,0x01,0x02,0x00,
+           0xc0,0x00,0x78,0x23,0x79,0x24,0x11,0xe5,0x00,0x01,0x02,0x01,0x02,0x00,0x00,0x0e,0x02,0x00},
+          "[{\"x\":1,\"y\":2},{\"x\":3,\"y\":4}]"},
+         {"array_of_one_object", {0xb0,0x00,0xc0,0x00,0x78,0x21,0x11,0x00,0x01,0x01,0x00,0x00,0x01,0x00}, "[{\"x\":1}]"},
+         {"array_of_different_objects",
+          {0xb0,0x00,0xc0,0x00,0x78,0x21,0x11,0x00,0x01,0x01,0x00,0xc0,0x00,0x79,0x22,0xe5,0x00,0x01,0x01,0x00,0x00,0x09,0x02,0x00},
+          "[{\"x\":1},{\"y\":2}]"},
+         {"string_escape_form_plain", {0x91,0x68,0x69}, "\"hi\""},
+         {"string_escape_form_pair", {0x91,0x5c,0x75,0x64,0x38,0x33,0x64,0x5c,0x75,0x64,0x65,0x30,0x30,0x5c,0x6e},
+          "\"\\ud83d\\ude00\\n\""},
+         {"nested_generic", {0xc0,0x00,0x61,0xb0,0x00,0xb0,0x00,0x21,0x22,0x00,0x01,0x02,0x00,0xb0,0x00,0x00,0x00,0x00,0x08,0x02,0x00,
+                             0x1f,0x00,0x01,0x01,0x00},
+          "{\"a\":[[1,2],[]]}"}
       }) {
          const std::span<const std::uint8_t> view{bytes.data(), bytes.size()};
          // (The C++ dynamic value holds 127 bits of magnitude: the two
          // 128-bit integers are valid and have no pjson_value.)
          const bool wide = id == "u128_max" || id == "negint_128_bits";
-         if (!psio::pjson::validate(view) || psio::pjson::try_decode(view).has_value() == wide)
+         if (!psio::pjson_lazy::validate(view) || psio::pjson_lazy::try_decode(view).has_value() == wide)
             throw std::runtime_error("Refused valid pjson: " + id);
          const std::string text = psio::pjson_to_json(view);
          if (text != json)
             throw std::runtime_error("pjson_to_json of " + id + " is " + text + ", not " + json);
-         emit_json("pjson_to_json", id, bytes, json);
+         const auto canonical = psio::pjson::canonicalize(view);
+         if (!psio::pjson::validate(canonical) || psio::pjson::validate(view) != (canonical == bytes))
+            throw std::runtime_error("the canonical form of " + id + " is not canonical");
+         emit_json("pjson_to_json", id, bytes, json, &canonical);
       }
       std::cout << "\n]\n";
    } catch (const std::exception& e) {

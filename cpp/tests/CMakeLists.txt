@@ -1501,7 +1501,8 @@ endif()
 set(PSIO_NEEDS_EXCEPTIONS_HEADERS
     psio/capnp_layout.hpp psio/capnp_parser.hpp psio/emit_capnp.hpp psio/emit_fbs.hpp
     psio/emit_protobuf.hpp psio/fbs_layout.hpp psio/fbs_parser.hpp psio/msgpack.hpp
-    psio/pjson.hpp psio/pjson_json.hpp psio/pjson_json_typed.hpp psio/pjson_to_json.hpp
+    psio/pjson.hpp psio/pjson_canonical.hpp psio/pjson_json.hpp psio/pjson_json_typed.hpp
+    psio/pjson_number_model.hpp psio/pjson_to_json.hpp
     psio/pjson_typed.hpp psio/pjson_view.hpp psio/protobuf_parser.hpp psio/psch.hpp
     psio/view_to_json.hpp psio/wit_encode.hpp psio/wit_gen.hpp psio/wit_parser.hpp)
 set(PSIO_NOEXCEPTIONS_HEADERS ${PSIO_SELF_CONTAINED_HEADERS})
