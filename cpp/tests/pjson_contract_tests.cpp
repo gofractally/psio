@@ -436,6 +436,32 @@ TEST_CASE("pjson from JSON: a number keeps its value or is an error", "[pjson][c
    CHECK(round("{\"z\":1,\"a\":2,\"a\":3}") == "{\"z\":1,\"a\":2,\"a\":3}");
    CHECK(round("\"\\u4e2d caf\\u00e9 \xc3\xa9\"") == "\"\\u4e2d caf\\u00e9 \xc3\xa9\"");
 }
+
+// The three guarantees of gofractally/psio#17 (comment 7208563552). The
+// same documents are in rust/psio/tests/pjson_contract.rs.
+TEST_CASE("pjson from JSON and back: values, order and duplicate names of full JSON are kept",
+          "[pjson][contract][json]")
+{
+   const auto round = [](const std::string& json) { return psio::pjson_to_json(psio::pjson_json::from_json(json)); };
+   const std::string in  = R"j({"z":null,"a":[true,false,-0,0,1e400,0.1,18446744073709551616,-1.5e-400,"é中","1e5"],"a":{"k":1,"k":"1"},"":[],"o":{}})j";
+   const std::string out = R"j({"z":null,"a":[true,false,-0,0,1e400,0.1,18446744073709551616,-1.5e-400,"é中","1e5"],"a":{"k":1,"k":"1"},"":[],"o":{}})j";
+   CHECK(round(in) == out);
+   CHECK(round(out) == out);
+}
+
+TEST_CASE("pjson from I-JSON and back: nothing is promoted; a string stays a string", "[pjson][contract][json]")
+{
+   const auto round = [](const std::string& json) { return psio::pjson_to_json(psio::pjson_json::from_json(json)); };
+   // An I-JSON document: no repeated names, numbers binary64 holds exactly,
+   // large integers already strings. It comes back as the same text.
+   const std::string doc = R"j({"id":"9007199254740993","n":9007199254740991,"m":-9007199254740991,"x":0.1,"s":"1e400","t":"true","u":"null","e":"","list":["0x10","-0",1.5,false,null],"nested":{"k":"340282366920938463463374607431768211455"}})j";
+   CHECK(round(doc) == doc);
+   const auto bytes = psio::pjson_json::from_json(doc);
+   const psio::pjson_view v{bytes.data(), bytes.size()};
+   CHECK(v["id"].is_string());
+   CHECK(v["s"].is_string());
+   CHECK(v["n"].is_number());
+}
 #endif
 
 TEST_CASE("pjson: a view stays inside any bytes; validate, decode and JSON agree", "[pjson][contract][fuzz]")

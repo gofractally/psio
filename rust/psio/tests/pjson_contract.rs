@@ -141,6 +141,29 @@ fn text_order_and_duplicate_names_are_kept() {
     assert_eq!(from_pjson::<f64>(&to_pjson(&-0.0f64)).unwrap().to_bits(), (-0.0f64).to_bits());
 }
 
+// The three guarantees of gofractally/psio#17 (comment 7208563552). The
+// same documents are in cpp/tests/pjson_contract_tests.cpp.
+#[test]
+fn full_json_keeps_values_order_and_duplicate_names() {
+    let input = r#"{"z":null,"a":[true,false,-0,0,1e400,0.1,18446744073709551616,-1.5e-400,"é中","1e5"],"a":{"k":1,"k":"1"},"":[],"o":{}}"#;
+    let output = r#"{"z":null,"a":[true,false,-0,0,1e400,0.1,18446744073709551616,-1.5e-400,"é中","1e5"],"a":{"k":1,"k":"1"},"":[],"o":{}}"#;
+    assert_eq!(round(input), output);
+    assert_eq!(round(output), output);
+}
+
+#[test]
+fn i_json_comes_back_as_it_went_in_and_a_string_stays_a_string() {
+    // An I-JSON document: no repeated names, numbers binary64 holds
+    // exactly, large integers already strings.
+    let doc = r#"{"id":"9007199254740993","n":9007199254740991,"m":-9007199254740991,"x":0.1,"s":"1e400","t":"true","u":"null","e":"","list":["0x10","-0",1.5,false,null],"nested":{"k":"340282366920938463463374607431768211455"}}"#;
+    assert_eq!(round(doc), doc);
+    let bytes = from_json(doc).unwrap();
+    let v = view_of(&bytes);
+    assert!(v.find(b"id").unwrap().is_string());
+    assert!(v.find(b"s").unwrap().is_string());
+    assert!(v.find(b"n").unwrap().is_uint());
+}
+
 #[test]
 fn null_with_a_nonzero_low_nibble_is_not_a_value() {
     for frame in ["01", "0f", "b00001000100"] {
