@@ -2520,6 +2520,8 @@ macro_rules! format_impls {
     ($($tag:ty),*) => {$(
         impl crate::Format for $tag {
             type Error = PsszError;
+            const NAME: &'static str = "pssz";
+            const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::RefusesNonFrames;
         }
         impl<T: PsszPack<$tag> + ?Sized> crate::Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> PsszResult<usize> {

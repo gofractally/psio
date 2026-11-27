@@ -67,7 +67,6 @@ type Result<T> = std::result::Result<T, JsonTextError>;
 /// A JSON text format tag: [`Json`] or [`IJson`].
 pub trait JsonFormat: Format<Error = JsonTextError> {
     const IJSON: bool;
-    const NAME: &'static str;
 }
 
 /// RFC 8259 JSON: the counterpart of C++ `psio::json`.
@@ -77,17 +76,21 @@ pub struct IJson;
 
 impl Format for Json {
     type Error = JsonTextError;
+    const NAME: &'static str = "json";
+    const TEXT: bool = true;
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Parses;
 }
 impl Format for IJson {
     type Error = JsonTextError;
+    const NAME: &'static str = "ijson";
+    const TEXT: bool = true;
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Parses;
 }
 impl JsonFormat for Json {
     const IJSON: bool = false;
-    const NAME: &'static str = "json";
 }
 impl JsonFormat for IJson {
     const IJSON: bool = true;
-    const NAME: &'static str = "ijson";
 }
 
 /// How an integer is written in the current position.

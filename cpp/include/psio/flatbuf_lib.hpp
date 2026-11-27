@@ -259,6 +259,9 @@ namespace psio {
 
    struct flatbuf_lib : format_tag_base<flatbuf_lib>
    {
+      static constexpr const char*       name         = "flatbuf_lib";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::none;
       using preferred_presentation_category = ::psio::binary_category;
 
       template <typename T>

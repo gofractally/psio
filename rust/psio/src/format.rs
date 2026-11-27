@@ -40,7 +40,37 @@ use crate::ValidationPolicy;
 pub trait Format: 'static + Sized {
     /// Format-specific error type returned by all CPO operations.
     type Error;
+    /// The format's name, as the C++ tag spells it (`psio::pssz` is
+    /// `"pssz"`).
+    const NAME: &'static str;
+    /// The encoding is UTF-8 text (json, ijson).
+    const TEXT: bool = false;
+    /// What the format's trusted read (`from_F_trusted`) does with bytes
+    /// that are not a frame of the type.
+    const TRUSTED_READ: TrustedRead;
 }
+
+/// What a format's trusted read does with bytes that are not a frame of
+/// the type (C++ `psio::trusted_read_kind`; docs/annotations.md 7.2 "On
+/// bytes that are not a frame").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustedRead {
+    /// Compares what it reads: a failure, no read outside the bytes.
+    RefusesNonFrames,
+    /// Finds its values by parsing, as the validating read does.
+    Parses,
+    /// Compares nothing: for bytes a validator accepted.
+    ValidatedBytesOnly,
+    /// The format has no trusted read in this language yet.
+    Absent,
+}
+
+/// Everything a format does for one type: `T` can be written, measured,
+/// validated and read in `F`. Code generic over the format asks for
+/// `T: Codec<F>` and is pointed at another format by changing `F`
+/// (gofractally/psio#18; `tests/format_concept.rs`).
+pub trait Codec<F: Format>: Encode<F> + Decode<F> + Validate<F> {}
+impl<F: Format, T: Encode<F> + Decode<F> + Validate<F>> Codec<F> for T {}
 
 /// `Self` is encodable as format `F`.
 ///
@@ -178,6 +208,9 @@ macro_rules! message_format_helpers {
         pub struct $tag;
         impl $crate::Format for $tag {
             type Error = $err;
+            const NAME: &'static str = $cpp;
+            // A checked read that panics on bytes it refuses.
+            const TRUSTED_READ: $crate::TrustedRead = $crate::TrustedRead::Parses;
         }
         impl<T: $pack> $crate::Encode<$tag> for T {
             fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, $err> {

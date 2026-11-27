@@ -1208,6 +1208,9 @@ namespace psio
 
    struct msgpack : format_tag_base<msgpack>
    {
+      static constexpr const char*       name         = "msgpack";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::parses;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       using preferred_presentation_category = ::psio::binary_category;
 
       template <typename T>

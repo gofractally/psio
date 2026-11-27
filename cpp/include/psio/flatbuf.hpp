@@ -1673,6 +1673,9 @@ namespace psio {
 
    struct flatbuf : format_tag_base<flatbuf>
    {
+      static constexpr const char*       name         = "flatbuf";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::replaces;
       using preferred_presentation_category = ::psio::binary_category;
 
       // The limits `validate` applies; the official verifier's defaults.

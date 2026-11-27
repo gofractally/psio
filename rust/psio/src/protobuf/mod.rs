@@ -1215,6 +1215,8 @@ fn read_root<M: PbMessage>(bytes: &[u8], out: Option<&mut M>, limits: PbLimits) 
 pub struct ProtobufFormat;
 impl crate::Format for ProtobufFormat {
     type Error = PbError;
+    const NAME: &'static str = "protobuf";
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Absent;
 }
 impl<T: PbMessage> crate::Encode<ProtobufFormat> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, PbError> {

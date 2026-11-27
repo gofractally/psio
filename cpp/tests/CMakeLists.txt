@@ -801,6 +801,10 @@ psio_add_test(psio_pjson_contract_tests pjson_contract_tests.cpp)
 # §4.4 format-neutral conformance harness — one fixture, all formats.
 psio_add_test(psio_conformance_tests conformance_tests.cpp)
 
+# One generic function instantiated for every format through an alias, and
+# each format's capabilities held against a table (gofractally/psio#18).
+psio_add_test(psio_format_concept_tests format_concept_tests.cpp)
+
 # §8 criterion #6: static↔dynamic byte-identity harness.
 psio_add_test(psio_static_dynamic_parity_tests
    static_dynamic_parity_tests.cpp)

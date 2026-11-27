@@ -18,13 +18,38 @@
 
 #include <memory>
 #include <span>
+#include <vector>
 #include <utility>
 
 namespace psio {
 
+   // What a format's trusted read (`from_F<T>(psio::trusted{…})`,
+   // `psio::decode<T>(F{}, bytes)`) does with bytes that are not a frame of
+   // the type (docs/annotations.md 7.2 "On bytes that are not a frame").
+   // Every tag declares its kind as `trusted_read`; psio/format_concept.hpp.
+   enum class trusted_read_kind
+   {
+      refuses_non_frames,    // compares what it reads; a failure, no read outside
+      parses,                // finds its values by parsing, as the validating read does
+      validated_bytes_only,  // compares nothing: for bytes a validator accepted
+   };
+
+   // What `psio::encode(F{}, v, sink)` does to a sink that already holds
+   // bytes. Every tag declares it as `sink_write`.
+   enum class sink_write_kind
+   {
+      appends,   // the encoding follows what the sink held
+      replaces,  // the sink's contents become the encoding
+      none,      // the format has no sink overload
+   };
+
    template <typename Derived>
    struct format_tag_base
    {
+      // The fresh buffer of `psio::encode(F{}, v)`. A text format
+      // redeclares it as std::string.
+      using buffer_type = std::vector<char>;
+
       // ── encode ─────────────────────────────────────────────────────────
       template <typename T, typename Sink>
       static constexpr void encode(const T& v, Sink& s)

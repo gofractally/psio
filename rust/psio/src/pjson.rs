@@ -1814,6 +1814,8 @@ pub mod format {
 
     impl crate::Format for Pjson {
         type Error = super::PjsonError;
+        const NAME: &'static str = "pjson";
+        const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Absent;
     }
 }
 

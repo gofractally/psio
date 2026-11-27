@@ -21,7 +21,7 @@ See ``python/README.md``.  (Import the names you use: ``from psio import *`` wou
 ``max``, ``min`` and ``sorted``.)
 """
 
-from . import ir
+from . import formats, ir
 from .annotations import (  # noqa: F401
     Annotated, DurationMs, DurationNs, DurationSec, DurationUs, RawString, TimePointMs, TimePointNs,
     TimePointSec, TimePointUs, alt, array, at, bitlist, bitvector, bounded, boxed, char, custom, default, deprecated,
@@ -52,6 +52,7 @@ from .view import ListView, RecordView, TupleView, VariantView, View  # noqa: F4
 __version__ = "0.1.0"
 
 __all__ = [
+    "formats",
     "ir", "interface", "SchemaMethod", "Annotated", "Bits", "DecodeError", "DurationMs", "DurationNs", "DurationSec", "DurationUs",
     "EncodeError", "Handler", "IR_VERSION", "Interface", "InternalError", "JsonError", "ListView", "Method", "NaN",
     "PsioError", "RawString", "RecordView", "Schema", "SchemaError", "SchemaType", "Some", "Status", "TimePointMs",

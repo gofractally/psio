@@ -2686,6 +2686,9 @@ namespace psio {
    template <std::size_t W>
    struct frac_ : format_tag_base<frac_<W>>
    {
+      static constexpr const char*       name         = "frac";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       static constexpr std::size_t word_width = W;
 
       // fracpack is a binary format — delegates to the binary

@@ -1203,6 +1203,59 @@ borrows read-only: `storage::const_borrow`, the default, is the only `Store`
 a view accepts (the others are compile errors naming the type to use). The
 mutable borrow is `psio::mutable_view<T, Fmt>`; ownership is a buffer's.
 
+### What a format is: `psio/format_concept.hpp`
+
+Code that is generic over the format takes the tag as a type, and is pointed
+at another format by changing one alias:
+
+```cpp
+#include <psio/format_concept.hpp>
+
+template <psio::format F, typename T>
+   requires psio::codec_for<F, T>
+std::vector<char> store(const T& v)
+{
+   std::vector<char> out;
+   if (auto st = psio::encode_checked(F{}, v, out); !st.ok())   // validated write
+      return {};
+   return out;
+}
+template <psio::format F, typename T>
+   requires psio::codec_for<F, T>
+T load(std::span<const char> bytes)
+{
+   return psio::decode_checked<T>(F{}, bytes);                  // validating read
+}
+
+using F = psio::pssz;      // or psio::bin, psio::key, psio::json, psio::protobuf, ...
+```
+
+| Concept | Says |
+|---|---|
+| `psio::format<F>` | `F` is a format tag: it declares `name`, `buffer_type` (the fresh buffer of `encode`: `std::vector<char>`, or `std::string` for a text format), `trusted_read` and `sink_write` |
+| `psio::encodes<F, T>`, `encodes_into<F, T, Sink>`, `sizes<F, T>`, `decodes<F, T>`, `validates<F, T>`, `encodes_checked<F, T, Sink>` | one operation for one type; asking is never a hard error |
+| `psio::codec_for<F, T>` | all of them. A type the format does not take as a root (a FlatBuffers table, a Cap'n Proto or BSON record, an orderable key) does not satisfy it |
+| `psio::text_format<F>` | the encoding is text |
+| `psio::appends_to_sink<F>` | `encode(F{}, v, sink)` keeps what the sink held (`F::sink_write`: `appends`, `replaces`, `none`) |
+| `psio::frame_checked_read<F>` | the trusted read `psio::decode<T>` refuses or parses bytes that are not a frame; otherwise it is for validated bytes only (`F::trusted_read`: `refuses_non_frames`, `parses`, `validated_bytes_only`; [annotations 7.2](annotations.md)) |
+| `psio::view_format<F>`, `trusted_view_format<F>`, `mutable_view_format<F>` | `psio::view<T, F>` exists, with the trusted store, and `psio::mutable_view<T, F>` (once the format's view header is included) |
+| `psio::dynamic_format<F, S, V>` | `encode_dynamic` / `decode_dynamic` by a run-time schema |
+
+The four operations by tag are `psio::encode` (fast write),
+`psio::encode_checked` (validated write), `psio::decode_checked<T>`
+(validating read, the `from_F<T>(bytes)` of generic code) and
+`psio::decode<T>` (trusted read).
+
+`cpp/tests/format_concept_tests.cpp` instantiates one function for every
+format through an alias and holds each format's capabilities against a
+table. What the formats do not yet do alike is in that table, not hidden:
+`flatbuf` and `capnp` replace the sink, `wit` has no sink overload and its
+`size_of` is larger than its encoding for the record tested (27 against 24), the `ssz` and `wit` views have no `unpack()`.
+pjson is not a format in this sense yet (gofractally/psio#17). The same test
+exists for Rust (`rust/psio/tests/format_concept.rs`, over `psio::Format` and
+`psio::Codec<F>`), TypeScript (`formats.pssz` ..., `js/src/format.ts`) and
+Python (`psio.formats`).
+
 ## Adding the names for a format
 
 In the format's header, after the tag:

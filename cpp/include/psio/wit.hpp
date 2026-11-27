@@ -916,6 +916,9 @@ namespace psio {
 
    struct wit : format_tag_base<wit>
    {
+      static constexpr const char*       name         = "wit";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::none;
       using preferred_presentation_category = ::psio::binary_category;
 
       template <typename T>

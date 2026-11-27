@@ -1586,6 +1586,9 @@ namespace psio {
 
    struct capnp : format_tag_base<capnp>
    {
+      static constexpr const char*       name         = "capnp";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::replaces;
       using preferred_presentation_category = ::psio::binary_category;
 
       // The limits `validate` applies; the official reader's defaults.

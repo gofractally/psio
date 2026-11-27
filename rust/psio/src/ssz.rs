@@ -796,6 +796,8 @@ pub fn ssz_size<T: SszPack + ?Sized>(value: &T) -> usize {
 pub struct Ssz;
 impl crate::Format for Ssz {
     type Error = SszError;
+    const NAME: &'static str = "ssz";
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Parses;
 }
 impl<T: SszPack + ?Sized> crate::Encode<Ssz> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> SszResult<usize> {

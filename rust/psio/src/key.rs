@@ -328,6 +328,8 @@ pub fn key_prefix_upper_bound(prefix: &[u8]) -> Option<Vec<u8>> {
 pub struct KeyFormat;
 impl crate::Format for KeyFormat {
     type Error = KeyError;
+    const NAME: &'static str = "key";
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::Parses;
 }
 impl<T: KeyPack + ?Sized> crate::Encode<KeyFormat> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> KeyResult<usize> {

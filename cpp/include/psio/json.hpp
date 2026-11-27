@@ -3225,6 +3225,8 @@ namespace psio {
       struct tag_ops : ::psio::format_tag_base<Derived>
       {
          using buffer_type = std::string;
+         static constexpr trusted_read_kind trusted_read = trusted_read_kind::parses;
+         static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
 
          // Both formats delegate to the text adapter slot when the type
          // registers one (design § 5.3.7).

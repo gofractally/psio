@@ -1370,6 +1370,9 @@ namespace psio
 
    struct protobuf : format_tag_base<protobuf>
    {
+      static constexpr const char*       name         = "protobuf";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::parses;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       using preferred_presentation_category = ::psio::binary_category;
 
       using limits = protobuf_limits;

@@ -1447,6 +1447,9 @@ namespace psio {
 
    struct key : format_tag_base<key>
    {
+      static constexpr const char*       name         = "key";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::parses;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       // Note: `sortable_binary_category`, NOT `binary_category`. A
       // value's wire encoding (bin/pssz) and its sort encoding can
       // differ — signed ints, floats, and structs whose canonical

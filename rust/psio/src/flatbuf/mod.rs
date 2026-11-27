@@ -59,6 +59,8 @@ pub use psio_macros::{FbPack, FbUnpack, FbView};
 pub struct Flatbuf;
 impl crate::Format for Flatbuf {
     type Error = FbError;
+    const NAME: &'static str = "flatbuf";
+    const TRUSTED_READ: crate::TrustedRead = crate::TrustedRead::ValidatedBytesOnly;
 }
 impl<T: FbPack> crate::Encode<Flatbuf> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, FbError> {

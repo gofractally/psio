@@ -141,3 +141,6 @@ export {
 
 export { PJSON_WIRE_REVISION, pjsonEncode, pjsonDecode, pjsonValidate, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
          PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
+
+// Formats as values: code generic over the format (psio#18).
+export { formats, type Format, type FormatType, type FormatValidation } from './format.js';

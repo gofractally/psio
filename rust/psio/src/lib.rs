@@ -262,7 +262,7 @@ pub use policy::{ValidationPolicy, DefaultSafe, StrictCanonical,
 // a `Format` impl and per-type `Encode<F>` / `Decode<F>` / `Validate<F>`
 // blanket impls.
 mod format;
-pub use format::{Format, Encode, Decode, Validate, encode, try_encode, decode, validate, size_of};
+pub use format::{Format, Encode, Decode, Validate, Codec, TrustedRead, encode, try_encode, decode, validate, size_of};
 
 #[cfg(feature = "dynamic-view")]
 pub mod xxh64;

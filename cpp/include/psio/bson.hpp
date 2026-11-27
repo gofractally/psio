@@ -754,6 +754,9 @@ namespace psio {
 
    struct bson : format_tag_base<bson>
    {
+      static constexpr const char*       name         = "bson";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::validated_bytes_only;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       using preferred_presentation_category = ::psio::binary_category;
 
       template <typename T>

@@ -4688,6 +4688,9 @@ namespace psio {
    template <std::size_t W>
    struct pssz_ : format_tag_base<pssz_<W>>
    {
+      static constexpr const char*       name         = "pssz";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::refuses_non_frames;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       static constexpr std::size_t offset_width = W;
       using preferred_presentation_category = ::psio::binary_category;
 
@@ -4786,6 +4789,9 @@ namespace psio {
 
    struct pssz : format_tag_base<pssz>
    {
+      static constexpr const char*       name         = "pssz";
+      static constexpr trusted_read_kind trusted_read = trusted_read_kind::refuses_non_frames;
+      static constexpr sink_write_kind   sink_write   = sink_write_kind::appends;
       using preferred_presentation_category = ::psio::binary_category;
 
       // Hooks of the typed buffers (buffer.hpp): the checked encode, and
