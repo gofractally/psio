@@ -1,8 +1,9 @@
-> **Draft semantics; tag numbering adopted.** The public C++, Rust and JS/TS
-> codecs now use the audited high-nibble assignments as wire revision 2.
-> The full draft includes features and canonicalization rules not yet implemented
-> by the public codecs. [Wire contract](wire-contract.md) and
-> [compatibility](compatibility.md) define the supported release profile.
+> **Status.** This is the normative text of pjson, wire revision 2, as the
+> public C++, Rust and JS/TS codecs implement it. Where a section describes
+> something those codecs do not implement, it says so at its head; the list
+> is in [Implementation status](#implementation-status) below. The supported
+> release profile is in [wire contract](wire-contract.md) and
+> [compatibility](compatibility.md).
 
 # pjson — Binary JSON with Zero-Copy Random Access
 
@@ -13,9 +14,27 @@ Single-pass JSON transcoding at simdjson speeds (no intermediate
 value tree); canonical-typed field reads at memcpy speeds on the
 resulting binary.
 
-**Historical status claim (superseded):** v1. Reference implementation in
-`cpp/include/psio/pjson*.hpp` (with a Rust port at
-`rust/psio/src/pjson*.rs`). This draft is not the active normative specification.
+Implementations: `cpp/include/psio/pjson*.hpp`, `rust/psio/src/pjson*.rs`,
+`js/src/pjson.ts`. They are held to the same bytes by the shared vectors of
+`conformance/cpp-golden.json` and by `tools/check-pjson-validation.py`.
+
+### Implementation status
+
+| Section | Status |
+|---|---|
+| §3–§6 tags, scalars, containers | implemented in C++, Rust, JS |
+| §4.6 `ieee_float` bit 3 (notation hint) | read and ignored; never written in canonical form; the lazy transcode may set it. Whether it stays is open |
+| §4.6 binary128 | **not implemented**: rejected |
+| §4.8 `numeric_string` | **not implemented**: rejected by every validator; never canonical |
+| §4.10 `bytes` presentation hints 1..3 | **not implemented**: the low nibble must be 0; JSON text is standard base64 |
+| §4.11, §13.1 `extension` | **not implemented**: rejected |
+| §7 JSON round trip | C++ (needs simdjson for JSON → pjson) and Rust; JS has no JSON-text path |
+| §7.5 emitter options | **not implemented** |
+| §12.1 canonical and lazy transcode | implemented in C++ and Rust |
+| §15 canonical encoding | implemented in C++, Rust, JS: every encoder writes it and `validate` accepts nothing else |
+| §16 type caps | C++ `maxDynamicData` only |
+| pjson → I-JSON | **not implemented** |
+| Python | **no pjson** |
 
 **Audience:** anyone implementing a pjson parser, encoder, or
 interoperable consumer in another language.
@@ -115,20 +134,26 @@ no intermediate value tree, no DOM allocation. pjson → JSON walks
 the buffer once. Both directions run at simdjson-class parse
 speeds.
 
-### Wire size by encoder aggressiveness
+### Wire size: canonical and lazy
 
-Wire-form size depends on the encoder's level of aggressiveness in
-detecting compactable shapes (§12.1). At the minimum-cost transcode
-level — emit-as-you-parse, no shape detection — pjson is approximately
-the same size as compact JSON text (~102% on representative API
-payloads). At canonical levels — using `row_array` for arrays of
-homogeneous-shape objects (§5.2.1) and `typed_array` for
-homogeneous-primitive arrays (§5.1.1) — pjson is **smaller than
-JSON text** on the shapes that dominate API responses, query
-results, and log payloads (typically 60–75% of compact JSON), while
-still permitting random-access reads. Static-typed encode paths
-(producers that know the source type at compile time) reach the
-canonical size at zero detection cost.
+pjson has one encoding per value, the **canonical form** (§15): an array of
+numbers is a typed array (§5.1.1), an array of objects with the same member
+names is a row array (§5.2.1). Every encoder writes it. Measured against
+compact JSON text (C++, the shapes of §Headline numbers):
+
+| Document | JSON | canonical pjson | lazy transcode |
+|---|---|---|---|
+| 100 × `{"x":1,"y":2,"z":3}` | 2 001 B | 823 B (41 %) | 2 104 B (105 %) |
+| `[1, 2, …, 1000]` | 3 894 B | 2 003 B (51 %) | 4 734 B (122 %) |
+| API document, 700 records of 7 members | 96 050 B | 50 178 B (52 %) | 90 407 B (94 %) |
+| 100 objects of two alternating shapes | 2 101 B | 2 354 B (112 %) | 2 354 B (112 %) |
+
+A typed encoder reaches the canonical form from what its type declares; for
+JSON text that is not a type the canonical transcode has to look at every
+array. The **lazy transcode** (§12.1) is the one path that does not: it
+copies what it parses, is about the size of the text, and is not canonical.
+The last row is the document with nothing to compact: generic objects carry
+a hash and a slot per member.
 
 The format is designed for:
 
@@ -144,7 +169,7 @@ The format is designed for:
   that want sort-based canonicalization (e.g. for cross-producer
   byte-equality) run that sort in their own layer before encoding;
   pjson's role is to preserve whatever order the layer above
-  declared as significant. See §15.4.
+  declared as significant. See §15.5.
 * **Single-allocation, single-pass encode** — no DOM tape, no
   intermediate value tree. The encoder appends children forward and
   writes the index at the tail.
@@ -503,15 +528,17 @@ emitter what to do with the stored text bytes.
 
 The string length is always `size − 1` (no length prefix).
 
-**Encoder choices.** A producer should set the flag according to its
-source:
+**Canonical form.** A string's canonical encoding is `raw_text` (flag 0)
+holding valid UTF-8 (§15.3): one text, one encoding. `escape_form` is
+written only by the lazy JSON transcode (§12.1), which copies the bytes
+between the quotes without unescaping them; a reader takes both. Bytes in
+`escape_form` that are not a JSON string body — a bad escape, a lone
+surrogate, an unescaped quote or control character — are not text, and the
+frame has no canonical form.
 
-* JSON parser → `escape_form` (the bytes between quotes are taken
-  verbatim from the source JSON).
-* Typed text value where the producer doesn't know whether escape
-  characters are present → `raw_text`.
-* Typed text value that the producer has already validated to contain
-  no characters needing escape → `escape_form` (cheaper emit later).
+**Member names** have no flag: a name is always raw text, in an object and
+in a row array. Both JSON transcodes unescape a name that carries an escape,
+and the JSON emitter escapes names as it escapes strings.
 
 Raw binary blobs are NOT a string sub-flag — they have their own
 `bytes` tag (§4.10).
@@ -934,27 +961,16 @@ is 30–50% smaller.
 
 #### 5.2.1.5 Encoder rule
 
-A producer **may** emit row_array when every JSON object in a source
-array has:
-- the same number of keys K,
-- the same K keys (byte-equal) in the same order,
-- byte-equal hash-array (derivable from keys),
+An array is a row array in canonical form (§15.4) exactly when it has at
+least one element and every element is a single object with:
+- the same number of names K ≥ 1,
+- the same K names (byte-equal) in the same order,
+- every name under 255 bytes.
 
-When the encoder detects this on a single homogeneity-detect pass,
-it emits row_array; otherwise it falls back to generic
-`t_array` × `t_object`. The detection cost is one pass over the
-JSON array's first object's key list, then byte-compares against
-each subsequent object's first K key bytes.
-
-Whether a producer **runs** that detection pass depends on its
-aggressiveness level (§12.1). Statically-typed producers (e.g.
-encoding a reflected `Vec<R>`) skip detection entirely and emit
-row_array unconditionally because the schema is known; dynamic
-JSON-to-pjson transcoders pay the detection cost only when the
-caller asks for it.
-
-Strict canonical encoders (§15) **must** emit row_array when
-applicable.
+A typed encoder of a list of records knows this from the type and emits the
+row array without looking (an empty list is the generic empty array). The
+canonical JSON transcode compares each object's names with the first
+object's. The lazy transcode (§12.1) emits a generic array of objects.
 
 ### 5.3 Key prefilter hash
 
@@ -1123,18 +1139,17 @@ byte-for-byte. Specifically:
   emitter exposes `pretty` / `indent` options (§7.5) for callers
   that want indented output.
 * Trailing zeros in decimals are normalized (`100.00` → `100`).
-* Scientific notation in number tokens is **not** preserved across
-  the round-trip; `1.5e10` decodes to a binary value and re-emits
-  in canonical decimal form (`15000000000`). For applications that
-  must round-trip the textual form, pass the source as a JSON
-  string — the encoder will detect the JSON-number-grammar match
-  and lift it through `numeric_string` (§4.8), preserving the
-  original quoted form on output.
-* Numeric **type**, however, IS preserved: a JSON string whose
-  content matches the JSON-number grammar is encoded as
-  `numeric_string` and re-emits with surrounding quotes; a bare
-  JSON number is encoded as the appropriate numeric type and
-  re-emits without quotes (subject to §7.5 emitter options).
+* Scientific notation in number tokens is **not** preserved: `1.5e10` is
+  the number 15000000000 and is written so. A number is written from the
+  value it is, so one value has one text whichever form carries it:
+  integers in full, other numbers in plain notation while that stays
+  short and `d.ddde±x` otherwise.
+* A JSON string stays a string, even when its content looks like a number
+  (`numeric_string`, §4.8, is not implemented).
+* A JSON number keeps its value exactly or is an error: a number with more
+  significant digits than a 127-bit mantissa holds has no pjson form.
+* A member name and a string are their text: `"\u00e9"` and `"é"` are the
+  same value. The lazy transcode keeps a string as it was spelled (§4.9).
 * Field encounter order **is** preserved.
 
 For applications requiring byte-identical round-trip (e.g., signature
@@ -1550,88 +1565,51 @@ The encoder is **single-pass forward-write**. No memmove, no
 header reservation, no backpatching beyond writing the index at the
 tail.
 
-### 12.1 Static vs. dynamic detection (encoder aggressiveness)
+### 12.1 Typed encoders, the canonical transcode and the lazy transcode
 
-Several pjson container forms — `row_array` (§5.2.1), `typed_array`
-(§5.1.1), canonical numeric encodings (§15.2) — give the same
-logical value a substantially smaller wire form than the generic
-fall-back. **Whether** a given encoder uses them depends on how it
-learns the schema:
+Every encoder writes the canonical form (§15). How it gets there depends on
+what it knows.
 
-**Static (compile-time) detection.** When the producer is generated
-from a typed source — for example, encoding a reflected record
-type, or a `vector<R>` where `R`'s field list is known at compile
-time — the schema is fully known before encoding begins. The
-encoder emits `row_array` / `typed_array` unconditionally; there is
-no probing pass and no fall-back path. Detection is **free**.
-This is the path native code uses when emitting pjson from typed
-values.
+**A typed encoder** (a reflected record, a list of a known element type)
+takes from the type everything the type decides: a list of records is a row
+array, a string is raw text, members are in declaration order, an absent
+optional is `null`. What only the values decide it reads from the values,
+in one linear pass per list:
 
-**Dynamic (transcode-time) detection.** When the producer is
-reading JSON text (or another self-describing source) and emitting
-pjson on the fly, the schema is not known until the array's
-elements have been parsed. To use `row_array` or `typed_array`,
-the encoder must **probe** each element as it arrives to confirm
-the array is still homogeneous. Probing costs cycles on the
-encode side; emitting the compactable form saves bytes on the
-wire. Implementations expose this trade-off as an
-**aggressiveness level**:
+| List | What is looked at |
+|---|---|
+| integers | the largest and smallest element (the width, §15.4) |
+| floats | whether every element is an integer, and whether binary32 carries every element; both stop at the first element that says no |
+| records | nothing (an empty list is the generic empty array) |
 
-| level | name           | dynamic detect                                                            | wire size                            | encode cost          |
-|-------|----------------|---------------------------------------------------------------------------|--------------------------------------|----------------------|
-| 0     | none           | off                                                                       | always generic; ≈ JSON               | minimum              |
-| 1     | shape-only     | row_array, typed_array                                                    | smaller than JSON on uniform arrays  | + one probe pass     |
-| 2     | canonical      | level 1 + numeric canonicalization (§15.2) + smallest adaptive widths     | minimum (matches static encode)      | maximum              |
+**JSON text of a known type** is read as the type and encoded by the typed
+encoder: it is not either of the two transcodes below.
 
-All levels preserve field encounter order (§15.4). Key sorting is
-**not** part of pjson canonicalization at any level — it is the
-application layer's responsibility, performed before pjson's
-encoder is called, and only when the application has declared
-order-independence as part of its logical equality contract.
+**JSON text that is not a type** has two transcodes, and the caller says
+which:
 
-* **Level 0 — none.** Transcoder emits `t_array` of `t_object`
-  unconditionally and never combines neighbouring primitives into
-  `typed_array`. Wire size matches the §1 baseline (~102% of
-  compact JSON). Use when transcode latency dominates and storage
-  size is not constrained (e.g. high-throughput RPC where the
-  payload is decoded immediately on arrival).
-* **Level 1 — shape-only.** On each new element of an array,
-  compare its shape against the first element's. For an array of
-  objects: byte-compare the key list. For an array of primitives:
-  check the element type code. Match → continue buffering.
-  Mismatch → restart the array as generic and emit the buffered
-  elements using `t_object` / generic-array. Net cost: O(N·K)
-  extra key-byte compares per array; net saving: 30–50% on
-  uniform object arrays, 50–80% on dense numeric arrays. This is
-  the §5.2.1.5 / §5.1.1 encoder rule applied dynamically.
-* **Level 2 — canonical.** Apply §15 in full: typed_array for
-  homogeneous-primitive arrays; row_array for homogeneous-shape
-  object arrays; smallest adaptive widths; smallest numeric
-  encoding per §15.2. **Field order is preserved** — pjson does
-  not sort keys; the encoder writes fields in encounter order
-  (§15.4). Output is strictly canonical: bit-equal across encoders
-  for the same logical input under the application's order policy
-  (which, for pjson, is "the order the input declared" — sorting,
-  if wanted, is the layer above's job). Decode-time random-access
-  by name and by slot index is unaffected. This is the level a
-  database storing pjson rows or a content-addressable store
-  should run; transcode time grows by a small constant factor
-  (typically < 2× over level 0) and storage shrinks meaningfully
-  versus JSON text.
+* **Canonical** (`pjson_json::from_json`, `psio::pjson`). The canonical
+  form of the document. It looks at every array: are the elements all
+  numbers, all objects of one shape.
+* **Lazy** (`pjson_json::from_json_lazy`, `psio::pjson_lazy`). What is
+  parsed is copied as it comes: strings in `escape_form`, arrays generic,
+  numbers as spelled where that is exact. The result is well-formed and
+  about the size of the text; it is **not canonical**, and it is the only
+  writer of which that is true. `canonicalize` turns such a frame into the
+  canonical one.
 
-A statically-typed encoder effectively runs at "level ∞" (every
-applicable optimization, by knowing the schema in advance) at zero
-extra cost. The aggressiveness ladder exists only to give dynamic
-producers a way to spend encode cycles on wire-size reductions
-that the static path gets for free.
+`psio::pjson` validates and decodes canonical frames only (§15.7);
+`psio::pjson_lazy` takes any well-formed frame. The untyped view (§10, §11)
+and the JSON emitter read both.
 
-Implementations of the dynamic JSON → pjson transcoder should
-expose the level as a parameter on the entry point. The minimum
-contract: level 0 must be available (it is the baseline single-
-pass encoder); higher levels are recommended where the storage
-side of the round-trip is the dominant cost.
+Measured (C++, `clang -O3`, Apple M-series; the canonical transcode is the
+lazy one followed by `canonicalize`):
 
----
+| Document | lazy | canonical adds |
+|---|---|---|
+| 100 × `{"x":1,"y":2,"z":3}` | 5.9 µs | 4.4 µs (+75 %) |
+| `[1, 2, …, 1000]` | 15.9 µs | 10.6 µs (+67 %) |
+| API document, 700 records | 151 µs | 119 µs (+79 %) |
 
 ## 13. Versioning
 
@@ -1756,261 +1734,178 @@ A reference test corpus lives at `cpp/tests/pjson_tests.cpp`
 
 ## 15. Canonical Encoding
 
-The pjson format permits multiple wire encodings of the same logical
-value (e.g. a small integer can use `uint_inline` or `uint`). For
-content-addressable hashing, signature verification, deduplication,
-and equality comparison via byte-compare, implementations need to
-agree on a single canonical form for every value.
+A pjson value has exactly **one** canonical encoding, and it is a function
+of the value alone: not of the type that held it, the language that wrote
+it, or how its source spelled it. Every encoder writes the canonical form,
+and `validate` accepts nothing else, so **equal values are equal bytes** —
+for hashing, signatures, deduplication and comparison by `memcmp`. The one
+writer of non-canonical frames is the lazy JSON transcode (§12.1), read
+under its own name.
 
-### 15.1 Encoding rule (priority order)
+### 15.1 What a value is
 
-A canonical encoder selects the encoding by applying these rules in
-order:
+| Kind | The value is | Not part of the value |
+|---|---|---|
+| null, bool | itself | |
+| number | a decimal number — an integer or `mantissa × 10^scale` — or one of −0, NaN, +Inf, −Inf | the width or signedness of the type that held it; how it was spelled (`1e2`, `100`, `100.0`) |
+| string | a sequence of Unicode scalar values | whether its source had escapes |
+| bytes | a sequence of octets | how it is shown in text |
+| array | a sequence of values | whether its source was a list, a fixed array or a tuple |
+| object | a sequence of (name, value) members, in order; a name may repeat | |
 
-1. **Round-trip JSON without precision loss.** Choose only encodings
-   that preserve the value's information through a JSON-text →
-   pjson → JSON-text round-trip. (Strings preserve their escape form
-   per §4.9; numbers preserve their value bit-exactly per the rules
-   below; numeric-form JSON strings preserve type via §4.8
-   `numeric_string`.)
-2. **Smallest possible byte size.** Among encodings that satisfy
-   rule 1, choose the encoding that produces the fewest bytes.
-3. **Fastest decode on ties.** When two encodings produce the same
-   byte count AND both preserve precision, choose the one that
-   decodes fastest. For numbers this means: prefer `ieee_float` over
-   `decimal` (a raw 8-byte load is cheaper than mantissa-and-scale
-   reconstruction).
+**5 is 5.** A `u16` 5, a `u64` 5, an `f64` 5.0 and JSON `5` or `5.0` are one
+value and one byte, `25`. The reader's type gives the width back, not the
+bytes.
 
-This makes the canonical encoding **deterministic per value** —
-given the same logical value, every conforming encoder produces the
-same bytes for that value. (Field encounter order is excluded; see
-§15.4.)
+**What a binary float stands for** (default chosen, awaiting the owner's
+confirmation; gofractally/psio#17): the shortest decimal that reads back to
+it **at its own width** — its fewest significant digits, times a power of
+ten. So `f32 0.1f`, `f64 0.1` and JSON `0.1` are one value, `0.1`; the
+double `(double)0.1f` is another, `0.10000000149011612`. A binary float
+frame of width *w* holding bits *x* **denotes** that decimal, and a width
+**carries** a number `D` exactly when the float of that width nearest `D`
+denotes `D`.
 
-### 15.2 Numbers — concrete rules
+Consequences every implementation must get right:
 
-For an integer value `v`:
+* A binary32 frame (or typed `f32` element) read as a binary64 is the
+  double nearest the number it denotes — through the decimal, **not** a
+  widening cast. Widening `0.1f` would give `0.10000000149011612`.
+* Reading as the same width gives the same bits back: `f32` → pjson → `f32`
+  and `f64` → pjson → `f64` are exact (NaN payloads excepted, §15.2.1).
+* The implementations keep this reading in one place (C++
+  `pjson_detail::float_model`, Rust `pjson_canonical::FLOAT_MODEL`, JS
+  `PJSON_FLOAT_MODEL`); the vector sets `pjson_f32` and `pjson_list_f32`
+  are the ones that depend on it.
 
-| value range                                              | canonical encoding                              |
-|----------------------------------------------------------|-------------------------------------------------|
-| 0 ≤ v ≤ 15                                               | `uint_inline` (1 byte)                          |
-| −15 ≤ v ≤ −1                                             | `nint_inline` (1 byte)                          |
-| 16 ≤ v, fits `u64`                                       | `uint` with smallest bc (1..8)                  |
-| u64::MAX < v, fits `u128`                                | `uint` with smallest bc (9..16)                 |
-| v ≤ −16, magnitude fits `u64`                            | `negint` with smallest bc on `\|v\|` (1..8)      |
-| beyond `i64` magnitude, fits `i128` magnitude            | `negint` with smallest bc on `\|v\|` (9..16)     |
+**A typed value** is the JSON value PSIO's `json` format gives it, except
+that a byte sequence is `bytes`: a record is an object with its members in
+declaration order, an absent optional is `null` with its name present, a
+list, fixed array or tuple is an array.
 
-For an integer-valued double (e.g. `42.0`): treat as integer and
-apply the table above. The fractional part is zero, so it round-trips
-through any integer encoding losslessly.
+### 15.2 Numbers
 
-For a fractional value `f` (non-zero fractional part) sourced as
-some IEEE binary format:
+| Number | Canonical encoding |
+|---|---|
+| an integer of magnitude below 2^128 | `uint_inline` (0..15), `nint_inline` (−15..−1), else `uint` / `negint` with the fewest bytes |
+| any other finite number | the smallest of: `decimal` with a mantissa that is not a multiple of 10; `ieee_float` binary32, if it carries the number; `ieee_float` binary64, if it carries the number. A tie goes to the float, the narrower first |
+| −0 | binary16 `61 00 80` |
+| NaN | binary16 `61 00 7E` (one NaN: the quiet one, §15.2.1) |
+| +Inf, −Inf | binary16 `61 00 7C`, `61 00 FC` |
 
-1. Compute the **smallest IEEE width** `w ∈ {2, 4, 8, 16}` for
-   which `f` round-trips bit-exact. The candidate widths are
-   binary16, binary32, binary64, binary128. Let
-   `ieee_size = 1 + w`.
-2. Compute the **shortest round-trip decimal** `(mantissa, scale)`
-   such that `from_float(f, w)` produces this pair (Ryu / Grisu /
-   Dragon4-equivalent at width `w`). Trim trailing zeros from the
-   mantissa (incrementing `scale`) until either the last digit is
-   non-zero or `scale = 0`. Let
-   `decimal_size = 1 + mantissa_bc + varscale_size(scale)`.
-3. If `decimal_size < ieee_size` → encode as `decimal`.
-4. Else if `decimal_size > ieee_size` → encode as `ieee_float` at
-   width `w`.
-5. Else (tie) → encode as `ieee_float` at width `w` (faster
-   decode — a fixed-width raw load beats mantissa-and-scale
-   reconstruction).
+Examples:
 
-For NaN, ±Inf, and other values that have no representable
-shortest decimal: encode as `ieee_float` at the **smallest width
-that represents the value** (binary16 for any NaN or ±Inf, since
-both are representable in every IEEE width). Use the canonical
-bit pattern specified in §15.2.1 below — multiple bit patterns
-encode "a NaN" in IEEE-754, and a deterministic encoder must pick
-exactly one.
+| Source | Number | Bytes |
+|---|---|---|
+| `f32 0.1f`, `f64 0.1`, JSON `0.1` | `0.1` | `70 02 01` (decimal, 3 B) |
+| `f32` one third, `f64 0.33333334`, JSON `0.33333334` | `0.33333334` | `62 AB AA AA 3E` (binary32, 5 B; the decimal is 6) |
+| `f64` one third | `0.3333333333333333` | binary64, 9 B |
+| `f64 (double)0.1f` | `0.10000000149011612` | binary64, 9 B |
+| `f64 2^60` | `1152921504606847000` (its shortest digits) | `uint`, 9 B |
+| JSON `1e400` | `1e400` | `70 02 60 0C` (decimal) |
+| JSON `100.00`, `1e2` | `100` | `40 64` |
 
-For a `(mantissa, scale)` pair supplied directly by a typed numeric
-source (not derived from a double): encode the `(mantissa, scale)`
-form regardless of whether `ieee_float` would be shorter — the
-typed value is **already** a `decimal` semantically; collapsing to
-double would lose its exact-decimal identity. Producers that want
-the smallest encoding regardless of identity should convert through
-double first and apply the rules above.
+`ieee_float` bit 3 (the notation hint) is clear in canonical form. binary16
+is canonical only for −0, NaN and the infinities. `numeric_string` (§4.8)
+is never canonical.
 
-#### 15.2.1 Canonical NaN and Infinity bit patterns
+(Earlier drafts of this section took the shortest decimal at the width of
+the *narrowest* float whose bits survive. That turned the double
+`(double)0.1f` into `0.1`, which reads back as a different double. A width
+is narrowed to only when it carries the same number.)
 
-IEEE-754 admits many bit patterns for "a NaN" — every value with
-exponent all 1s and a non-zero significand qualifies. For a
-deterministic / content-addressable encoding, exactly one pattern
-must be chosen. pjson's canonical encoder uses the **quiet NaN
-with zero payload** at every width: sign = 0, exponent = all 1s,
-top mantissa bit = 1 (the IEEE-754 quiet-bit), all other mantissa
-bits = 0.
+#### 15.2.1 NaN and infinity
 
-| width      | canonical NaN (LE bytes)                                 | canonical NaN (LE u{N}) |
-|------------|----------------------------------------------------------|--------------------------|
-| binary16   | `00 7E`                                                  | `0x7E00`                 |
-| binary32   | `00 00 C0 7F`                                            | `0x7FC00000`             |
-| binary64   | `00 00 00 00 00 00 F8 7F`                                | `0x7FF8000000000000`     |
-| binary128  | `00…00 00 80 FF 7F`  (16 bytes; first 14 are zero)       | `0x7FFF8000_00000000_00000000_00000000` |
+IEEE-754 has many NaN bit patterns; pjson has one NaN. Canonical form is
+binary16 `0x7E00`; inside a typed array it is the quiet NaN of the element
+width (`0x7FC00000`, `0x7FF8000000000000`). A reader that needs a payload
+must carry it as bytes. Infinities keep their sign. A NaN or an infinity
+has no JSON text (§7.3).
 
-Encoders observing any other NaN bit pattern in the source value
-**must** rewrite to the canonical pattern at the chosen width
-before emitting `ieee_float`. The original payload bits are not
-preserved — pjson treats "NaN" as a single logical value, not a
-family.
+### 15.3 Strings, names and bytes
 
-For ±Infinity the bit pattern is unambiguous (sign + exponent
-all 1s + mantissa all 0s). The sign bit is preserved from the
-source; no canonicalization is needed beyond that.
+* A string is `raw_text` (flag 0) and valid UTF-8. Text that is not UTF-8
+  has no pjson form: a typed encoder refuses it, and a well-formed frame
+  that holds it (a lazy frame, §4.9) has no canonical form.
+* A member name is raw UTF-8 text (§4.9).
+* Bytes are tag `A0`; the low nibble is 0.
 
-| width      | +Infinity (LE)                                           | −Infinity (LE)                   |
-|------------|----------------------------------------------------------|----------------------------------|
-| binary16   | `0x7C00`                                                 | `0xFC00`                         |
-| binary32   | `0x7F800000`                                             | `0xFF800000`                     |
-| binary64   | `0x7FF0000000000000`                                     | `0xFFF0000000000000`             |
-| binary128  | `0x7FFF0000_00000000_00000000_00000000`                  | `0xFFFF0000_00000000_00000000_00000000` |
+### 15.4 Arrays
 
-A canonical encoder chooses the smallest width that represents
-the value (always binary16 for NaN, ±Inf, ±0, and any other
-"width-invariant" extreme).
+In this order:
 
-Decoders accept any well-formed IEEE bit pattern at any width;
-canonicalization is an encoder requirement, not a decoder rule.
-Strict-canonical validators (§15.7) **must** reject `ieee_float`
-payloads whose bits are a NaN but not the canonical pattern.
+1. **Empty**: the generic empty array, `B0 00 00 00` — whatever its element
+   type was.
+2. **Every element an integer of at most 64 bits** (fits `u64`, or `i64`
+   when any is negative): a typed array (§5.1.1) of the narrowest code that
+   holds every element — `u8`, `u16`, `u32`, `u64` if none is negative,
+   else `i8`, `i16`, `i32`, `i64`.
+3. **Every element a number binary32 carries**: typed `f32`.
+4. **Every element a number binary64 carries**: typed `f64`.
+5. **Every element a single object, with the same member names in the same
+   order** — at least one name, every name under 255 bytes: a row array
+   (§5.2.1) with the smallest `slot_w` and `recoff_w`. One element is
+   enough.
+6. **Otherwise**: generic, each element in canonical form.
 
-### 15.3 Strings
+So `[1, 2, 3]` is `B5 01 02 03 03 00` from a `vector<u16>`, a `vector<u64>`,
+a `vector<double>` and JSON text alike; `[0.1, 0.2]` is a typed `f32` array
+from a `vector<float>`, a `vector<double>` and JSON text; `[1, "a"]`, an
+array of arrays and an array of objects of different shapes are generic.
 
-The wire form of a string carries an encoding flag (§4.9) that
-**identifies the source** rather than canonicalizing it:
+A typed reader therefore accepts any typed-array code for a list of
+numbers, and the generic empty array for any list. A zero-copy span of a
+typed array is available only when the stored code is the reader's.
 
-- A string from a JSON text source encodes as `escape_form` —
-  byte-identical to the source bytes between the JSON quotes.
-- A string from a typed text value encodes as `raw_text` — the
-  program-visible text, with no escape pass.
-- Raw binary uses the separate `bytes` tag (§4.10), not a string
-  flag.
+### 15.5 Objects and widths
 
-Two pjson values for the same logical text "Hello world" — one
-from JSON, one from a typed string — will NOT be byte-equal
-because they deliberately preserve their different source
-representations. This is the format's **byte-equality means same
-source** property.
+* An object is generic (§5.2); its members are in the order given and a
+  repeated name is kept. pjson does not sort names: order is part of the
+  value.
+* The slot width of a generic array or object, and the `slot_w` and
+  `recoff_w` of a row array, are the smallest that fit.
+* Slot offsets ascend and cover the value data with no gaps; hash bytes are
+  the low byte of XXH3-64 of the name before its last dot (§5.3).
 
-For applications that want logical equality across sources, decode
-both as their text form and compare the unescaped bytes (which
-requires applying JSON unescape rules to an `escape_form` value).
-Or canonicalize at a higher layer before encoding.
+### 15.6 Reaching the canonical form
 
-### 15.4 Containers
+| Encoder | How |
+|---|---|
+| typed (a reflected type) | by type where the type decides; a linear look at a list's values for its width (§12.1). C++ writes it directly; Rust writes a well-formed frame and canonicalizes it |
+| dynamic value (`pjson_value`, `Value`, a JS value) | the value is encoded and brought to canonical form: an array built as generic is a typed array if its elements are numbers |
+| JSON text that is not a type | the canonical transcode (§12.1) |
+| any well-formed frame | `canonicalize` |
 
-- **Field encounter order is application-defined**, not canonical.
-  Two pjson objects with the same fields in different orders are NOT
-  byte-equal, even if their data is logically the same. Applications
-  that need order-independent equality must canonicalize key order
-  at a higher layer (typically: sort keys lexicographically before
-  encoding).
-- **Slot offsets** must be ascending and exactly cover the
-  value_data region (no gaps, no overlap). The encoder's natural
-  forward-write produces this; non-canonical layouts (e.g. jumbled
-  slot offsets reordering the children) are valid pjson but not
-  canonical.
-- **Hash bytes** are deterministic from key bytes (low byte of
-  XXH3-64 over suffix-stripped key per §5.3). Always canonical.
-- **num_fields** is the actual N. Always canonical.
+### 15.7 Validation
 
-### 15.5 Objects — generic vs. row_array
+`validate` (and so `decode`, and the typed validating read) accepts a frame
+exactly when it is the canonical encoding of its value: it is well-formed
+(§9) and equal to its own canonical form. A well-formed frame that is not —
+an integer in more bytes than it needs, a generic array of numbers, a
+string in `escape_form` — is refused by `psio::pjson` and accepted by
+`psio::pjson_lazy`.
 
-For an array whose elements are all objects with **identical
-schemas** (same K keys, same order, byte-equal key strings), the
-canonical encoder **must** emit the **row_array** form (§5.2.1)
-rather than a generic `t_array` of N `t_object`s. The shared
-schema removes the per-record overhead, so the row_array form is
-always the smaller-byte choice — no further size comparison needed.
+Two canonical frames are byte-equal iff their values are equal.
 
-A canonical encoder must also pick the **smallest adaptive widths**
-(`slot_w`, `recoff_w`) that fit the actual record body sizes:
+The untyped view and the JSON emitter read any well-formed frame. A typed
+view's access by member index needs the canonical shape of its type and
+looks members up by name otherwise.
 
-```
-slot_w   = smallest width fitting max(record_body_size_i) for i in 0..N
-recoff_w = smallest width fitting total records-body size
-```
+### 15.8 Conformance
 
-Mismatched objects (extra fields, missing fields, different
-byte-order of keys) make the array non-homogeneous; canonical
-encoders fall back to generic `t_array` of `t_object`s in that case.
+`conformance/cpp-golden.json` carries, for C++, Rust and JS:
 
-For dynamic JSON → pjson transcoders, this rule is reachable only
-at aggressiveness level 1 or higher (§12.1). Level 0 transcoders
-always emit generic `t_array` of `t_object` — they are not
-canonical encoders, by definition.
+* `pjson`, `pjson_f64`, `pjson_extra`, `pjson_typed`: values and their
+  canonical bytes;
+* `pjson_f32`, `pjson_list_i64`, `pjson_list_f64`, `pjson_list_f32`: native
+  floats and lists and their canonical bytes;
+* `pjson_to_json`: well-formed frames, canonical and not, each with its
+  JSON text and the canonical frame of its value (`canonical_hex`);
+* `pjson_invalid`: bytes that are not a frame.
 
-### 15.6 Arrays — generic vs. typed
-
-For an array whose elements are all of one fixed-width primitive
-type (signed integer, unsigned integer, float), the canonical
-encoder **must** emit the **typed** form (§5.1.1) using the
-**smallest element-type code** that holds every element exactly:
-
-1. If any element is fractional (non-zero fractional part): use the
-   smallest IEEE float that round-trips every element. `f32` if
-   every element round-trips through a 32-bit float, else `f64`.
-2. Else if every element is non-negative: use the smallest unsigned
-   width that fits every element: `u8`, `u16`, `u32`, or `u64`.
-3. Else: use the smallest signed width that fits every element:
-   `i8`, `i16`, `i32`, or `i64`.
-
-For an array with at least one non-primitive element (string,
-container, mixed type), or whose primitive elements span multiple
-unrelated families (mixed integer-and-float, mixed signed-and-very-
-large-unsigned beyond `i64`), the canonical encoder uses the
-**generic** form (§5.1).
-
-Rationale: the typed form satisfies §15.1 priority rule 2
-(smallest size) for homogeneous primitive arrays; the size win is
-substantial (often 2× or more on dense arrays) and is the only
-pjson encoding choice that gives byte-different output for the
-"same" logical array. Strict-canonical encoders therefore must
-choose typed when applicable.
-
-### 15.7 Strict canonical (byte-equality contract)
-
-A pjson value is **strictly canonical** iff:
-
-- Every nested numeric value satisfies §15.2.
-- Every nested string carries the canonical flag for its source
-  (§15.3).
-- Every nested container has slots in ascending offset order with
-  no gaps (§15.4).
-- Every nested array satisfies §15.6 (typed form when homogeneous
-  primitive, with the smallest element-type code that holds every
-  element exactly).
-- Every nested array of homogeneously-shaped objects satisfies
-  §15.5 (row_array form with smallest adaptive widths).
-- Field order matches the application's chosen canonicalization
-  policy (which itself must be deterministic from the logical
-  value — typically lexicographic key sort, or original input
-  order if input order is part of the logical identity).
-
-Two strictly-canonical pjson buffers are byte-equal iff their
-logical values are equal under the application's order policy.
-
-### 15.8 Producer guidance
-
-Implementations marketed as "canonical pjson encoders" must:
-
-- Apply §15.1 priority rules for every value.
-- Document their field-order policy (lex-sort, source-order, etc.)
-  so consumers can match.
-- Never emit reserved low-nibble flag values (§3) on canonical
-  output.
-
-The reference C++ encoder follows §15.2 rules for numbers and
-preserves source-order field encoding. It does NOT sort keys; that's
-left to a higher layer.
+`tools/check-pjson-validation.py` runs the three implementations over
+mutations of those frames and random bytes and requires the same verdict
+from both validators and the same canonical bytes.
 
 ## 16. Type-level caps
 
