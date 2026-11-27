@@ -724,8 +724,59 @@ TEST_CASE("pjson canonical: every typed encoding is canonical and reads back", "
    }
    CHECK(typed_arrays > 1000);
    CHECK(rows > 1000);
-   // A string that is not UTF-8 has no pjson form.
-   CHECK_THROWS(psio::from_struct(Box<std::string>{"\xff"}));
+}
+
+// The two writes (gofractally/psio#14, #17): the fast write holds one's own
+// value to nothing; the validated write refuses exactly when the validating
+// read of the fast-written bytes refuses.
+TEST_CASE("pjson write modes: the validated write refuses what the validating read of the fast bytes refuses",
+          "[pjson][canonical][modes]")
+{
+   const auto same_verdict = [](const auto& value) {
+      const Bytes fast  = psio::from_struct(value);                 // never refuses
+      const bool  reads = psio::pjson::validate(fast);
+      REQUIRE(psio::pjson_lazy::validate(fast));                    // always a well-formed frame
+      Bytes out{0x7f};
+      CHECK(psio::encode_pjson_checked(value, out) == reads);
+      if (reads)
+      {
+         CHECK(out == [&] { Bytes b{0x7f}; b.insert(b.end(), fast.begin(), fast.end()); return b; }());
+         CHECK(psio::to_pjson_checked(value) == fast);
+      }
+      else
+      {
+         CHECK(out == Bytes{0x7f});                                 // unchanged
+         CHECK_THROWS(psio::to_pjson_checked(value));
+      }
+      return reads;
+   };
+   CHECK(same_verdict(Box<std::string>{"h\xc3\xa9llo"}));
+   CHECK_FALSE(same_verdict(Box<std::string>{"\xff"}));
+   CHECK_FALSE(same_verdict(Box<std::string>{"truncated \xe4\xb8"}));
+   CHECK_FALSE(same_verdict(Box<std::vector<std::string>>{{"ok", "\xc0\x80"}}));
+   CHECK(same_verdict(Box<std::vector<double>>{{std::numeric_limits<double>::quiet_NaN(), 0.5}}));
+   CHECK(same_verdict(Box<double>{std::bit_cast<double>(0x7ff0000000000001ull)}));   // a scalar NaN is written quiet
+   std::mt19937_64 rng{3};
+   std::size_t     refused = 0, accepted = 0;
+   for (int i = 0; i < 4000; ++i)
+   {
+      PcWide r;
+      r.id = rng();
+      r.d  = std::bit_cast<double>(rng());
+      r.f  = std::bit_cast<float>(static_cast<std::uint32_t>(rng()));
+      for (std::size_t n = rng() % 12; n; --n) r.s.push_back(static_cast<char>(rng() % 3 ? 'a' + rng() % 26 : rng()));
+      for (std::size_t n = rng() % 3; n; --n) r.strs.push_back(std::string(1 + rng() % 3, static_cast<char>(rng() % 8 ? 'x' : 0x80 + rng() % 0x80)));
+      for (std::size_t n = rng() % 3; n; --n) r.ds.push_back(std::bit_cast<double>(rng()));
+      (same_verdict(r) ? accepted : refused) += 1;
+   }
+   CHECK(accepted > 500);
+   CHECK(refused > 500);
+   // The dynamic encoder likewise.
+   CHECK(psio::pjson::encode_checked(psio::pjson_value{std::string{"ok"}}) == hex("906f6b"));
+   const Bytes raw = psio::pjson::encode(psio::pjson_value{std::string{"\xff"}});
+   CHECK(raw == hex("90ff"));
+   CHECK_FALSE(psio::pjson::validate(raw));
+   CHECK_THROWS(psio::pjson::encode_checked(psio::pjson_value{std::string{"\xff"}}));
 }
 
 TEST_CASE("pjson canonical: a well-formed frame that is not the canonical one", "[pjson][canonical]")

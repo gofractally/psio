@@ -529,7 +529,18 @@ function unescapeText(bytes: Uint8Array): Uint8Array {
   }
   return textBytes(Uint8Array.from(out));
 }
+// Whether strings and member names are held to UTF-8. A validating read and
+// the pass over an outside frame do; a WRITE of one's own value does not (the
+// fast write: gofractally/psio#14, #17) — text that is not UTF-8 is then
+// written as it is, and the validator refuses the frame.
+let checkText = true;
+function withText<T>(check: boolean, run: () => T): T {
+  const before = checkText;
+  checkText = check;
+  try { return run(); } finally { checkText = before; }
+}
 function textBytes(bytes: Uint8Array): Uint8Array {
+  if (!checkText) return bytes;
   try { text.decode(bytes); } catch { throw new PjsonError('A string is not UTF-8: it has no canonical form'); }
   return bytes;
 }
@@ -594,8 +605,13 @@ function canonical(value: PjsonValue, depth = 0, anonymous = false): Uint8Array 
   const n = numOf(value);
   if (n) return anonymous ? canonicalNumber(n) : typedNumber(value, n);
   if (typeof value === 'string') return join([Uint8Array.of(0x90), utf8.encode(value)]);
-  if (value instanceof PjsonString)
-    return join([Uint8Array.of(0x90), value.escaped ? unescapeText(value.bytes) : textBytes(value.bytes)]);
+  if (value instanceof PjsonString) {
+    if (!value.escaped) return join([Uint8Array.of(0x90), textBytes(value.bytes)]);
+    if (checkText) return join([Uint8Array.of(0x90), unescapeText(value.bytes)]);
+    // The fast write: an escape form that is not text is written as given.
+    try { return join([Uint8Array.of(0x90), withText(true, () => unescapeText(value.bytes))]); }
+    catch { return join([Uint8Array.of(0x91), value.bytes]); }
+  }
   if (value instanceof Uint8Array) return join([Uint8Array.of(0xa0), value]);
   if (value instanceof PjsonTypedArray) {
     const size = sizes[value.code];
@@ -642,19 +658,29 @@ function input(data: unknown): Uint8Array {
   return data.constructor === Uint8Array ? data : new Uint8Array(data.buffer, data.byteOffset, data.length);
 }
 
-/** The pjson bytes of `value`, canonical: a value that names its type
+/** The pjson bytes of `value` (the fast write), canonical: a value that names its type
  *  (`PjsonFloat`, `PjsonTypedArray`, a bigint) is written as that type; a JS
  *  number is a JSON number and an array has no element type, so they take
  *  the form their values give them; an escaped `PjsonString` is its text. */
 export function pjsonEncode(value: PjsonValue): Uint8Array {
-  return guarded(() => canonical(value));
+  return guarded(() => withText(false, () => canonical(value)));
+}
+/** The VALIDATED write: `pjsonEncode`, refused (a `PjsonError`) when the
+ *  validating read of those bytes would refuse them — a `PjsonString` or a
+ *  member name that is not UTF-8. `pjsonEncode` is the fast write: one's own
+ *  value is not held to anything, and it always gives a well-formed frame. */
+export function pjsonEncodeChecked(value: PjsonValue): Uint8Array {
+  const bytes = pjsonEncode(value);
+  if (!pjsonValidate(bytes)) throw new PjsonError('The value does not validate (text that is not UTF-8)');
+  return bytes;
 }
 /** Decodes pjson bytes: the canonical frame of a value, nothing else (see
  *  `pjsonValidate`). `pjsonLazy.decode` reads any well-formed frame. */
 export function pjsonDecode(data: Uint8Array): PjsonValue {
   return guarded(() => {
     const value = decode(input(data));
-    require(sameBytes(canonical(value), input(data)), 'A well-formed frame that is not the canonical encoding of its value');
+    require(sameBytes(withText(true, () => canonical(value)), input(data)),
+      'A well-formed frame that is not the canonical encoding of its value');
     return value;
   });
 }
@@ -664,7 +690,7 @@ export function pjsonDecode(data: Uint8Array): PjsonValue {
 export function pjsonValidate(data: Uint8Array): boolean {
   try {
     const bytes = input(data);
-    return sameBytes(canonical(decode(bytes)), bytes);
+    return sameBytes(withText(true, () => canonical(decode(bytes))), bytes);
   } catch {
     return false;
   }
@@ -675,7 +701,7 @@ export function pjsonValidate(data: Uint8Array): boolean {
  *  `PjsonError` when the bytes are not a frame, or hold text that is not
  *  UTF-8. */
 export function pjsonCanonicalize(data: Uint8Array): Uint8Array {
-  return guarded(() => canonical(decode(input(data)), 0, true));
+  return guarded(() => withText(true, () => canonical(decode(input(data)), 0, true)));
 }
 /** C++ `psio::pjson_lazy`: any well-formed frame. The one non-canonical
  *  path (what a quick JSON transcode writes); `encode` writes a value in the

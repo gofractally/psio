@@ -398,7 +398,7 @@ pub const K_MAX_VALIDATION_DEPTH: usize = 64;
 /// written in is refused here and accepted by [`lazy::validate`].
 pub fn validate(bytes: &[u8]) -> PjsonResult<()> {
     lazy::validate(bytes)?;
-    if crate::pjson_canonical::normalized_of_valid(bytes)? != bytes {
+    if crate::pjson_canonical::normalized_of_valid(bytes, true)? != bytes {
         return Err(PjsonError("pjson: a well-formed frame that is not the canonical encoding of its value"));
     }
     Ok(())
@@ -789,13 +789,15 @@ fn validate_value_depth(buf: &[u8], size: usize, depth: usize) -> PjsonResult<()
 /// Encodes `value` canonically: each number in the type its variant names
 /// (an integer in the fewest bytes, a float as its bits), a string given in
 /// escape form as its text, and an array — which has no element type — in
-/// the form its values give it. Panics when the value
-/// has no pjson form (a string that is not UTF-8), as every fast write does
-/// for what its format cannot represent.
+/// the form its values give it. The fast write: text is not checked, and a
+/// string that is not UTF-8 gives a frame `validate` refuses ([`try_encode`]
+/// is the validated write).
 pub fn encode(value: &Value<'_>, out: &mut Vec<u8>) -> usize {
     let mut raw = Vec::new();
     encode_raw(value, &mut raw);
-    let canonical = crate::pjson_canonical::normalized_of_valid(&raw).expect("pjson: the value has no pjson form");
+    // The fast write: the value is the caller's own and is not held to
+    // anything (text that is not UTF-8 is written as it is).
+    let canonical = crate::pjson_canonical::normalized_of_valid(&raw, false).expect("pjson: a well-formed frame");
     out.extend_from_slice(&canonical);
     canonical.len()
 }
@@ -1338,7 +1340,30 @@ pub fn to_pjson<T: Pjson>(value: &T) -> Vec<u8> {
     if T::PJSON_DIRECT {
         return out;
     }
-    crate::pjson_canonical::normalized_of_valid(&out).expect("pjson: the value has no pjson form")
+    crate::pjson_canonical::normalized_of_valid(&out, false).expect("pjson: a well-formed frame")
+}
+
+/// The VALIDATED write: [`to_pjson`], refused when the validating read of
+/// those bytes would refuse them (`validate`). `to_pjson` is the fast
+/// write: one's own value is not held to anything, and it always gives a
+/// well-formed frame. (For the types this crate encodes today the two
+/// differ only through a dynamic `Value` holding text that is not UTF-8: a
+/// Rust `String` is UTF-8.)
+pub fn try_to_pjson<T: Pjson>(value: &T) -> PjsonResult<Vec<u8>> {
+    let bytes = to_pjson(value);
+    validate(&bytes)?;
+    Ok(bytes)
+}
+
+/// The validated write of a dynamic value: [`encode`], refused when the
+/// validating read of those bytes would refuse them (a string or a member
+/// name that is not UTF-8). `out` is unchanged on an error.
+pub fn try_encode(value: &Value<'_>, out: &mut Vec<u8>) -> PjsonResult<usize> {
+    let mut bytes = Vec::new();
+    encode(value, &mut bytes);
+    validate(&bytes)?;
+    out.extend_from_slice(&bytes);
+    Ok(bytes.len())
 }
 
 /// One-shot decode entry point: the VALIDATING read. The bytes are held
@@ -1905,6 +1930,12 @@ pub mod format {
 impl<T: Pjson> crate::Encode<format::Pjson> for T {
     fn encode_into(&self, out: &mut Vec<u8>) -> Result<usize, PjsonError> {
         let bytes = to_pjson(self);
+        out.extend_from_slice(&bytes);
+        Ok(bytes.len())
+    }
+    const HAS_VALIDATED_WRITE: bool = true;
+    fn encode_validated_into(&self, out: &mut Vec<u8>) -> Result<usize, PjsonError> {
+        let bytes = try_to_pjson(self)?;
         out.extend_from_slice(&bytes);
         Ok(bytes.len())
     }

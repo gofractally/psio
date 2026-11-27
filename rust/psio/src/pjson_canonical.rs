@@ -502,34 +502,57 @@ pub fn unescaped(p: &[u8]) -> Option<Vec<u8>> {
 
 // ── A well-formed frame -> its canonical frame ───────────────────────────
 
+/// How a frame is written again.
+#[derive(Clone, Copy)]
+struct Mode {
+    /// Choose numbers and typed arrays from the data (a document without
+    /// types); else keep every construct in its type.
+    anonymous: bool,
+    /// Hold strings and member names to UTF-8. A validating read and the
+    /// pass over an outside document do; a WRITE of one's own value does
+    /// not (the fast write: gofractally/psio#14, #17) — text that is not
+    /// UTF-8 is then written as it is, and the validator refuses the frame.
+    check_text: bool,
+}
+
 const NAME: PjsonError = PjsonError("pjson: a member name is not UTF-8: it has no canonical form");
 
 fn is_number(v: &View<'_>) -> bool {
     matches!(v.type_code(), tag::UINT_INLINE | tag::NINT_INLINE | tag::UINT | tag::NEGINT | tag::DECIMAL | tag::IEEE_FLOAT)
 }
 
-fn value(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+fn value(v: View<'_>, out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
     let raw = v.raw();
     match v.type_code() {
-        _ if is_number(&v) => number(raw, out, anonymous),
+        _ if is_number(&v) => number(raw, out, mode),
         tag::STRING => {
-            out.push(tag::STRING << 4);
             if v.low_nibble() == 1 {
-                let text = unescaped(&raw[1..]).ok_or(PjsonError(
-                    "pjson: a string is not text (its escapes do not name UTF-8): it has no canonical form",
-                ))?;
-                out.extend_from_slice(&text);
+                match unescaped(&raw[1..]) {
+                    Some(text) => {
+                        out.push(tag::STRING << 4);
+                        out.extend_from_slice(&text);
+                    }
+                    None if mode.check_text => {
+                        return Err(PjsonError(
+                            "pjson: a string is not text (its escapes do not name UTF-8): it has no canonical form",
+                        ))
+                    }
+                    None => out.extend_from_slice(raw), // written as given
+                }
             } else {
-                std::str::from_utf8(&raw[1..])
-                    .map_err(|_| PjsonError("pjson: a string is not UTF-8: it has no canonical form"))?;
+                if mode.check_text {
+                    std::str::from_utf8(&raw[1..])
+                        .map_err(|_| PjsonError("pjson: a string is not UTF-8: it has no canonical form"))?;
+                }
+                out.push(tag::STRING << 4);
                 out.extend_from_slice(&raw[1..]);
             }
             Ok(())
         }
-        tag::ARRAY if v.is_typed_array() => typed_array(v, out, anonymous),
-        tag::ARRAY => array(v, out, anonymous),
-        tag::OBJECT if v.is_row_array() => rows_of_row_array(v, out, anonymous),
-        tag::OBJECT => object(v, out, anonymous),
+        tag::ARRAY if v.is_typed_array() => typed_array(v, out, mode),
+        tag::ARRAY => array(v, out, mode),
+        tag::OBJECT if v.is_row_array() => rows_of_row_array(v, out, mode),
+        tag::OBJECT => object(v, out, mode),
         _ => {
             out.extend_from_slice(raw); // null, bool, bytes: one form
             Ok(())
@@ -540,8 +563,8 @@ fn value(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
 /// A scalar number. Typed mode keeps its type: an integer in the fewest
 /// bytes, a decimal without trailing zeros (an integer when it is one), a
 /// float as its bits (the notation hint cleared, a NaN the quiet one).
-fn number(raw: &[u8], out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
-    if anonymous {
+fn number(raw: &[u8], out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
+    if mode.anonymous {
         return push_canonical_number(out, &frame_number(raw)?);
     }
     if raw[0] >> 4 == tag::IEEE_FLOAT {
@@ -592,7 +615,7 @@ fn generic_numbers(out: &mut Vec<u8>, numbers: &[Number]) -> PjsonResult<()> {
     Ok(())
 }
 
-fn typed_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+fn typed_array(v: View<'_>, out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
     let code = v.typed_array_code()?;
     let w = typed_array_elem_size(code);
     let bytes = v.typed_array_bytes()?;
@@ -601,7 +624,7 @@ fn typed_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<(
         return Ok(());
     }
     // A typed array has its element type: typed mode keeps it.
-    if !anonymous {
+    if !mode.anonymous {
         out.extend_from_slice(v.raw());
         return Ok(());
     }
@@ -618,7 +641,7 @@ fn push_key_checked(key: &[u8]) -> PjsonResult<()> {
     std::str::from_utf8(key).map(drop).map_err(|_| NAME)
 }
 
-fn object(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+fn object(v: View<'_>, out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
     let n = v.object_len()?;
     out.push(tag::OBJECT << 4);
     let width_at = out.len();
@@ -627,7 +650,9 @@ fn object(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let mut slots: Vec<(u32, u8, u8)> = Vec::with_capacity(n);
     for i in 0..n {
         let (key, field) = v.object_at(i)?;
-        push_key_checked(key)?;
+        if mode.check_text {
+            push_key_checked(key)?;
+        }
         slots.push(((out.len() - data) as u32, key.len().min(0xFF) as u8, key_hash8(key)));
         if key.len() >= 0xFF {
             let excess = (key.len() - 0xFF) as u64;
@@ -636,7 +661,7 @@ fn object(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
             crate::pjson::write_varuint_at(out, at, excess);
         }
         out.extend_from_slice(key);
-        value(field, out, anonymous)?;
+        value(field, out, mode)?;
     }
     let code = width_code_for(out.len() - data);
     out[width_at] = code;
@@ -656,11 +681,13 @@ fn rows<'a>(
     names: &[&[u8]],
     n: usize,
     record: &dyn Fn(usize) -> PjsonResult<Vec<View<'a>>>,
-    anonymous: bool,
+    mode: Mode,
 ) -> PjsonResult<()> {
     let k = names.len();
-    for name in names {
-        push_key_checked(name)?;
+    if mode.check_text {
+        for name in names {
+            push_key_checked(name)?;
+        }
     }
     let mut slot_code = 0u8;
     loop {
@@ -688,7 +715,7 @@ fn rows<'a>(
             let mut fields: Vec<u32> = Vec::with_capacity(k);
             for field in record(i)? {
                 fields.push((out.len() - start_of_record) as u32);
-                value(field, out, anonymous)?;
+                value(field, out, mode)?;
             }
             if width_code_for(out.len() - start_of_record) > slot_code {
                 refit = true;
@@ -713,7 +740,7 @@ fn rows<'a>(
     }
 }
 
-fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
     let table = v.rows()?;
     if table.is_empty() {
         out.extend_from_slice(&EMPTY_ARRAY);
@@ -723,7 +750,7 @@ fn rows_of_row_array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonRe
     rows(out, &names, table.len(), &|i| {
         let row = table.get(i)?;
         (0..row.len()).map(|j| row.field(j).map(|f| f.1)).collect()
-    }, anonymous)
+    }, mode)
 }
 
 /// The member names of an element, when it is a single object.
@@ -735,7 +762,7 @@ fn shape<'a>(e: &View<'a>) -> PjsonResult<Option<Vec<&'a [u8]>>> {
     (0..k).map(|j| e.object_at(j).map(|f| f.0)).collect::<PjsonResult<Vec<_>>>().map(Some)
 }
 
-fn array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
+fn array(v: View<'_>, out: &mut Vec<u8>, mode: Mode) -> PjsonResult<()> {
     let n = v.array_len()?;
     if n == 0 {
         out.extend_from_slice(&EMPTY_ARRAY);
@@ -762,7 +789,7 @@ fn array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
             return rows(out, &names, n, &|i| {
                 let e = &elements[i];
                 (0..names.len()).map(|j| e.object_at(j).map(|f| f.1)).collect()
-            }, anonymous);
+            }, mode);
         }
     }
     out.push(tag::ARRAY << 4);
@@ -772,7 +799,7 @@ fn array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
     let mut offsets: Vec<u32> = Vec::with_capacity(n);
     for e in elements {
         offsets.push((out.len() - data) as u32);
-        value(e, out, anonymous)?;
+        value(e, out, mode)?;
     }
     let code = width_code_for(out.len() - data);
     out[width_at] = code;
@@ -789,14 +816,15 @@ fn array(v: View<'_>, out: &mut Vec<u8>, anonymous: bool) -> PjsonResult<()> {
 /// canonical form: a string or a member name that is not UTF-8.
 pub fn canonical_of_valid(bytes: &[u8]) -> PjsonResult<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len());
-    value(View::new(bytes), &mut out, true)?;
+    value(View::new(bytes), &mut out, Mode { anonymous: true, check_text: true })?;
     Ok(out)
 }
 
-/// `bytes` in the same types, each in its one encoding: the frame itself
-/// exactly when it is canonical.
-pub fn normalized_of_valid(bytes: &[u8]) -> PjsonResult<Vec<u8>> {
+/// `bytes` in the same types, each in its one encoding: with `check_text`,
+/// the frame itself exactly when it is canonical. Without it (the fast
+/// write of one's own value) text is copied as it is.
+pub fn normalized_of_valid(bytes: &[u8], check_text: bool) -> PjsonResult<Vec<u8>> {
     let mut out = Vec::with_capacity(bytes.len());
-    value(View::new(bytes), &mut out, false)?;
+    value(View::new(bytes), &mut out, Mode { anonymous: false, check_text })?;
     Ok(out)
 }

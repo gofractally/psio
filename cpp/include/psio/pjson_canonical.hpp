@@ -57,6 +57,12 @@ namespace psio {
          using kind = view::kind;
          std::vector<std::uint8_t>&    out;
          bool                          anonymous; // choose numbers and typed arrays from the data
+         // Hold strings and member names to UTF-8. A validating read and
+         // the pass over an outside document do; a WRITE of one's own value
+         // does not (the fast write: gofractally/psio#14, #17) — text that
+         // is not UTF-8 is then written as it is, and the validator refuses
+         // the frame.
+         bool                          check_text;
          std::vector<std::uint32_t>    offsets;   // one stack for every container
          std::vector<std::string_view> names;
          std::vector<number_value>     numbers;
@@ -80,15 +86,21 @@ namespace psio {
                   return number(raw);
                case kind::string:
                {
+                  const std::size_t start = out.size();
                   out.push_back(static_cast<std::uint8_t>(t_string << 4));
                   if ((raw[0] & 0x0F) == string_flag_escape_form)
                   {
                      if (!append_unescaped(out, raw.data() + 1, raw.size() - 1))
-                        no_form("pjson: a string is not text (its escapes do not name UTF-8): it has no canonical form");
+                     {
+                        if (check_text)
+                           no_form("pjson: a string is not text (its escapes do not name UTF-8): it has no canonical form");
+                        out.resize(start);   // written as given
+                        out.insert(out.end(), raw.begin(), raw.end());
+                     }
                   }
                   else
                   {
-                     if (!is_utf8(raw.data() + 1, raw.size() - 1))
+                     if (check_text && !is_utf8(raw.data() + 1, raw.size() - 1))
                         no_form("pjson: a string is not UTF-8: it has no canonical form");
                      out.insert(out.end(), raw.begin() + 1, raw.end());
                   }
@@ -185,7 +197,7 @@ namespace psio {
             const std::size_t data = out.size(), base = offsets.size();
             std::size_t       n    = 0;
             v.for_each_field([&](std::string_view key, view field) {
-               if (!is_utf8(reinterpret_cast<const std::uint8_t*>(key.data()), key.size()))
+               if (check_text && !is_utf8(reinterpret_cast<const std::uint8_t*>(key.data()), key.size()))
                   no_form("pjson: a member name is not UTF-8: it has no canonical form");
                offsets.push_back(static_cast<std::uint32_t>(out.size() - data));
                offsets.push_back(static_cast<std::uint32_t>(key.size() < 0xFF ? key.size() : 0xFF) |
@@ -237,7 +249,7 @@ namespace psio {
                for (std::size_t j = 0; j < k; ++j)
                {
                   const auto key = names[name_base + j];
-                  if (!is_utf8(reinterpret_cast<const std::uint8_t*>(key.data()), key.size()))
+                  if (check_text && !is_utf8(reinterpret_cast<const std::uint8_t*>(key.data()), key.size()))
                      no_form("pjson: a member name is not UTF-8: it has no canonical form");
                   out.insert(out.end(), key.begin(), key.end());
                }
@@ -345,14 +357,15 @@ namespace psio {
       // `bytes` must be a valid frame (pjson_lazy::validate).
       inline void append_canonical(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> bytes)
       {
-         canonicalizer c{out, true, {}, {}, {}};
+         canonicalizer c{out, true, true, {}, {}, {}};
          c.value(dynamic_view<pjson_format>{bytes.data(), bytes.size()});
       }
       // `bytes` in the same types, each in its one encoding: the frame
       // itself exactly when it is canonical.
-      inline void append_normalized(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> bytes)
+      inline void append_normalized(std::vector<std::uint8_t>& out, std::span<const std::uint8_t> bytes,
+                                    bool check_text)
       {
-         canonicalizer c{out, false, {}, {}, {}};
+         canonicalizer c{out, false, check_text, {}, {}, {}};
          c.value(dynamic_view<pjson_format>{bytes.data(), bytes.size()});
       }
 

@@ -238,6 +238,46 @@ fn every_typed_encoding_is_canonical() {
     }
 }
 
+// The two writes (gofractally/psio#14, #17): the fast write holds one's own
+// value to nothing; the validated write refuses exactly when the validating
+// read of the fast-written bytes refuses.
+#[test]
+fn the_validated_write_refuses_what_the_validating_read_of_the_fast_bytes_refuses() {
+    let mut rng = Rng(3);
+    let (mut accepted, mut refused) = (0, 0);
+    for _ in 0..4000 {
+        let text: Vec<u8> = (0..rng.below(8))
+            .map(|_| if rng.below(4) == 0 { rng.next() as u8 } else { b'a' + rng.below(26) as u8 })
+            .collect();
+        let name: Vec<u8> = if rng.below(5) == 0 { vec![rng.next() as u8, b'k'] } else { b"name".to_vec() };
+        let flag = (rng.below(4) == 0) as u8;
+        let value = Value::Object(vec![
+            (&name[..], Value::Str(&text, flag)),
+            (b"list", Value::Array(vec![Value::Str(&text, 0), Value::UInt(5), Value::Float { width_log2: 3, bits: 0.5f64.to_bits() as u128 }])),
+            (b"numbers", Value::Array(vec![Value::UInt(1), Value::UInt(2), Value::UInt(300)])),
+        ]);
+        let mut fast = Vec::new();
+        pjson::encode(&value, &mut fast); // never refuses
+        assert!(pjson::lazy::validate(&fast).is_ok()); // always a well-formed frame
+        let reads = pjson::validate(&fast).is_ok();
+        let mut out = vec![0x7f];
+        let checked = pjson::try_encode(&value, &mut out);
+        assert_eq!(checked.is_ok(), reads);
+        if reads {
+            assert_eq!(out[1..], fast[..]);
+            accepted += 1;
+        } else {
+            assert_eq!(out, [0x7f]); // unchanged
+            refused += 1;
+        }
+    }
+    assert!(accepted > 500 && refused > 500, "{accepted} {refused}");
+    // A typed value: a Rust String is UTF-8, so the two writes agree.
+    let r = record();
+    assert_eq!(pjson::try_to_pjson(&r).unwrap(), to_pjson(&r));
+    assert_eq!(psio::try_encode::<psio::pjson::format::Pjson, Record>(&r).unwrap(), to_pjson(&r));
+}
+
 #[test]
 fn a_well_formed_frame_that_is_not_the_canonical_one() {
     // Not the one encoding of its value in its type; then what the

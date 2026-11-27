@@ -2408,8 +2408,21 @@ namespace psio {
          // value has no element type, so its form is its values'.)
          std::vector<std::uint8_t> made;
          made.reserve(out.size());
-         pjson_detail::append_normalized(made, out);
+         // The fast write: the value is the caller's own and is not held
+         // to anything (text that is not UTF-8 is written as it is).
+         pjson_detail::append_normalized(made, out, false);
          return made;
+      }
+
+      // The validated write: `encode`, refused (std::runtime_error) when the
+      // validating read of those bytes would refuse them — a string or a
+      // member name that is not UTF-8.
+      static std::vector<std::uint8_t> encode_checked(const pjson_value& v)
+      {
+         auto bytes = encode(v);
+         if (!validate(bytes))
+            throw std::runtime_error("pjson: the value does not validate (text that is not UTF-8)");
+         return bytes;
       }
 
       static std::size_t encoded_size(const pjson_value& v) { return encode(v).size(); }
@@ -2424,7 +2437,7 @@ namespace psio {
 #endif
             std::vector<std::uint8_t> out;
             out.reserve(bytes.size());
-            pjson_detail::append_normalized(out, bytes);
+            pjson_detail::append_normalized(out, bytes, true);
             return out.size() == bytes.size() && std::memcmp(out.data(), bytes.data(), out.size()) == 0;
 #if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
          }

@@ -139,7 +139,7 @@ export {
   isCompressedName,
 } from './compress-name.js';
 
-export { PJSON_WIRE_REVISION, pjsonEncode, pjsonDecode, pjsonValidate, pjsonCanonicalize, pjsonLazy, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
+export { PJSON_WIRE_REVISION, pjsonEncode, pjsonEncodeChecked, pjsonDecode, pjsonValidate, pjsonCanonicalize, pjsonLazy, PjsonError, PjsonDecimal, PjsonFloat, PjsonString,
          PjsonTypedArray, PjsonRows, PjsonObject, type PjsonValue } from './pjson.js';
 
 // Formats as values: code generic over the format (psio#18).

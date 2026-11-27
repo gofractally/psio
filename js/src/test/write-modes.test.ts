@@ -7,6 +7,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   PsszError, boundedList, boundedUtf8, custom, defineInterface, field, list, method, record, u32,
+  pjsonEncode, pjsonEncodeChecked, pjsonLazy, pjsonValidate, PjsonError, PjsonObject, PjsonString,
 } from '../index.js';
 
 const Even = custom('Even', u32, { check: (v: number) => (v % 2 === 0 ? undefined : 'Even: odd value') });
@@ -86,6 +87,30 @@ test('write modes: the validated write refuses exactly when the validating read 
     if (checked) ++valid; else ++invalid;
   }
   assert.ok(valid > 5 && invalid > 1000, `${valid} valid, ${invalid} invalid`);
+});
+
+// pjson (gofractally/psio#17): its values are dynamic, so the property is
+// drawn over values whose text may not be UTF-8.
+test('write modes: pjson — the validated write refuses exactly when the validating read of the fast bytes refuses', () => {
+  const r = new Rng(7n);
+  const bytes = (n: number) => Uint8Array.from({ length: n }, () => Number(r.next() % 4n) ? 0x61 + Number(r.next() % 26n) : Number(r.next() % 256n));
+  let valid = 0, invalid = 0;
+  for (let i = 0; i < 3000; ++i) {
+    const value = new PjsonObject([
+      [Number(r.next() % 5n) ? 'name' : new PjsonString(bytes(3)), new PjsonString(bytes(Number(r.next() % 6n)), Number(r.next() % 4n) === 0)],
+      ['list', [new PjsonString(bytes(2)), 'text', 5n, 0.5]],
+      ['numbers', [1n, 2n, 300n]],
+    ]);
+    const fast = pjsonEncode(value);                       // never refuses
+    assert.equal(pjsonLazy.validate(fast), true);          // always a well-formed frame
+    const reads = pjsonValidate(fast);
+    let checked: Uint8Array | undefined;
+    try { checked = pjsonEncodeChecked(value); } catch (e) { assert.ok(e instanceof PjsonError, String(e)); }
+    assert.equal(checked !== undefined, reads);
+    if (checked) assert.deepEqual(checked, fast);
+    if (reads) ++valid; else ++invalid;
+  }
+  assert.ok(valid > 300 && invalid > 300, `${valid} valid, ${invalid} invalid`);
 });
 
 test('write modes: the fast write still refuses what the format cannot represent', () => {

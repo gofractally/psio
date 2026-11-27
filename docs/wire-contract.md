@@ -63,6 +63,12 @@ array. So a typed list and the same numbers from untyped JSON may be
 different bytes that read back as the same values; byte equality holds
 within a type and within untyped documents.
 
+The ordinary pjson write is the fast write: a string or member name is
+copied, not checked for UTF-8, and text that is not UTF-8 gives a
+well-formed frame the validator refuses. The validated write
+(`to_pjson_checked`, Rust `try_to_pjson`, JS `pjsonEncodeChecked`) refuses
+exactly when the validating read of those bytes would.
+
 `psio::pjson_lazy` (Rust `pjson::lazy`, JS `pjsonLazy`) reads any
 well-formed frame. Its one writer is the quick JSON transcode
 (`pjson_json::from_json_lazy`), which copies what it parses and is **not**

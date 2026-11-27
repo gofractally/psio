@@ -1753,7 +1753,7 @@ read under its own name.
 | integer of any width | `uint_inline` (0..15), `nint_inline` (−15..−1), else `uint` / `negint` with the fewest bytes. A `u16` 5 and a `u64` 5 are both `25` | one look at the value |
 | `f32` | `ieee_float` binary32: its bits | none |
 | `f64` | `ieee_float` binary64: its bits | none |
-| string | `raw_text` (flag 0), valid UTF-8 (§15.3) | a UTF-8 check |
+| string | `raw_text` (flag 0): the string's bytes (§15.3) | one copy |
 | bytes | tag `A0` | one copy |
 | list of an integer or float type | typed array (§5.1.1) of the **declared** element code, in one copy: a `vector<u32>` is `u32` elements whatever they hold | one copy, no scan |
 | list of records | row array (§5.2.1), smallest `slot_w` and `recoff_w` | |
@@ -1825,10 +1825,26 @@ an infinity has no JSON text (§7.3).
 ### 15.3 Strings, names and bytes
 
 * A string is `raw_text` (flag 0) and valid UTF-8. Text that is not UTF-8
-  has no pjson form: a typed encoder refuses it, and a well-formed frame
-  that holds it (a lazy frame, §4.9) has no canonical form.
+  has no canonical form.
 * A member name is raw UTF-8 text (§4.9).
 * Bytes are tag `A0`; the low nibble is 0.
+
+**Who checks.** The two writes of PSIO apply (annotations 7.2, "Reading
+and writing: the two modes"):
+
+* The ordinary write is the **fast write**: the value is the writer's own
+  and is not held to anything. A string and a member name are copied, not
+  checked. It always gives a well-formed frame; if the text was not UTF-8,
+  it is a frame the validator refuses. That is the caller's
+  responsibility, as with pssz.
+* The **validated write** (`to_pjson_checked` / `encode_pjson_checked`,
+  `pjson::encode_checked`; Rust `try_to_pjson`, `pjson::try_encode`; JS
+  `pjsonEncodeChecked`) refuses exactly when the validating read of the
+  fast-written bytes would.
+* The **validating read** (`validate`, `decode`, the typed `from_pjson`)
+  checks UTF-8: outside bytes are not one's own data. So do the JSON
+  transcodes, which read outside text: the JSON grammar, UTF-8, and that
+  every escape names text.
 
 ### 15.4 Objects and widths
 

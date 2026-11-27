@@ -206,7 +206,16 @@ namespace psio {
             // The wire integer is up to 128 bits; the member is F. A value
             // F cannot hold is an error, not a wrapped one (and a uint64_t
             // above 2^63 is read as what it is).
-            // Any form that carries an integer is one: 5 is 5.
+            // An integer frame, read directly.
+            if (v.is_integer())
+            {
+               const __int128 x = v.as_int128();
+               if (x < static_cast<__int128>(std::numeric_limits<F>::min()) ||
+                   x > static_cast<__int128>(std::numeric_limits<F>::max()))
+                  throw std::out_of_range("pjson: an integer does not fit the member's type");
+               return static_cast<F>(x);
+            }
+            // Any other form that carries an integer is one too.
             const auto        n = v.number();
             unsigned __int128 whole;
             if (n.kind != pjson_detail::number_kind::finite || !pjson_detail::as_integer(n.d, whole))
@@ -588,12 +597,7 @@ namespace psio {
          }
          else if constexpr (std::is_same_v<F, std::string> ||
                             std::is_same_v<F, std::string_view>)
-         {
-            const std::string_view text(v);
-            if (!is_utf8(reinterpret_cast<const std::uint8_t*>(text.data()), text.size()))
-               throw std::runtime_error("pjson: a string is not UTF-8: it has no pjson form");
-            return encode_string_at(dst, pos, text);
-         }
+            return encode_string_at(dst, pos, std::string_view(v));
          else if constexpr (typed_is_optional_<F>::value)
          {
             if (!v.has_value())
@@ -971,6 +975,39 @@ namespace psio {
       std::vector<std::uint8_t> out;
       to_pjson(t, out);
       return out;
+   }
+
+   // ── The two writes (docs/annotations.md "Reading and writing: the two
+   // modes"; gofractally/psio#14, #17) ──────────────────────────────────────
+   //
+   // `from_struct(t)` / `to_pjson(t, out)` are the FAST write: the value is
+   // the caller's own and is not held to anything — a string is copied, not
+   // checked for UTF-8. What it writes is always a well-formed frame; a
+   // string that is not UTF-8 gives one the validating read refuses.
+   //
+   // The VALIDATED write refuses exactly when the validating read of the
+   // fast-written bytes would (`psio::pjson::validate`). (When pjson joins
+   // the helper families these are the family's `encode_F_checked` /
+   // `to_F_checked`.)
+
+   // Appends the encoding of `t` to `out`, or returns false and leaves `out`
+   // as it was.
+   template <typename T>
+   [[nodiscard]] inline bool encode_pjson_checked(const T& t, std::vector<std::uint8_t>& out)
+   {
+      const auto bytes = from_struct(t);
+      if (!pjson::validate(bytes)) return false;
+      out.insert(out.end(), bytes.begin(), bytes.end());
+      return true;
+   }
+   // The encoding of `t`; std::runtime_error when it does not validate.
+   template <typename T>
+   inline std::vector<std::uint8_t> to_pjson_checked(const T& t)
+   {
+      auto bytes = from_struct(t);
+      if (!pjson::validate(bytes))
+         throw std::runtime_error("pjson: the value does not validate (a string that is not UTF-8)");
+      return bytes;
    }
 
 }  // namespace psio
